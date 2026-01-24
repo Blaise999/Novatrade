@@ -279,14 +279,16 @@ async function handleWithdraw(user: any, body: any) {
   }
   
   // Verify OTP if provided
-  if (otp) {
-    const otpResult = verifyOTPCode(user.email, otp, 'withdrawal');
-    if (!otpResult.success) {
-      return NextResponse.json(
-        { success: false, error: otpResult.error },
-        { status: 400 }
-      );
-    }
+if (otp) {
+  const otpResult = await verifyOTPCode(user.email, otp, 'withdrawal');
+
+  if (!otpResult.success) {
+    return NextResponse.json(
+      { success: false, error: otpResult.error ?? "Invalid OTP" },
+      { status: 400 }
+    );
+  }
+
   } else {
     // Send OTP for verification
     await sendOTPEmail(user.email, user.name, 'withdrawal');

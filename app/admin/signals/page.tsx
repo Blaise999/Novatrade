@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
   Signal,
   Clock,
@@ -11,9 +11,7 @@ import {
   ArrowDown,
   Copy,
   CheckCircle,
-  AlertCircle,
   Timer,
-  MessageCircle,
   TrendingUp
 } from 'lucide-react';
 import { useAdminSessionStore } from '@/lib/admin-store';
@@ -36,35 +34,45 @@ export default function LiveSignalsPage() {
   const getCurrentSignal = (): TradeSignal | null => {
     if (!activeSession) return null;
     const now = currentTime.getTime();
-    return activeSession.signals.find(signal => {
-      const start = new Date(signal.startTime).getTime();
-      const end = new Date(signal.endTime).getTime();
-      return now >= start && now < end;
-    }) || null;
+    return (
+      activeSession.signals.find((signal) => {
+        const start = new Date(signal.startTime).getTime();
+        const end = new Date(signal.endTime).getTime();
+        return now >= start && now < end;
+      }) || null
+    );
   };
 
   // Get next signal
   const getNextSignal = (): TradeSignal | null => {
     if (!activeSession) return null;
     const now = currentTime.getTime();
-    return activeSession.signals.find(signal => {
-      const start = new Date(signal.startTime).getTime();
-      return start > now;
-    }) || null;
+    return (
+      activeSession.signals.find((signal) => {
+        const start = new Date(signal.startTime).getTime();
+        return start > now;
+      }) || null
+    );
   };
 
   // Get time until next signal
   const getTimeUntilNext = (): number => {
     const nextSignal = getNextSignal();
     if (!nextSignal) return 0;
-    return Math.max(0, (new Date(nextSignal.startTime).getTime() - currentTime.getTime()) / 1000);
+    return Math.max(
+      0,
+      (new Date(nextSignal.startTime).getTime() - currentTime.getTime()) / 1000
+    );
   };
 
   // Get remaining time in current signal
   const getRemainingTime = (): number => {
     const currentSignal = getCurrentSignal();
     if (!currentSignal) return 0;
-    return Math.max(0, (new Date(currentSignal.endTime).getTime() - currentTime.getTime()) / 1000);
+    return Math.max(
+      0,
+      (new Date(currentSignal.endTime).getTime() - currentTime.getTime()) / 1000
+    );
   };
 
   // Format seconds to mm:ss
@@ -89,7 +97,7 @@ export default function LiveSignalsPage() {
   const timeUntilNext = getTimeUntilNext();
 
   // Get scheduled sessions
-  const scheduledSessions = sessions.filter(s => s.status === 'scheduled');
+  const scheduledSessions = sessions.filter((s) => s.status === 'scheduled');
 
   // Calculate session progress
   const getSessionProgress = (): number => {
@@ -101,9 +109,10 @@ export default function LiveSignalsPage() {
   };
 
   // Count completed signals
-  const completedSignals = activeSession?.signals.filter(s => {
-    return new Date(s.endTime).getTime() < currentTime.getTime();
-  }).length || 0;
+  const completedSignals =
+    activeSession?.signals.filter((s) => {
+      return new Date(s.endTime).getTime() < currentTime.getTime();
+    }).length || 0;
 
   return (
     <div className="space-y-6">
@@ -115,7 +124,11 @@ export default function LiveSignalsPage() {
         </div>
         <div className="text-right">
           <p className="text-3xl font-mono font-bold text-cream">
-            {currentTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+            {currentTime.toLocaleTimeString('en-US', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit'
+            })}
           </p>
         </div>
       </div>
@@ -143,14 +156,18 @@ export default function LiveSignalsPage() {
                   onClick={copyTelegramMessage}
                   className="flex items-center gap-2 px-3 py-1.5 bg-electric/10 text-electric rounded-lg hover:bg-electric/20 transition-all"
                 >
-                  {copiedMessage ? <CheckCircle className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  {copiedMessage ? (
+                    <CheckCircle className="w-4 h-4" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
                   Copy TG
                 </button>
               </div>
             </div>
             {/* Progress Bar */}
             <div className="mt-3 h-2 bg-white/10 rounded-full overflow-hidden">
-              <div 
+              <div
                 className="h-full bg-profit transition-all duration-300"
                 style={{ width: `${getSessionProgress()}%` }}
               />
@@ -160,13 +177,15 @@ export default function LiveSignalsPage() {
           {/* Main Signal Display */}
           <div className="grid lg:grid-cols-2 gap-6">
             {/* Current Signal */}
-            <div className={`p-8 rounded-3xl border-2 ${
-              currentSignal
-                ? currentSignal.direction === 'up'
-                  ? 'bg-profit/10 border-profit/40'
-                  : 'bg-loss/10 border-loss/40'
-                : 'bg-white/5 border-white/10'
-            }`}>
+            <div
+              className={`p-8 rounded-3xl border-2 ${
+                currentSignal
+                  ? currentSignal.direction === 'up'
+                    ? 'bg-profit/10 border-profit/40'
+                    : 'bg-loss/10 border-loss/40'
+                  : 'bg-white/5 border-white/10'
+              }`}
+            >
               {currentSignal ? (
                 <motion.div
                   key={currentSignal.id}
@@ -176,11 +195,11 @@ export default function LiveSignalsPage() {
                 >
                   <p className="text-sm text-slate-400 mb-2">CURRENT SIGNAL</p>
                   <div className="flex justify-center mb-4">
-                    <div className={`w-24 h-24 rounded-full flex items-center justify-center ${
-                      currentSignal.direction === 'up' 
-                        ? 'bg-profit/20' 
-                        : 'bg-loss/20'
-                    }`}>
+                    <div
+                      className={`w-24 h-24 rounded-full flex items-center justify-center ${
+                        currentSignal.direction === 'up' ? 'bg-profit/20' : 'bg-loss/20'
+                      }`}
+                    >
                       {currentSignal.direction === 'up' ? (
                         <ArrowUp className="w-12 h-12 text-profit" strokeWidth={3} />
                       ) : (
@@ -188,23 +207,21 @@ export default function LiveSignalsPage() {
                       )}
                     </div>
                   </div>
-                  <p className={`text-5xl font-bold mb-2 ${
-                    currentSignal.direction === 'up' ? 'text-profit' : 'text-loss'
-                  }`}>
+                  <p
+                    className={`text-5xl font-bold mb-2 ${
+                      currentSignal.direction === 'up' ? 'text-profit' : 'text-loss'
+                    }`}
+                  >
                     {currentSignal.direction.toUpperCase()}
                   </p>
-                  <p className="text-slate-400 mb-4">
-                    {activeSession.assetSymbol}
-                  </p>
-                  
+                  <p className="text-slate-400 mb-4">{activeSession.assetSymbol}</p>
+
                   {/* Countdown */}
                   <div className="flex items-center justify-center gap-2 text-2xl font-mono">
                     <Timer className="w-6 h-6 text-slate-400" />
-                    <span className={
-                      remainingTime <= 30 
-                        ? 'text-loss animate-pulse' 
-                        : 'text-cream'
-                    }>
+                    <span
+                      className={remainingTime <= 30 ? 'text-loss animate-pulse' : 'text-cream'}
+                    >
                       {formatSeconds(remainingTime)}
                     </span>
                   </div>
@@ -230,25 +247,23 @@ export default function LiveSignalsPage() {
                 <p className="text-sm text-slate-400 mb-4">NEXT SIGNAL</p>
                 {nextSignal ? (
                   <div className="flex items-center gap-4">
-                    <div className={`w-14 h-14 rounded-xl flex items-center justify-center ${
-                      nextSignal.direction === 'up'
-                        ? 'bg-profit/10'
-                        : 'bg-loss/10'
-                    }`}>
+                    <div
+                      className={`w-14 h-14 rounded-xl flex items-center justify-center ${
+                        nextSignal.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
+                      }`}
+                    >
                       {nextSignal.direction === 'up' ? (
-                        <ArrowUp className={`w-7 h-7 ${
-                          nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'
-                        }`} />
+                        <ArrowUp className="w-7 h-7 text-profit" />
                       ) : (
-                        <ArrowDown className={`w-7 h-7 ${
-                          nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'
-                        }`} />
+                        <ArrowDown className="w-7 h-7 text-loss" />
                       )}
                     </div>
                     <div>
-                      <p className={`text-2xl font-bold ${
-                        nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'
-                      }`}>
+                      <p
+                        className={`text-2xl font-bold ${
+                          nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'
+                        }`}
+                      >
                         {nextSignal.direction.toUpperCase()}
                       </p>
                       <p className="text-slate-400">
@@ -271,13 +286,13 @@ export default function LiveSignalsPage() {
               <div className="grid grid-cols-3 gap-4">
                 <div className="p-4 bg-white/5 rounded-xl text-center">
                   <p className="text-2xl font-bold text-profit">
-                    {activeSession.signals.filter(s => s.direction === 'up').length}
+                    {activeSession.signals.filter((s) => s.direction === 'up').length}
                   </p>
                   <p className="text-xs text-slate-500">UP Signals</p>
                 </div>
                 <div className="p-4 bg-white/5 rounded-xl text-center">
                   <p className="text-2xl font-bold text-loss">
-                    {activeSession.signals.filter(s => s.direction === 'down').length}
+                    {activeSession.signals.filter((s) => s.direction === 'down').length}
                   </p>
                   <p className="text-xs text-slate-500">DOWN Signals</p>
                 </div>
@@ -302,7 +317,7 @@ export default function LiveSignalsPage() {
                   const end = new Date(signal.endTime).getTime();
                   const isPast = now > end;
                   const isCurrent = now >= start && now < end;
-                  
+
                   return (
                     <div
                       key={signal.id}
@@ -316,30 +331,46 @@ export default function LiveSignalsPage() {
                           : 'bg-white/5 border-white/10'
                       }`}
                     >
-                      <p className="text-xs text-slate-400 mb-2">
-                        #{index + 1}
-                      </p>
+                      <p className="text-xs text-slate-400 mb-2">#{index + 1}</p>
                       <p className="text-xs text-slate-500 mb-1">
                         {formatTime(new Date(signal.startTime))}
                       </p>
                       <div className="flex justify-center">
                         {signal.direction === 'up' ? (
-                          <ArrowUp className={`w-6 h-6 ${
-                            isCurrent ? 'text-profit' : isPast ? 'text-slate-500' : 'text-profit/60'
-                          }`} />
+                          <ArrowUp
+                            className={`w-6 h-6 ${
+                              isCurrent
+                                ? 'text-profit'
+                                : isPast
+                                ? 'text-slate-500'
+                                : 'text-profit/60'
+                            }`}
+                          />
                         ) : (
-                          <ArrowDown className={`w-6 h-6 ${
-                            isCurrent ? 'text-loss' : isPast ? 'text-slate-500' : 'text-loss/60'
-                          }`} />
+                          <ArrowDown
+                            className={`w-6 h-6 ${
+                              isCurrent
+                                ? 'text-loss'
+                                : isPast
+                                ? 'text-slate-500'
+                                : 'text-loss/60'
+                            }`}
+                          />
                         )}
                       </div>
-                      <p className={`text-xs font-medium mt-1 ${
-                        isCurrent
-                          ? signal.direction === 'up' ? 'text-profit' : 'text-loss'
-                          : isPast
-                          ? 'text-slate-500'
-                          : signal.direction === 'up' ? 'text-profit/60' : 'text-loss/60'
-                      }`}>
+                      <p
+                        className={`text-xs font-medium mt-1 ${
+                          isCurrent
+                            ? signal.direction === 'up'
+                              ? 'text-profit'
+                              : 'text-loss'
+                            : isPast
+                            ? 'text-slate-500'
+                            : signal.direction === 'up'
+                            ? 'text-profit/60'
+                            : 'text-loss/60'
+                        }`}
+                      >
                         {signal.direction.toUpperCase()}
                       </p>
                       {isCurrent && (
@@ -388,7 +419,8 @@ export default function LiveSignalsPage() {
                     <div className="flex-1">
                       <p className="text-cream font-medium">{session.name}</p>
                       <p className="text-sm text-slate-400">
-                        {session.assetSymbol} • {session.signals.length} signals • {formatTime(new Date(session.startTime))}
+                        {session.assetSymbol} • {session.signals.length} signals •{' '}
+                        {formatTime(new Date(session.startTime))}
                       </p>
                     </div>
                     <button

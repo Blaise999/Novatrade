@@ -440,7 +440,8 @@ export default function CopyTradingPage() {
                 {/* Copy Button */}
                 <button
                   onClick={handleCopyTrader}
-                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || (user && parseFloat(copyAmount) > user.balance.available)}
+                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || !!(user && parseFloat(copyAmount) > user.balance.available)}
+
                   className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   <Copy className="w-5 h-5" />
