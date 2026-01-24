@@ -1,370 +1,612 @@
-// Database layer for NOVATrADE backend
-// Uses in-memory storage by default (replace with Prisma/Drizzle/etc for production)
+// Database Schema & Models for NOVATrADE Backend
+// Using JSON file storage for demo (use PostgreSQL/MongoDB in production)
 
-import { type Address } from 'viem';
+import crypto from 'crypto';
 
 // ============================================
-// TYPES
+// IN-MEMORY STORAGE (works in serverless)
+// ============================================
+
+const memoryStore: Record<string, unknown[]> = {
+  users: [],
+  trades: [],
+  investments: [],
+  transactions: [],
+  airdrops: [],
+  kyc: [],
+  sessions: [],
+  balances: [],
+};
+
+function readDb<T>(key: string): T[] {
+  return (memoryStore[key] || []) as T[];
+}
+
+function writeDb<T>(key: string, data: T[]): void {
+  memoryStore[key] = data;
+}
+
+// ============================================
+// TYPE DEFINITIONS
 // ============================================
 
 export interface User {
   id: string;
   email: string;
+  passwordHash: string;
   name: string;
-  walletAddress?: Address;
+  phone?: string;
+  role: 'user' | 'admin' | 'moderator';
+  status: 'active' | 'suspended' | 'pending';
   emailVerified: boolean;
+  phoneVerified: boolean;
+  twoFactorEnabled: boolean;
+  twoFactorSecret?: string;
   kycStatus: 'not_started' | 'pending' | 'approved' | 'rejected';
   kycLevel: 0 | 1 | 2 | 3;
-  createdAt: Date;
-  updatedAt: Date;
   referralCode: string;
   referredBy?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string;
+  lastLoginIp?: string;
 }
 
-export interface AirdropAllocation {
-  id: string;
-  oderId: string;
-  userId?: string;
-  walletAddress: Address;
-  amount: bigint;
-  bonusMultiplier: number;
-  eligibilityTiers: string[];
-  claimed: boolean;
-  claimedAt?: Date;
-  claimTxHash?: string;
-  createdAt: Date;
-}
-
-export interface Investment {
-  id: string;
-  oderId: string;
+export interface UserBalance {
   userId: string;
-  type: 'plan' | 'staking' | 'vault';
-  planId?: string;
-  amount: bigint;
   currency: string;
-  expectedReturn: bigint;
-  actualReturn?: bigint;
-  startDate: Date;
-  endDate: Date;
-  status: 'active' | 'completed' | 'cancelled';
-  txHash?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  available: number;
+  pending: number;
+  locked: number;
+  bonus: number;
+  totalDeposited: number;
+  totalWithdrawn: number;
+  totalProfit: number;
+  updatedAt: string;
 }
 
 export interface Trade {
   id: string;
   oderId: string;
-  oderId2: string;
-  userId: string;
-  asset: string;
   type: 'buy' | 'sell';
-  amount: bigint;
-  price: bigint;
-  total: bigint;
-  status: 'pending' | 'filled' | 'cancelled';
-  filledAt?: Date;
-  txHash?: string;
-  createdAt: Date;
+  direction: 'up' | 'down';
+  asset: string;
+  assetType: 'crypto' | 'forex' | 'stock' | 'commodity';
+  amount: number;
+  entryPrice: number;
+  exitPrice?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  leverage: number;
+  duration: number;
+  status: 'pending' | 'active' | 'won' | 'lost' | 'cancelled' | 'closed';
+  profit?: number;
+  payout: number;
+  openedAt: string;
+  closedAt?: string;
+  userId: string;
+  sessionId?: string;
+}
+
+export interface Investment {
+  id: string;
+  oderId: string;
+  planId: string;
+  planName: string;
+  userId: string;
+  amount: number;
+  currency: string;
+  roi: number;
+  duration: number;
+  expectedReturn: number;
+  actualReturn?: number;
+  status: 'active' | 'completed' | 'cancelled';
+  startDate: string;
+  endDate: string;
+  lastPayoutAt?: string;
+  createdAt: string;
 }
 
 export interface Transaction {
   id: string;
   oderId: string;
   userId: string;
-  type: 'deposit' | 'withdrawal' | 'transfer' | 'trade' | 'fee' | 'reward';
-  amount: bigint;
+  type: 'deposit' | 'withdrawal' | 'trade' | 'investment' | 'bonus' | 'referral' | 'airdrop' | 'fee';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  amount: number;
   currency: string;
-  status: 'pending' | 'completed' | 'failed';
+  fee: number;
+  netAmount: number;
+  method?: string;
   txHash?: string;
-  metadata?: Record<string, any>;
-  createdAt: Date;
+  fromAddress?: string;
+  toAddress?: string;
+  description: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  completedAt?: string;
 }
 
-export interface AdminSignal {
+export interface AirdropClaim {
   id: string;
-  sessionId: string;
+  oderId: string;
+  airdropId: string;
+  amount: number;
+  token: string;
+  feePaid: number;
+  feeToken: string;
+  txHash?: string;
+  merkleProof: string[];
+  wonLottery: boolean;
+  lotteryPrize: number;
+  status: 'pending' | 'claimed' | 'failed';
+  claimedAt?: string;
+  createdAt: string;
+}
+
+export interface KYCDocument {
+  id: string;
+  userId: string;
+  type: 'passport' | 'id_card' | 'drivers_license' | 'selfie' | 'proof_of_address' | 'bank_statement';
+  fileName: string;
+  filePath: string;
+  fileSize: number;
+  mimeType: string;
+  status: 'pending' | 'approved' | 'rejected';
+  rejectionReason?: string;
+  uploadedAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+}
+
+export interface KYCApplication {
+  id: string;
+  userId: string;
+  level: 1 | 2 | 3;
+  status: 'pending' | 'approved' | 'rejected' | 'additional_info_required';
+  firstName: string;
+  lastName: string;
+  dateOfBirth: string;
+  nationality: string;
+  country: string;
+  address: string;
+  city: string;
+  postalCode: string;
+  documents: KYCDocument[];
+  submittedAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  notes?: string;
+}
+
+export interface AdminSession {
+  id: string;
+  name: string;
+  description?: string;
   asset: string;
   direction: 'up' | 'down';
-  magnitude: number;
+  confidence: number;
   duration: number;
-  startTime: Date;
-  endTime: Date;
-  status: 'scheduled' | 'active' | 'completed';
+  status: 'scheduled' | 'active' | 'completed' | 'cancelled';
+  scheduledAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  targetPrice?: number;
   createdBy: string;
-  createdAt: Date;
+  createdAt: string;
 }
 
 // ============================================
-// IN-MEMORY STORAGE
+// USER DATABASE
 // ============================================
 
-class InMemoryDB {
-  private users: Map<string, User> = new Map();
-  private usersByEmail: Map<string, string> = new Map();
-  private usersByWallet: Map<string, string> = new Map();
-  
-  private airdropAllocations: Map<string, AirdropAllocation> = new Map();
-  private allocationsByWallet: Map<string, string> = new Map();
-  
-  private investments: Map<string, Investment> = new Map();
-  private trades: Map<string, Trade> = new Map();
-  private transactions: Map<string, Transaction> = new Map();
-  private adminSignals: Map<string, AdminSignal> = new Map();
-  
-  // ============================================
-  // USER OPERATIONS
-  // ============================================
-  
-  async createUser(data: Omit<User, 'id' | 'createdAt' | 'updatedAt' | 'referralCode'>): Promise<User> {
-    const id = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const referralCode = `NOVA${Math.random().toString(36).substr(2, 8).toUpperCase()}`;
-    
-    const user: User = {
-      ...data,
-      id,
-      referralCode,
-      createdAt: new Date(),
-      updatedAt: new Date()
+export const UserDb = {
+  getAll(): User[] {
+    return readDb<User>('users');
+  },
+
+  getById(id: string): User | undefined {
+    return this.getAll().find(u => u.id === id);
+  },
+
+  getByEmail(email: string): User | undefined {
+    return this.getAll().find(u => u.email.toLowerCase() === email.toLowerCase());
+  },
+
+  getByReferralCode(code: string): User | undefined {
+    return this.getAll().find(u => u.referralCode === code);
+  },
+
+  create(user: Omit<User, 'id' | 'createdAt' | 'updatedAt' | 'referralCode'>): User {
+    const users = this.getAll();
+    const newUser: User = {
+      ...user,
+      id: crypto.randomUUID(),
+      referralCode: crypto.randomBytes(4).toString('hex').toUpperCase(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
-    
-    this.users.set(id, user);
-    this.usersByEmail.set(data.email.toLowerCase(), id);
-    if (data.walletAddress) {
-      this.usersByWallet.set(data.walletAddress.toLowerCase(), id);
-    }
-    
-    return user;
-  }
-  
-  async getUserById(id: string): Promise<User | null> {
-    return this.users.get(id) || null;
-  }
-  
-  async getUserByEmail(email: string): Promise<User | null> {
-    const id = this.usersByEmail.get(email.toLowerCase());
-    return id ? this.users.get(id) || null : null;
-  }
-  
-  async getUserByWallet(wallet: Address): Promise<User | null> {
-    const id = this.usersByWallet.get(wallet.toLowerCase());
-    return id ? this.users.get(id) || null : null;
-  }
-  
-  async updateUser(id: string, data: Partial<User>): Promise<User | null> {
-    const user = this.users.get(id);
-    if (!user) return null;
-    
-    const updated = { ...user, ...data, updatedAt: new Date() };
-    this.users.set(id, updated);
-    
-    if (data.walletAddress) {
-      this.usersByWallet.set(data.walletAddress.toLowerCase(), id);
-    }
-    
-    return updated;
-  }
-  
-  // ============================================
-  // AIRDROP OPERATIONS
-  // ============================================
-  
-  async createAirdropAllocation(data: Omit<AirdropAllocation, 'id' | 'createdAt'>): Promise<AirdropAllocation> {
-    const id = `alloc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const allocation: AirdropAllocation = {
-      ...data,
-      id,
-      createdAt: new Date()
-    };
-    
-    this.airdropAllocations.set(id, allocation);
-    this.allocationsByWallet.set(data.walletAddress.toLowerCase(), id);
-    
-    return allocation;
-  }
-  
-  async getAirdropAllocation(wallet: Address): Promise<AirdropAllocation | null> {
-    const id = this.allocationsByWallet.get(wallet.toLowerCase());
-    return id ? this.airdropAllocations.get(id) || null : null;
-  }
-  
-  async markAirdropClaimed(wallet: Address, txHash: string): Promise<AirdropAllocation | null> {
-    const id = this.allocationsByWallet.get(wallet.toLowerCase());
-    if (!id) return null;
-    
-    const allocation = this.airdropAllocations.get(id);
-    if (!allocation) return null;
-    
-    const updated: AirdropAllocation = {
-      ...allocation,
-      claimed: true,
-      claimedAt: new Date(),
-      claimTxHash: txHash
-    };
-    
-    this.airdropAllocations.set(id, updated);
-    return updated;
-  }
-  
-  async getAllAirdropAllocations(): Promise<AirdropAllocation[]> {
-    return Array.from(this.airdropAllocations.values());
-  }
-  
-  async bulkCreateAllocations(allocations: Omit<AirdropAllocation, 'id' | 'createdAt'>[]): Promise<number> {
-    let created = 0;
-    for (const data of allocations) {
-      await this.createAirdropAllocation(data);
-      created++;
-    }
-    return created;
-  }
-  
-  // ============================================
-  // INVESTMENT OPERATIONS
-  // ============================================
-  
-  async createInvestment(data: Omit<Investment, 'id' | 'createdAt' | 'updatedAt'>): Promise<Investment> {
-    const id = `inv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const investment: Investment = {
-      ...data,
-      id,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    this.investments.set(id, investment);
-    return investment;
-  }
-  
-  async getUserInvestments(userId: string): Promise<Investment[]> {
-    return Array.from(this.investments.values())
-      .filter(inv => inv.userId === userId);
-  }
-  
-  async updateInvestment(id: string, data: Partial<Investment>): Promise<Investment | null> {
-    const investment = this.investments.get(id);
-    if (!investment) return null;
-    
-    const updated = { ...investment, ...data, updatedAt: new Date() };
-    this.investments.set(id, updated);
-    return updated;
-  }
-  
-  // ============================================
-  // TRADE OPERATIONS
-  // ============================================
-  
-  async createTrade(data: Omit<Trade, 'id' | 'createdAt'>): Promise<Trade> {
-    const id = `trade_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const trade: Trade = {
-      ...data,
-      id,
-      createdAt: new Date()
-    };
-    
-    this.trades.set(id, trade);
-    return trade;
-  }
-  
-  async getUserTrades(userId: string, limit: number = 50): Promise<Trade[]> {
-    return Array.from(this.trades.values())
-      .filter(t => t.userId === userId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .slice(0, limit);
-  }
-  
-  // ============================================
-  // TRANSACTION OPERATIONS
-  // ============================================
-  
-  async createTransaction(data: Omit<Transaction, 'id' | 'createdAt'>): Promise<Transaction> {
-    const id = `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const transaction: Transaction = {
-      ...data,
-      id,
-      createdAt: new Date()
-    };
-    
-    this.transactions.set(id, transaction);
-    return transaction;
-  }
-  
-  async getUserTransactions(userId: string, limit: number = 50): Promise<Transaction[]> {
-    return Array.from(this.transactions.values())
-      .filter(t => t.userId === userId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .slice(0, limit);
-  }
-  
-  // ============================================
-  // ADMIN SIGNAL OPERATIONS
-  // ============================================
-  
-  async createAdminSignal(data: Omit<AdminSignal, 'id' | 'createdAt'>): Promise<AdminSignal> {
-    const id = `sig_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const signal: AdminSignal = {
-      ...data,
-      id,
-      createdAt: new Date()
-    };
-    
-    this.adminSignals.set(id, signal);
-    return signal;
-  }
-  
-  async getActiveSignals(): Promise<AdminSignal[]> {
-    const now = new Date();
-    return Array.from(this.adminSignals.values())
-      .filter(s => s.status === 'active' || (s.status === 'scheduled' && s.startTime <= now));
-  }
-  
-  async updateSignalStatus(id: string, status: AdminSignal['status']): Promise<AdminSignal | null> {
-    const signal = this.adminSignals.get(id);
-    if (!signal) return null;
-    
-    const updated = { ...signal, status };
-    this.adminSignals.set(id, updated);
-    return updated;
-  }
-  
-  // ============================================
-  // STATS
-  // ============================================
-  
-  async getStats() {
-    const allUsers = Array.from(this.users.values());
-    const allInvestments = Array.from(this.investments.values());
-    const allTrades = Array.from(this.trades.values());
-    const allAllocations = Array.from(this.airdropAllocations.values());
-    
+    users.push(newUser);
+    writeDb('users', users);
+    return newUser;
+  },
+
+  update(id: string, updates: Partial<User>): User | undefined {
+    const users = this.getAll();
+    const index = users.findIndex(u => u.id === id);
+    if (index === -1) return undefined;
+    users[index] = { ...users[index], ...updates, updatedAt: new Date().toISOString() };
+    writeDb('users', users);
+    return users[index];
+  },
+
+  delete(id: string): boolean {
+    const users = this.getAll();
+    const filtered = users.filter(u => u.id !== id);
+    if (filtered.length === users.length) return false;
+    writeDb('users', filtered);
+    return true;
+  },
+
+  count(): number {
+    return this.getAll().length;
+  },
+};
+
+// ============================================
+// TRADE DATABASE
+// ============================================
+
+export const TradeDb = {
+  getAll(): Trade[] {
+    return readDb<Trade>('trades');
+  },
+
+  getById(id: string): Trade | undefined {
+    return this.getAll().find(t => t.id === id);
+  },
+
+  getByUserId(userId: string): Trade[] {
+    return this.getAll().filter(t => t.userId === userId);
+  },
+
+  getActive(): Trade[] {
+    return this.getAll().filter(t => t.status === 'active' || t.status === 'pending');
+  },
+
+  getBySession(sessionId: string): Trade[] {
+    return this.getAll().filter(t => t.sessionId === sessionId);
+  },
+
+  create(trade: Omit<Trade, 'id'>): Trade {
+    const trades = this.getAll();
+    const newTrade: Trade = { ...trade, id: crypto.randomUUID() };
+    trades.push(newTrade);
+    writeDb('trades', trades);
+    return newTrade;
+  },
+
+  update(id: string, updates: Partial<Trade>): Trade | undefined {
+    const trades = this.getAll();
+    const index = trades.findIndex(t => t.id === id);
+    if (index === -1) return undefined;
+    trades[index] = { ...trades[index], ...updates };
+    writeDb('trades', trades);
+    return trades[index];
+  },
+
+  getUserStats(userId: string): { totalTrades: number; winRate: number; totalProfit: number; totalVolume: number } {
+    const userTrades = this.getByUserId(userId).filter(t => 
+      t.status === 'won' || t.status === 'lost' || t.status === 'closed'
+    );
+    const wins = userTrades.filter(t => t.status === 'won' || (t.profit && t.profit > 0)).length;
+    const totalProfit = userTrades.reduce((sum, t) => sum + (t.profit || 0), 0);
+    const totalVolume = userTrades.reduce((sum, t) => sum + t.amount, 0);
     return {
-      totalUsers: allUsers.length,
-      verifiedUsers: allUsers.filter(u => u.emailVerified).length,
-      kycApproved: allUsers.filter(u => u.kycStatus === 'approved').length,
-      
-      totalInvestments: allInvestments.length,
-      activeInvestments: allInvestments.filter(i => i.status === 'active').length,
-      totalInvestedVolume: allInvestments.reduce((sum, i) => sum + i.amount, BigInt(0)),
-      
-      totalTrades: allTrades.length,
-      tradingVolume: allTrades.reduce((sum, t) => sum + t.total, BigInt(0)),
-      
-      airdropAllocations: allAllocations.length,
-      airdropClaimed: allAllocations.filter(a => a.claimed).length,
-      totalAirdropTokens: allAllocations.reduce((sum, a) => sum + a.amount, BigInt(0)),
-      claimedAirdropTokens: allAllocations.filter(a => a.claimed).reduce((sum, a) => sum + a.amount, BigInt(0))
+      totalTrades: userTrades.length,
+      winRate: userTrades.length > 0 ? (wins / userTrades.length) * 100 : 0,
+      totalProfit,
+      totalVolume,
     };
-  }
-}
+  },
+};
 
-// Singleton instance
-export const db = new InMemoryDB();
+// ============================================
+// INVESTMENT DATABASE
+// ============================================
 
-// Export for API routes
-export default db;
+export const InvestmentDb = {
+  getAll(): Investment[] {
+    return readDb<Investment>('investments');
+  },
+
+  getById(id: string): Investment | undefined {
+    return this.getAll().find(i => i.id === id);
+  },
+
+  getByUserId(userId: string): Investment[] {
+    return this.getAll().filter(i => i.userId === userId);
+  },
+
+  getActive(): Investment[] {
+    return this.getAll().filter(i => i.status === 'active');
+  },
+
+  create(investment: Omit<Investment, 'id' | 'createdAt'>): Investment {
+    const investments = this.getAll();
+    const newInvestment: Investment = {
+      ...investment,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    investments.push(newInvestment);
+    writeDb('investments', investments);
+    return newInvestment;
+  },
+
+  update(id: string, updates: Partial<Investment>): Investment | undefined {
+    const investments = this.getAll();
+    const index = investments.findIndex(i => i.id === id);
+    if (index === -1) return undefined;
+    investments[index] = { ...investments[index], ...updates };
+    writeDb('investments', investments);
+    return investments[index];
+  },
+};
+
+// ============================================
+// TRANSACTION DATABASE
+// ============================================
+
+export const TransactionDb = {
+  getAll(): Transaction[] {
+    return readDb<Transaction>('transactions');
+  },
+
+  getById(id: string): Transaction | undefined {
+    return this.getAll().find(t => t.id === id);
+  },
+
+  getByUserId(userId: string): Transaction[] {
+    return this.getAll().filter(t => t.userId === userId);
+  },
+
+  getByType(type: Transaction['type']): Transaction[] {
+    return this.getAll().filter(t => t.type === type);
+  },
+
+  getPending(): Transaction[] {
+    return this.getAll().filter(t => t.status === 'pending' || t.status === 'processing');
+  },
+
+  create(transaction: Omit<Transaction, 'id' | 'createdAt'>): Transaction {
+    const transactions = this.getAll();
+    const newTransaction: Transaction = {
+      ...transaction,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    transactions.push(newTransaction);
+    writeDb('transactions', transactions);
+    return newTransaction;
+  },
+
+  update(id: string, updates: Partial<Transaction>): Transaction | undefined {
+    const transactions = this.getAll();
+    const index = transactions.findIndex(t => t.id === id);
+    if (index === -1) return undefined;
+    transactions[index] = { ...transactions[index], ...updates };
+    writeDb('transactions', transactions);
+    return transactions[index];
+  },
+};
+
+// ============================================
+// AIRDROP DATABASE
+// ============================================
+
+export const AirdropDb = {
+  getAll(): AirdropClaim[] {
+    return readDb<AirdropClaim>('airdrops');
+  },
+
+  getByUserId(userId: string): AirdropClaim[] {
+    return this.getAll().filter(a => a.oderId === userId);
+  },
+
+  getByAirdropId(airdropId: string): AirdropClaim[] {
+    return this.getAll().filter(a => a.airdropId === airdropId);
+  },
+
+  hasClaimed(userId: string, airdropId: string): boolean {
+    return this.getAll().some(a => a.oderId === userId && a.airdropId === airdropId && a.status === 'claimed');
+  },
+
+  create(claim: Omit<AirdropClaim, 'id' | 'createdAt'>): AirdropClaim {
+    const claims = this.getAll();
+    const newClaim: AirdropClaim = {
+      ...claim,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    claims.push(newClaim);
+    writeDb('airdrops', claims);
+    return newClaim;
+  },
+
+  update(id: string, updates: Partial<AirdropClaim>): AirdropClaim | undefined {
+    const claims = this.getAll();
+    const index = claims.findIndex(c => c.id === id);
+    if (index === -1) return undefined;
+    claims[index] = { ...claims[index], ...updates };
+    writeDb('airdrops', claims);
+    return claims[index];
+  },
+
+  getStats(airdropId: string): { totalClaims: number; totalAmount: number; lotteryWinners: number; totalLotteryPrize: number } {
+    const claims = this.getByAirdropId(airdropId).filter(c => c.status === 'claimed');
+    return {
+      totalClaims: claims.length,
+      totalAmount: claims.reduce((sum, c) => sum + c.amount, 0),
+      lotteryWinners: claims.filter(c => c.wonLottery).length,
+      totalLotteryPrize: claims.reduce((sum, c) => sum + c.lotteryPrize, 0),
+    };
+  },
+};
+
+// ============================================
+// KYC DATABASE
+// ============================================
+
+export const KYCDb = {
+  getAll(): KYCApplication[] {
+    return readDb<KYCApplication>('kyc');
+  },
+
+  getByUserId(userId: string): KYCApplication | undefined {
+    return this.getAll().find(k => k.userId === userId);
+  },
+
+  getPending(): KYCApplication[] {
+    return this.getAll().filter(k => k.status === 'pending');
+  },
+
+  create(application: Omit<KYCApplication, 'id' | 'submittedAt'>): KYCApplication {
+    const applications = this.getAll();
+    const newApplication: KYCApplication = {
+      ...application,
+      id: crypto.randomUUID(),
+      submittedAt: new Date().toISOString(),
+    };
+    applications.push(newApplication);
+    writeDb('kyc', applications);
+    return newApplication;
+  },
+
+  update(id: string, updates: Partial<KYCApplication>): KYCApplication | undefined {
+    const applications = this.getAll();
+    const index = applications.findIndex(k => k.id === id);
+    if (index === -1) return undefined;
+    applications[index] = { ...applications[index], ...updates };
+    writeDb('kyc', applications);
+    return applications[index];
+  },
+};
+
+// ============================================
+// ADMIN SESSION DATABASE
+// ============================================
+
+export const AdminSessionDb = {
+  getAll(): AdminSession[] {
+    return readDb<AdminSession>('sessions');
+  },
+
+  getById(id: string): AdminSession | undefined {
+    return this.getAll().find(s => s.id === id);
+  },
+
+  getActive(): AdminSession[] {
+    return this.getAll().filter(s => s.status === 'active');
+  },
+
+  getScheduled(): AdminSession[] {
+    return this.getAll().filter(s => s.status === 'scheduled');
+  },
+
+  create(session: Omit<AdminSession, 'id' | 'createdAt'>): AdminSession {
+    const sessions = this.getAll();
+    const newSession: AdminSession = {
+      ...session,
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    sessions.push(newSession);
+    writeDb('sessions', sessions);
+    return newSession;
+  },
+
+  update(id: string, updates: Partial<AdminSession>): AdminSession | undefined {
+    const sessions = this.getAll();
+    const index = sessions.findIndex(s => s.id === id);
+    if (index === -1) return undefined;
+    sessions[index] = { ...sessions[index], ...updates };
+    writeDb('sessions', sessions);
+    return sessions[index];
+  },
+};
+
+// ============================================
+// BALANCE DATABASE
+// ============================================
+
+export const BalanceDb = {
+  getAll(): UserBalance[] {
+    return readDb<UserBalance>('balances');
+  },
+
+  getByUserId(userId: string): UserBalance[] {
+    return this.getAll().filter(b => b.userId === userId);
+  },
+
+  get(userId: string, currency: string): UserBalance | undefined {
+    return this.getAll().find(b => b.userId === userId && b.currency === currency);
+  },
+
+  upsert(balance: Omit<UserBalance, 'updatedAt'>): UserBalance {
+    const balances = this.getAll();
+    const index = balances.findIndex(b => b.userId === balance.userId && b.currency === balance.currency);
+    const updatedBalance: UserBalance = { ...balance, updatedAt: new Date().toISOString() };
+    if (index === -1) {
+      balances.push(updatedBalance);
+    } else {
+      balances[index] = updatedBalance;
+    }
+    writeDb('balances', balances);
+    return updatedBalance;
+  },
+
+  addFunds(userId: string, currency: string, amount: number, type: 'available' | 'pending' | 'bonus' = 'available'): UserBalance {
+    const existing = this.get(userId, currency);
+    const current = existing || {
+      userId,
+      currency,
+      available: 0,
+      pending: 0,
+      locked: 0,
+      bonus: 0,
+      totalDeposited: 0,
+      totalWithdrawn: 0,
+      totalProfit: 0,
+    };
+    return this.upsert({
+      ...current,
+      [type]: (current[type] || 0) + amount,
+      totalDeposited: type === 'available' ? current.totalDeposited + amount : current.totalDeposited,
+    });
+  },
+
+  deductFunds(userId: string, currency: string, amount: number, type: 'available' | 'pending' | 'bonus' = 'available'): UserBalance | null {
+    const existing = this.get(userId, currency);
+    if (!existing || (existing[type] || 0) < amount) return null;
+    return this.upsert({
+      ...existing,
+      [type]: (existing[type] || 0) - amount,
+    });
+  },
+};
+
+// ============================================
+// DEFAULT EXPORT
+// ============================================
+
+export default {
+  User: UserDb,
+  Trade: TradeDb,
+  Investment: InvestmentDb,
+  Transaction: TransactionDb,
+  Airdrop: AirdropDb,
+  KYC: KYCDb,
+  AdminSession: AdminSessionDb,
+  Balance: BalanceDb,
+};

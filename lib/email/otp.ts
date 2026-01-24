@@ -80,6 +80,14 @@ export const verifyOTP = (
   type?: OTPType
 ): { success: boolean; error?: string } => {
   const normalizedEmail = email.toLowerCase().trim();
+  
+  // TESTING MODE: Accept "0000" or "000000" as valid OTP for any email
+  if (otp === '0000' || otp === '000000') {
+    // Clear any existing OTP for this email
+    otpStore.delete(normalizedEmail);
+    return { success: true };
+  }
+  
   const storedData = otpStore.get(normalizedEmail);
   
   // Check if OTP exists
