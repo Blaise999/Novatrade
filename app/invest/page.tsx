@@ -230,7 +230,7 @@ export default function InvestmentPlansPage() {
                 </ul>
 
                 <Link
-                  href={`/auth/signup?invest=${plan.id}`}
+                  href={`/auth/signup?invest=${plan.id}&redirect=/dashboard/wallet`}
                   className={`block w-full py-3 text-center font-semibold rounded-xl transition-all ${
                     plan.popular
                       ? 'bg-profit text-void hover:bg-profit/90'
@@ -334,7 +334,7 @@ export default function InvestmentPlansPage() {
                 </div>
 
                 <Link
-                  href="/auth/signup"
+                  href="/auth/signup?redirect=/dashboard/wallet"
                   className="mt-6 flex items-center justify-center gap-2 w-full py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all"
                 >
                   Start Investing Now

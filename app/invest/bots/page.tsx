@@ -264,24 +264,15 @@ export default function BotsPage() {
                 </ul>
 
                 <Link
-                  href={bot.free ? '/auth/signup' : '/pricing'}
+                  href={`/auth/signup?redirect=/dashboard/wallet&bot=${bot.id}`}
                   className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
                     bot.free
                       ? 'bg-profit text-void hover:bg-profit/90'
-                      : 'bg-white/10 text-cream hover:bg-white/20'
+                      : 'bg-gold text-void hover:bg-gold/90'
                   }`}
                 >
-                  {bot.free ? (
-                    <>
-                      <Play className="w-4 h-4" />
-                      Start Free
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="w-4 h-4" />
-                      Unlock Bot
-                    </>
-                  )}
+                  <Play className="w-4 h-4" />
+                  Activate Bot
                 </Link>
               </motion.div>
             ))}

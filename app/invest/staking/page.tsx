@@ -267,14 +267,14 @@ export default function StakingPage() {
                 {/* Action Buttons */}
                 <div className="flex gap-3">
                   <Link
-                    href="/auth/signup"
+                    href={`/auth/signup?redirect=/dashboard/wallet&stake=${selectedPool.token}`}
                     className="flex-1 flex items-center justify-center gap-2 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
                   >
                     <Lock className="w-5 h-5" />
                     Stake Now
                   </Link>
                   <Link
-                    href="/dashboard/wallet"
+                    href="/auth/signup?redirect=/dashboard/wallet"
                     className="px-6 py-4 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-all"
                   >
                     <Wallet className="w-5 h-5" />

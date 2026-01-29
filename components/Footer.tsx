@@ -33,11 +33,11 @@ const footerLinks = {
     { label: 'Help Center', href: '/dashboard/help' },
   ],
   legal: [
-    { label: 'Terms of Service', href: '#' },
-    { label: 'Privacy Policy', href: '#' },
-    { label: 'Risk Disclosure', href: '#' },
-    { label: 'Cookie Policy', href: '#' },
-    { label: 'AML Policy', href: '#' },
+    { label: 'Terms of Service', href: '/legal/terms' },
+    { label: 'Privacy Policy', href: '/legal/privacy' },
+    { label: 'Risk Disclosure', href: '/legal/risk' },
+    { label: 'Cookie Policy', href: '/legal/cookies' },
+    { label: 'AML Policy', href: '/legal/aml' },
   ],
 };
 

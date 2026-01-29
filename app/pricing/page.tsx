@@ -45,7 +45,7 @@ const plans = [
       { text: 'Advanced Analytics', included: false },
     ],
     cta: 'Start Free',
-    ctaLink: '/auth/signup',
+    ctaLink: '/auth/signup?redirect=/dashboard/wallet',
   },
   {
     id: 'basic',
@@ -70,7 +70,7 @@ const plans = [
       { text: 'Advanced Analytics', included: false },
     ],
     cta: 'Get Basic',
-    ctaLink: '/auth/signup?plan=basic',
+    ctaLink: '/auth/signup?plan=basic&redirect=/dashboard/wallet',
   },
   {
     id: 'pro',
@@ -95,7 +95,7 @@ const plans = [
       { text: 'Trading Signals', included: false },
     ],
     cta: 'Get Pro',
-    ctaLink: '/auth/signup?plan=pro',
+    ctaLink: '/auth/signup?plan=pro&redirect=/dashboard/wallet',
   },
   {
     id: 'vip',
@@ -120,7 +120,7 @@ const plans = [
       { text: 'VIP Events & Insights', included: true },
     ],
     cta: 'Go VIP',
-    ctaLink: '/auth/signup?plan=vip',
+    ctaLink: '/auth/signup?plan=vip&redirect=/dashboard/wallet',
   },
 ];
 

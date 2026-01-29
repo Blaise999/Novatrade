@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
   TrendingUp,
@@ -10,7 +11,6 @@ import {
   Percent,
   Lock,
   Unlock,
-  ChevronRight,
   ArrowRight,
   Calculator,
   AlertCircle,
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
+import { useAuthStore } from '@/lib/store';
 
 const investmentPlans = [
   {
@@ -116,15 +117,26 @@ const investmentPlans = [
 ];
 
 export default function InvestmentPlansPage() {
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
+  const { user, isAuthenticated } = useAuthStore();
+  const router = useRouter();
   const [investAmount, setInvestAmount] = useState(1000);
   const [calculatorPlan, setCalculatorPlan] = useState(investmentPlans[1]);
 
-  const calculateReturn = (amount: number, roi: number, days: number) => {
+  const handleStartInvesting = (planId: string) => {
+    if (isAuthenticated) {
+      // User is logged in, go directly to wallet/deposit with plan info
+      router.push(`/dashboard/wallet?plan=${planId}`);
+    } else {
+      // User not logged in, go to signup with redirect to wallet
+      router.push(`/auth/signup?redirect=/dashboard/wallet&plan=${planId}`);
+    }
+  };
+
+  const calculateReturn = (amount: number, roi: number) => {
     return amount * (roi / 100);
   };
 
-  const expectedReturn = calculateReturn(investAmount, calculatorPlan.roi, calculatorPlan.duration);
+  const expectedReturn = calculateReturn(investAmount, calculatorPlan.roi);
 
   return (
     <div className="min-h-screen bg-void">
@@ -229,8 +241,8 @@ export default function InvestmentPlansPage() {
                   ))}
                 </ul>
 
-                <Link
-                  href={`/auth/signup?invest=${plan.id}`}
+                <button
+                  onClick={() => handleStartInvesting(plan.id)}
                   className={`block w-full py-3 text-center font-semibold rounded-xl transition-all ${
                     plan.popular
                       ? 'bg-profit text-void hover:bg-profit/90'
@@ -238,7 +250,7 @@ export default function InvestmentPlansPage() {
                   }`}
                 >
                   Start Investing
-                </Link>
+                </button>
               </motion.div>
             ))}
           </div>
@@ -333,13 +345,13 @@ export default function InvestmentPlansPage() {
                   </div>
                 </div>
 
-                <Link
-                  href="/auth/signup"
+                <button
+                  onClick={() => handleStartInvesting(calculatorPlan.id)}
                   className="mt-6 flex items-center justify-center gap-2 w-full py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all"
                 >
                   Start Investing Now
                   <ArrowRight className="w-4 h-4" />
-                </Link>
+                </button>
               </div>
             </div>
           </div>

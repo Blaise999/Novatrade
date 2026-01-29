@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -45,12 +45,21 @@ type SignUpFormData = z.infer<typeof signUpSchema>;
 
 export default function SignUpPage() {
   const router = useRouter();
-  const { setOtpEmail, setOtpName } = useAuthStore();
+  const searchParams = useSearchParams();
+  const redirectUrl = searchParams.get('redirect') || '/dashboard/wallet';
+  const { setOtpEmail, setOtpName, setRedirectUrl } = useAuthStore();
   const { sendOTP, loading: emailLoading, error: emailError } = useEmail();
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Store redirect URL for after verification
+  useEffect(() => {
+    if (redirectUrl) {
+      setRedirectUrl(redirectUrl);
+    }
+  }, [redirectUrl, setRedirectUrl]);
 
   const {
     register,

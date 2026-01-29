@@ -218,7 +218,7 @@ export default function CompetitionsPage() {
                   </div>
 
                   <Link
-                    href="/auth/signup"
+                    href="/auth/signup?redirect=/dashboard/wallet"
                     className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
                       comp.status === 'active'
                         ? 'bg-profit text-void hover:bg-profit/90'
@@ -321,7 +321,7 @@ export default function CompetitionsPage() {
           {/* CTA */}
           <div className="text-center">
             <Link
-              href="/auth/signup"
+              href="/auth/signup?redirect=/dashboard/wallet"
               className="inline-flex items-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
             >
               <Trophy className="w-5 h-5" />

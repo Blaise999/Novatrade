@@ -1,705 +1,594 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
   TrendingDown,
-  ChevronDown,
-  Clock,
+  Wallet,
+  BarChart3,
   DollarSign,
-  Plus,
-  Minus,
-  Search,
-  Star,
-  StarOff,
-  Info,
-  X,
+  Bitcoin,
+  Globe,
+  Gift,
+  PiggyBank,
+  Copy,
+  ArrowUpRight,
+  ArrowDownLeft,
+  Clock,
   CheckCircle,
   AlertCircle,
-  Timer,
+  ChevronRight,
+  Eye,
+  EyeOff,
   Zap,
-  BarChart2,
-  CandlestickChart,
-  LineChart as LineChartIcon
+  Shield,
+  Activity,
+  Target,
+  Users,
+  LineChart,
+  Sparkles,
+  Trophy,
+  CreditCard
 } from 'lucide-react';
 import { useAuthStore, useTradingStore } from '@/lib/store';
+import { useTradingAccountStore, useInvestmentsStore, useAirdropsStore } from '@/lib/trading-store';
 import { marketAssets } from '@/lib/data';
-import { MarketAsset, Trade, TradeDirection } from '@/lib/types';
 
-// Filter crypto assets
-const cryptoAssets = marketAssets.filter(a => a.type === 'crypto');
-
-// Duration options (in seconds)
-const durationOptions = [
-  { label: '30s', value: 30 },
-  { label: '1m', value: 60 },
-  { label: '2m', value: 120 },
-  { label: '5m', value: 300 },
-  { label: '15m', value: 900 },
-  { label: '30m', value: 1800 },
-  { label: '1h', value: 3600 },
-];
-
-// Quick amount options
-const quickAmounts = [10, 25, 50, 100, 250, 500];
-
-export default function CryptoTradingPage() {
-  const { user, updateBalance } = useAuthStore();
-  const { 
-    selectedAsset, 
-    setSelectedAsset, 
-    tradeAmount, 
-    setTradeAmount,
-    tradeDuration,
-    setTradeDuration,
-    activeTrades,
-    addTrade,
-    closeTrade,
-    selectedTimeframe,
-    setTimeframe
-  } = useTradingStore();
+// Mini TradingView Chart Component (placeholder for embedding)
+const MiniChart = ({ symbol, change }: { symbol: string; change: number }) => {
+  const isPositive = change >= 0;
+  const points = Array.from({ length: 20 }, (_, i) => {
+    const base = 50;
+    const trend = isPositive ? i * 2 : -i * 2;
+    const noise = Math.random() * 20 - 10;
+    return Math.max(5, Math.min(95, base + trend + noise));
+  });
   
-  const [showAssetSelector, setShowAssetSelector] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [favorites, setFavorites] = useState<string[]>(['BTC', 'ETH', 'SOL']);
-  const [currentPrice, setCurrentPrice] = useState(0);
-  const [priceHistory, setPriceHistory] = useState<number[]>([]);
-  const [isTrading, setIsTrading] = useState(false);
-  const [tradeResult, setTradeResult] = useState<{ type: 'win' | 'loss', amount: number } | null>(null);
-  const chartRef = useRef<HTMLDivElement>(null);
+  return (
+    <svg viewBox="0 0 100 50" className="w-full h-12">
+      <defs>
+        <linearGradient id={`gradient-${symbol}`} x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor={isPositive ? '#10B981' : '#EF4444'} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={isPositive ? '#10B981' : '#EF4444'} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path
+        d={`M 0,${100 - points[0]} ${points.map((p, i) => `L ${(i / 19) * 100},${100 - p}`).join(' ')} L 100,100 L 0,100 Z`}
+        fill={`url(#gradient-${symbol})`}
+      />
+      <path
+        d={`M 0,${100 - points[0]} ${points.map((p, i) => `L ${(i / 19) * 100},${100 - p}`).join(' ')}`}
+        fill="none"
+        stroke={isPositive ? '#10B981' : '#EF4444'}
+        strokeWidth="2"
+      />
+    </svg>
+  );
+};
 
-  // Initialize with first crypto asset
-  useEffect(() => {
-    if (!selectedAsset) {
-      setSelectedAsset(cryptoAssets[0]);
-    }
-  }, [selectedAsset, setSelectedAsset]);
-
-  // Simulate real-time price updates
-  useEffect(() => {
-    if (!selectedAsset) return;
-    
-    setCurrentPrice(selectedAsset.price);
-    
-    // Generate initial price history
-    const initialHistory: number[] = [];
-    let price = selectedAsset.price;
-    for (let i = 0; i < 100; i++) {
-      price = price * (1 + (Math.random() - 0.5) * 0.001);
-      initialHistory.push(price);
-    }
-    setPriceHistory(initialHistory);
-
-    // Update price every 500ms
-    const interval = setInterval(() => {
-      setCurrentPrice(prev => {
-        const change = (Math.random() - 0.5) * 0.002 * prev;
-        const newPrice = prev + change;
-        setPriceHistory(history => [...history.slice(-99), newPrice]);
-        return newPrice;
-      });
-    }, 500);
-
-    return () => clearInterval(interval);
-  }, [selectedAsset]);
-
-  // Process active trades
-  useEffect(() => {
-    const interval = setInterval(() => {
-      activeTrades.forEach(trade => {
-        if (new Date() >= trade.expiresAt && trade.status === 'open') {
-          // Determine win/loss based on price movement
-          const won = trade.direction === 'up' 
-            ? currentPrice > trade.entryPrice 
-            : currentPrice < trade.entryPrice;
-          
-          const profit = won ? trade.amount * (trade.payout / 100) : -trade.amount;
-          
-          closeTrade(trade.id, currentPrice, profit);
-          
-          // Update balance
-          if (user) {
-            updateBalance({
-              available: user.balance.available + trade.amount + profit
-            });
-          }
-          
-          // Show result notification
-          setTradeResult({ type: won ? 'win' : 'loss', amount: Math.abs(profit) });
-          setTimeout(() => setTradeResult(null), 3000);
-        }
-      });
-    }, 100);
-
-    return () => clearInterval(interval);
-  }, [activeTrades, currentPrice, closeTrade, user, updateBalance]);
-
-  const handleTrade = (direction: TradeDirection) => {
-    if (!selectedAsset || !user || tradeAmount > user.balance.available) return;
-    
-    setIsTrading(true);
-    
-    // Deduct amount from balance
-    updateBalance({
-      available: user.balance.available - tradeAmount
-    });
-
-    // Create trade
-    const trade: Trade = {
-      id: `trade_${Date.now()}`,
-      assetId: selectedAsset.id,
-      asset: selectedAsset,
-      direction,
-      amount: tradeAmount,
-      entryPrice: currentPrice,
-      payout: selectedAsset.payout || 85,
-      duration: tradeDuration,
-      expiresAt: new Date(Date.now() + tradeDuration * 1000),
-      status: 'open',
-      createdAt: new Date()
-    };
-
-    addTrade(trade);
-    
-    setTimeout(() => setIsTrading(false), 500);
-  };
-
-  const toggleFavorite = (symbol: string) => {
-    setFavorites(prev => 
-      prev.includes(symbol) 
-        ? prev.filter(s => s !== symbol)
-        : [...prev, symbol]
-    );
-  };
-
-  const filteredAssets = cryptoAssets.filter(asset =>
-    asset.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    asset.name.toLowerCase().includes(searchQuery.toLowerCase())
+// Quick Stats Card Component
+const StatCard = ({ 
+  title, 
+  value, 
+  change, 
+  icon: Icon, 
+  color,
+  href 
+}: { 
+  title: string; 
+  value: string; 
+  change?: number; 
+  icon: any;
+  color: string;
+  href?: string;
+}) => {
+  const content = (
+    <motion.div
+      whileHover={{ scale: 1.02 }}
+      className={`p-4 bg-white/5 rounded-xl border border-white/5 hover:border-white/10 transition-all cursor-pointer`}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-sm text-slate-400">{title}</p>
+        <Icon className={`w-5 h-5 ${color}`} />
+      </div>
+      <p className="text-2xl font-bold text-cream">{value}</p>
+      {change !== undefined && (
+        <div className={`flex items-center gap-1 mt-1 text-xs ${change >= 0 ? 'text-profit' : 'text-loss'}`}>
+          {change >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+          {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+        </div>
+      )}
+    </motion.div>
   );
 
-  const formatPrice = (price: number) => {
-    if (price >= 1000) return price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(6);
-  };
+  if (href) {
+    return <Link href={href}>{content}</Link>;
+  }
+  return content;
+};
 
-  const getPriceChange = () => {
-    if (priceHistory.length < 2) return 0;
-    const oldPrice = priceHistory[0];
-    return ((currentPrice - oldPrice) / oldPrice) * 100;
-  };
+// Market Asset Row Component
+const AssetRow = ({ asset, onClick }: { asset: any; onClick?: () => void }) => (
+  <motion.div
+    whileHover={{ backgroundColor: 'rgba(255,255,255,0.05)' }}
+    onClick={onClick}
+    className="flex items-center gap-3 p-3 rounded-lg cursor-pointer"
+  >
+    <div className={`w-10 h-10 rounded-lg ${
+      asset.type === 'crypto' ? 'bg-orange-500/20' :
+      asset.type === 'forex' ? 'bg-blue-500/20' :
+      'bg-green-500/20'
+    } flex items-center justify-center`}>
+      {asset.type === 'crypto' && <Bitcoin className="w-5 h-5 text-orange-500" />}
+      {asset.type === 'forex' && <Globe className="w-5 h-5 text-blue-500" />}
+      {asset.type === 'stock' && <BarChart3 className="w-5 h-5 text-green-500" />}
+    </div>
+    <div className="flex-1">
+      <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+      <p className="text-xs text-slate-500">{asset.name}</p>
+    </div>
+    <div className="text-right">
+      <p className="text-sm font-mono text-cream">
+        ${asset.price < 1 ? asset.price.toFixed(4) : asset.price.toLocaleString()}
+      </p>
+      <p className={`text-xs ${asset.changePercent24h >= 0 ? 'text-profit' : 'text-loss'}`}>
+        {asset.changePercent24h >= 0 ? '+' : ''}{asset.changePercent24h.toFixed(2)}%
+      </p>
+    </div>
+    <MiniChart symbol={asset.symbol} change={asset.changePercent24h} />
+  </motion.div>
+);
+
+export default function DashboardPage() {
+  const { user } = useAuthStore();
+  const { activeTrades, tradeHistory } = useTradingStore();
+  const { 
+    spotAccount, 
+    marginAccount, 
+    stockPositions, 
+    marginPositions,
+    calculateSpotEquity,
+    calculateMarginEquity,
+    calculateTotalUnrealizedPnL,
+    initializeAccounts
+  } = useTradingAccountStore();
+  const { investments, totalInvested, totalEarned } = useInvestmentsStore();
+  const { participations, totalPointsEarned } = useAirdropsStore();
+  
+  const [showBalance, setShowBalance] = useState(true);
+  const [selectedMarket, setSelectedMarket] = useState<'all' | 'crypto' | 'forex' | 'stock'>('all');
+  
+  // Initialize trading accounts if not exists
+  useEffect(() => {
+    if (user && !spotAccount) {
+      initializeAccounts(user.id);
+    }
+  }, [user, spotAccount, initializeAccounts]);
+  
+  // Calculate totals
+  const totalBalance = user?.balance?.available || 0;
+  const spotEquity = calculateSpotEquity();
+  const marginEquity = calculateMarginEquity();
+  const totalEquity = spotEquity + marginEquity;
+  const totalUnrealizedPnL = calculateTotalUnrealizedPnL();
+  const totalRealizedPnL = (spotAccount?.realizedPnL || 0) + (marginAccount?.realizedPnL || 0);
+  
+  // Filter assets
+  const filteredAssets = marketAssets.filter(asset => 
+    selectedMarket === 'all' || asset.type === selectedMarket
+  ).slice(0, 8);
+  
+  // Active investments count
+  const activeInvestments = investments.filter(i => i.status === 'active').length;
+  
+  // Active airdrops count
+  const activeAirdrops = participations.filter(p => p.status === 'active').length;
 
   return (
-    <div className="h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-4">
-      {/* Main Chart Area */}
-      <div className="flex-1 flex flex-col bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
-        {/* Chart Header */}
-        <div className="flex items-center justify-between p-4 border-b border-white/5">
-          {/* Asset Selector */}
-          <div className="relative">
-            <button
-              onClick={() => setShowAssetSelector(!showAssetSelector)}
-              className="flex items-center gap-3 px-4 py-2 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
-            >
-              <div className="w-8 h-8 bg-orange-500/20 rounded-lg flex items-center justify-center">
-                <span className="text-lg">₿</span>
-              </div>
-              <div className="text-left">
-                <p className="text-sm font-semibold text-cream">{selectedAsset?.symbol || 'BTC'}/USD</p>
-                <p className="text-xs text-slate-500">{selectedAsset?.name || 'Bitcoin'}</p>
-              </div>
-              <ChevronDown className="w-4 h-4 text-slate-400" />
+    <div className="space-y-6">
+      {/* Welcome Header */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-cream">
+            Welcome back, {user?.firstName || user?.email?.split('@')[0] || 'Trader'}! 👋
+          </h1>
+          <p className="text-slate-400 mt-1">
+            Here's your trading overview for today
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/dashboard/wallet"
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
+          >
+            <CreditCard className="w-4 h-4" />
+            Deposit
+          </Link>
+          <Link
+            href="/dashboard/trade/crypto"
+            className="flex items-center gap-2 px-4 py-2 bg-profit text-void text-sm font-semibold rounded-xl hover:bg-profit/90 transition-all"
+          >
+            <TrendingUp className="w-4 h-4" />
+            Trade Now
+          </Link>
+        </div>
+      </div>
+
+      {/* Main Stats Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="col-span-2 p-5 bg-gradient-to-br from-gold/20 to-gold/5 rounded-2xl border border-gold/20"
+        >
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm text-slate-400">Total Portfolio Value</p>
+            <button onClick={() => setShowBalance(!showBalance)} className="text-slate-400 hover:text-cream">
+              {showBalance ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
             </button>
-
-            {/* Asset Dropdown */}
-            <AnimatePresence>
-              {showAssetSelector && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className="absolute top-full left-0 mt-2 w-80 bg-charcoal border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden"
-                >
-                  {/* Search */}
-                  <div className="p-3 border-b border-white/5">
-                    <div className="flex items-center gap-2 px-3 py-2 bg-white/5 rounded-lg">
-                      <Search className="w-4 h-4 text-slate-500" />
-                      <input
-                        type="text"
-                        value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Search assets..."
-                        className="flex-1 bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Favorites */}
-                  {favorites.length > 0 && (
-                    <div className="p-2 border-b border-white/5">
-                      <p className="px-2 py-1 text-xs text-slate-500 uppercase">Favorites</p>
-                      {filteredAssets.filter(a => favorites.includes(a.symbol)).map(asset => (
-                        <AssetRow 
-                          key={asset.id} 
-                          asset={asset} 
-                          isSelected={selectedAsset?.id === asset.id}
-                          isFavorite={true}
-                          onSelect={() => {
-                            setSelectedAsset(asset);
-                            setShowAssetSelector(false);
-                          }}
-                          onToggleFavorite={() => toggleFavorite(asset.symbol)}
-                        />
-                      ))}
-                    </div>
-                  )}
-
-                  {/* All Assets */}
-                  <div className="max-h-64 overflow-y-auto p-2">
-                    <p className="px-2 py-1 text-xs text-slate-500 uppercase">All Cryptocurrencies</p>
-                    {filteredAssets.map(asset => (
-                      <AssetRow 
-                        key={asset.id} 
-                        asset={asset} 
-                        isSelected={selectedAsset?.id === asset.id}
-                        isFavorite={favorites.includes(asset.symbol)}
-                        onSelect={() => {
-                          setSelectedAsset(asset);
-                          setShowAssetSelector(false);
-                        }}
-                        onToggleFavorite={() => toggleFavorite(asset.symbol)}
-                      />
-                    ))}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
-
-          {/* Price Display */}
-          <div className="text-center">
-            <p className="text-2xl font-mono font-bold text-cream">
-              ${formatPrice(currentPrice)}
-            </p>
-            <p className={`text-sm font-medium ${getPriceChange() >= 0 ? 'text-profit' : 'text-loss'}`}>
-              {getPriceChange() >= 0 ? '+' : ''}{getPriceChange().toFixed(3)}%
-            </p>
+          <p className="text-4xl font-bold text-cream">
+            {showBalance ? `$${totalBalance.toLocaleString()}` : '••••••'}
+          </p>
+          <div className="flex items-center gap-4 mt-3">
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-slate-400">Unrealized:</span>
+              <span className={totalUnrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}>
+                {totalUnrealizedPnL >= 0 ? '+' : ''}${totalUnrealizedPnL.toFixed(2)}
+              </span>
+            </div>
+            <div className="flex items-center gap-1 text-sm">
+              <span className="text-slate-400">Realized:</span>
+              <span className={totalRealizedPnL >= 0 ? 'text-profit' : 'text-loss'}>
+                {totalRealizedPnL >= 0 ? '+' : ''}${totalRealizedPnL.toFixed(2)}
+              </span>
+            </div>
           </div>
+        </motion.div>
+        
+        <StatCard
+          title="Spot Account"
+          value={showBalance ? `$${spotEquity.toLocaleString()}` : '••••'}
+          change={spotAccount?.unrealizedPnL ? (spotAccount.unrealizedPnL / spotEquity) * 100 : 0}
+          icon={BarChart3}
+          color="text-profit"
+          href="/dashboard/trade/stocks"
+        />
+        
+        <StatCard
+          title="Margin Account"
+          value={showBalance ? `$${marginEquity.toLocaleString()}` : '••••'}
+          change={marginAccount?.unrealizedPnL ? (marginAccount.unrealizedPnL / marginEquity) * 100 : 0}
+          icon={Activity}
+          color="text-electric"
+          href="/dashboard/trade/fx"
+        />
+      </div>
 
-          {/* Chart Controls */}
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1 p-1 bg-white/5 rounded-lg">
-              {(['1m', '5m', '15m', '1h'] as const).map((tf) => (
+      {/* Quick Access Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { 
+            title: 'Crypto Trading', 
+            desc: 'Binary Options', 
+            icon: Bitcoin, 
+            href: '/dashboard/trade/crypto',
+            color: 'from-orange-500/20 to-orange-600/10',
+            iconColor: 'text-orange-500',
+            stats: `${activeTrades.length} active`
+          },
+          { 
+            title: 'Forex Trading', 
+            desc: 'CFD/Margin', 
+            icon: Globe, 
+            href: '/dashboard/trade/fx',
+            color: 'from-blue-500/20 to-blue-600/10',
+            iconColor: 'text-blue-500',
+            stats: `${marginPositions.length} positions`
+          },
+          { 
+            title: 'Stock Trading', 
+            desc: 'Spot Market', 
+            icon: BarChart3, 
+            href: '/dashboard/trade/stocks',
+            color: 'from-green-500/20 to-green-600/10',
+            iconColor: 'text-green-500',
+            stats: `${stockPositions.length} holdings`
+          },
+          { 
+            title: 'Copy Trading', 
+            desc: 'Follow Experts', 
+            icon: Copy, 
+            href: '/dashboard/copy-trading',
+            color: 'from-purple-500/20 to-purple-600/10',
+            iconColor: 'text-purple-500',
+            stats: '12 traders'
+          },
+        ].map((item, index) => (
+          <Link key={item.title} href={item.href}>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: index * 0.05 }}
+              whileHover={{ scale: 1.02 }}
+              className={`p-4 bg-gradient-to-br ${item.color} rounded-xl border border-white/5 hover:border-white/10 transition-all`}
+            >
+              <item.icon className={`w-8 h-8 ${item.iconColor} mb-3`} />
+              <h3 className="font-semibold text-cream">{item.title}</h3>
+              <p className="text-xs text-slate-400">{item.desc}</p>
+              <p className="text-xs text-gold mt-2">{item.stats}</p>
+            </motion.div>
+          </Link>
+        ))}
+      </div>
+
+      {/* Main Content Grid */}
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Market Overview */}
+        <div className="lg:col-span-2 bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
+          <div className="flex items-center justify-between p-4 border-b border-white/5">
+            <h2 className="text-lg font-semibold text-cream">Market Overview</h2>
+            <div className="flex items-center gap-2">
+              {['all', 'crypto', 'forex', 'stock'].map(market => (
                 <button
-                  key={tf}
-                  onClick={() => setTimeframe(tf)}
-                  className={`px-2 py-1 text-xs font-medium rounded transition-all ${
-                    selectedTimeframe === tf
+                  key={market}
+                  onClick={() => setSelectedMarket(market as any)}
+                  className={`px-3 py-1 text-xs font-medium rounded-lg transition-all capitalize ${
+                    selectedMarket === market
                       ? 'bg-gold text-void'
-                      : 'text-slate-400 hover:text-cream'
+                      : 'bg-white/5 text-slate-400 hover:text-cream'
                   }`}
                 >
-                  {tf}
+                  {market}
                 </button>
               ))}
             </div>
-            <div className="flex gap-1">
-              <button className="p-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream transition-colors">
-                <CandlestickChart className="w-4 h-4" />
-              </button>
-              <button className="p-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream transition-colors">
-                <LineChartIcon className="w-4 h-4" />
-              </button>
-            </div>
           </div>
-        </div>
-
-        {/* Chart */}
-        <div ref={chartRef} className="flex-1 relative p-4">
-          <svg className="w-full h-full" viewBox="0 0 1000 400" preserveAspectRatio="none">
-            {/* Grid */}
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
-              <line
-                key={`h-${i}`}
-                x1="0"
-                y1={i * 50}
-                x2="1000"
-                y2={i * 50}
-                stroke="rgba(255,255,255,0.03)"
-                strokeWidth="1"
-              />
+          <div className="divide-y divide-white/5">
+            {filteredAssets.map(asset => (
+              <AssetRow key={asset.id} asset={asset} />
             ))}
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((i) => (
-              <line
-                key={`v-${i}`}
-                x1={i * 100}
-                y1="0"
-                x2={i * 100}
-                y2="400"
-                stroke="rgba(255,255,255,0.03)"
-                strokeWidth="1"
-              />
-            ))}
-
-            {/* Price Line */}
-            {priceHistory.length > 1 && (() => {
-              const minPrice = Math.min(...priceHistory);
-              const maxPrice = Math.max(...priceHistory);
-              const range = maxPrice - minPrice || 1;
-              
-              return (
-                <>
-                  {/* Area */}
-                  <defs>
-                    <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor={getPriceChange() >= 0 ? '#00D9A5' : '#FF4757'} stopOpacity="0.2" />
-                      <stop offset="100%" stopColor={getPriceChange() >= 0 ? '#00D9A5' : '#FF4757'} stopOpacity="0" />
-                    </linearGradient>
-                  </defs>
-                  <path
-                    d={`M 0 ${400 - ((priceHistory[0] - minPrice) / range) * 380} 
-                        ${priceHistory.map((p, i) => 
-                          `L ${(i / (priceHistory.length - 1)) * 1000} ${400 - ((p - minPrice) / range) * 380}`
-                        ).join(' ')} 
-                        L 1000 400 L 0 400 Z`}
-                    fill="url(#chartGradient)"
-                  />
-                  
-                  {/* Line */}
-                  <path
-                    d={`M ${priceHistory.map((p, i) => 
-                      `${(i / (priceHistory.length - 1)) * 1000} ${400 - ((p - minPrice) / range) * 380}`
-                    ).join(' L ')}`}
-                    fill="none"
-                    stroke={getPriceChange() >= 0 ? '#00D9A5' : '#FF4757'}
-                    strokeWidth="2"
-                  />
-
-                  {/* Current Price Line */}
-                  <line
-                    x1="0"
-                    y1={400 - ((currentPrice - minPrice) / range) * 380}
-                    x2="1000"
-                    y2={400 - ((currentPrice - minPrice) / range) * 380}
-                    stroke={getPriceChange() >= 0 ? '#00D9A5' : '#FF4757'}
-                    strokeWidth="1"
-                    strokeDasharray="5,5"
-                    opacity="0.5"
-                  />
-
-                  {/* Current Price Dot */}
-                  <circle
-                    cx="1000"
-                    cy={400 - ((currentPrice - minPrice) / range) * 380}
-                    r="6"
-                    fill={getPriceChange() >= 0 ? '#00D9A5' : '#FF4757'}
-                  />
-                </>
-              );
-            })()}
-          </svg>
-
-          {/* Current Price Label */}
-          <div 
-            className={`absolute right-0 px-2 py-1 rounded text-xs font-mono ${
-              getPriceChange() >= 0 ? 'bg-profit text-void' : 'bg-loss text-white'
-            }`}
-            style={{ 
-              top: `${Math.max(10, Math.min(90, 50 - getPriceChange() * 2))}%`,
-              transform: 'translateY(-50%)'
-            }}
+          </div>
+          <Link
+            href="/markets"
+            className="flex items-center justify-center gap-2 p-3 text-sm text-gold hover:bg-white/5 transition-all"
           >
-            ${formatPrice(currentPrice)}
-          </div>
+            View All Markets
+            <ChevronRight className="w-4 h-4" />
+          </Link>
         </div>
 
-        {/* Active Trades Bar */}
-        {activeTrades.length > 0 && (
-          <div className="border-t border-white/5 p-3">
-            <p className="text-xs text-slate-500 mb-2">Active Trades</p>
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {activeTrades.map(trade => (
-                <ActiveTradeCard key={trade.id} trade={trade} currentPrice={currentPrice} />
-              ))}
+        {/* Right Sidebar */}
+        <div className="space-y-6">
+          {/* Investments Summary */}
+          <div className="bg-white/5 rounded-2xl border border-white/5 p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-cream flex items-center gap-2">
+                <PiggyBank className="w-5 h-5 text-gold" />
+                Investments
+              </h3>
+              <Link href="/invest/plans" className="text-xs text-gold hover:text-gold/80">
+                View Plans
+              </Link>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Trading Panel */}
-      <div className="w-full lg:w-80 bg-white/5 rounded-2xl border border-white/5 p-4 flex flex-col">
-        {/* Balance */}
-        <div className="p-3 bg-white/5 rounded-xl mb-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-500">Available Balance</span>
-            <span className="text-xs text-gold">+ Add funds</span>
-          </div>
-          <p className="text-xl font-bold text-cream mt-1">
-            ${user?.balance.available.toLocaleString() || '0.00'}
-          </p>
-        </div>
-
-        {/* Trade Amount */}
-        <div className="space-y-3 mb-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-cream">Investment</span>
-            <span className="text-xs text-slate-500">Min: $1</span>
-          </div>
-          
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setTradeAmount(Math.max(1, tradeAmount - 10))}
-              className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center text-slate-400 hover:text-cream hover:bg-white/10 transition-all"
-            >
-              <Minus className="w-4 h-4" />
-            </button>
-            <div className="flex-1 relative">
-              <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-              <input
-                type="number"
-                value={tradeAmount}
-                onChange={(e) => setTradeAmount(Math.max(1, parseInt(e.target.value) || 0))}
-                className="w-full pl-8 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-center text-lg font-semibold text-cream focus:outline-none focus:border-gold"
-              />
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-400">Total Invested</span>
+                <span className="text-sm font-semibold text-cream">
+                  ${totalInvested.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-400">Total Earned</span>
+                <span className="text-sm font-semibold text-profit">
+                  +${totalEarned.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-400">Active Plans</span>
+                <span className="text-sm font-semibold text-cream">{activeInvestments}</span>
+              </div>
             </div>
-            <button
-              onClick={() => setTradeAmount(tradeAmount + 10)}
-              className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center text-slate-400 hover:text-cream hover:bg-white/10 transition-all"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Quick Amounts */}
-          <div className="flex flex-wrap gap-2">
-            {quickAmounts.map(amount => (
-              <button
-                key={amount}
-                onClick={() => setTradeAmount(amount)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-all ${
-                  tradeAmount === amount
-                    ? 'bg-gold text-void'
-                    : 'bg-white/5 text-slate-400 hover:text-cream hover:bg-white/10'
-                }`}
+            {activeInvestments === 0 && (
+              <Link
+                href="/invest/plans"
+                className="mt-4 flex items-center justify-center gap-2 w-full py-2 bg-gold/10 text-gold text-sm font-medium rounded-lg hover:bg-gold/20 transition-all"
               >
-                ${amount}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Duration */}
-        <div className="space-y-3 mb-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-cream">Duration</span>
-            <div className="flex items-center gap-1 text-xs text-slate-500">
-              <Clock className="w-3 h-3" />
-              Time to expiry
-            </div>
-          </div>
-          
-          <div className="flex flex-wrap gap-2">
-            {durationOptions.map(option => (
-              <button
-                key={option.value}
-                onClick={() => setTradeDuration(option.value)}
-                className={`px-3 py-2 text-sm font-medium rounded-lg transition-all ${
-                  tradeDuration === option.value
-                    ? 'bg-gold text-void'
-                    : 'bg-white/5 text-slate-400 hover:text-cream hover:bg-white/10'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Payout Info */}
-        <div className="p-3 bg-white/5 rounded-xl mb-4">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-slate-400">Payout</span>
-            <span className="text-profit font-semibold">+{selectedAsset?.payout || 85}%</span>
-          </div>
-          <div className="flex items-center justify-between text-sm mt-2">
-            <span className="text-slate-400">Potential Profit</span>
-            <span className="text-cream font-semibold">
-              ${((tradeAmount * (selectedAsset?.payout || 85)) / 100).toFixed(2)}
-            </span>
-          </div>
-        </div>
-
-        {/* Trade Buttons */}
-        <div className="grid grid-cols-2 gap-3 mt-auto">
-          <button
-            onClick={() => handleTrade('up')}
-            disabled={isTrading || !user || tradeAmount > (user?.balance.available || 0)}
-            className="py-4 bg-profit hover:bg-profit/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl font-semibold text-void flex items-center justify-center gap-2 transition-all group"
-          >
-            <TrendingUp className="w-5 h-5 group-hover:scale-110 transition-transform" />
-            UP
-          </button>
-          <button
-            onClick={() => handleTrade('down')}
-            disabled={isTrading || !user || tradeAmount > (user?.balance.available || 0)}
-            className="py-4 bg-loss hover:bg-loss/90 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl font-semibold text-white flex items-center justify-center gap-2 transition-all group"
-          >
-            <TrendingDown className="w-5 h-5 group-hover:scale-110 transition-transform" />
-            DOWN
-          </button>
-        </div>
-
-        {/* Insufficient Balance Warning */}
-        {user && tradeAmount > user.balance.available && (
-          <p className="text-xs text-loss text-center mt-2">
-            Insufficient balance. Please deposit funds.
-          </p>
-        )}
-      </div>
-
-      {/* Trade Result Notification */}
-      <AnimatePresence>
-        {tradeResult && (
-          <motion.div
-            initial={{ opacity: 0, y: 50, x: '-50%' }}
-            animate={{ opacity: 1, y: 0, x: '-50%' }}
-            exit={{ opacity: 0, y: 50, x: '-50%' }}
-            className={`fixed bottom-8 left-1/2 px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 ${
-              tradeResult.type === 'win' 
-                ? 'bg-profit text-void' 
-                : 'bg-loss text-white'
-            }`}
-          >
-            {tradeResult.type === 'win' ? (
-              <CheckCircle className="w-6 h-6" />
-            ) : (
-              <AlertCircle className="w-6 h-6" />
+                Start Investing
+                <ArrowUpRight className="w-4 h-4" />
+              </Link>
             )}
-            <div>
-              <p className="font-semibold">
-                {tradeResult.type === 'win' ? 'Trade Won!' : 'Trade Lost'}
-              </p>
-              <p className="text-sm opacity-80">
-                {tradeResult.type === 'win' ? '+' : '-'}${tradeResult.amount.toFixed(2)}
-              </p>
+          </div>
+
+          {/* Airdrops Summary */}
+          <div className="bg-white/5 rounded-2xl border border-white/5 p-4">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-cream flex items-center gap-2">
+                <Gift className="w-5 h-5 text-electric" />
+                Airdrops
+              </h3>
+              <Link href="/earn/airdrops" className="text-xs text-gold hover:text-gold/80">
+                Explore
+              </Link>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-400">Points Earned</span>
+                <span className="text-sm font-semibold text-cream">
+                  {totalPointsEarned.toLocaleString()} pts
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-400">Active Campaigns</span>
+                <span className="text-sm font-semibold text-cream">{activeAirdrops}</span>
+              </div>
+            </div>
+            <Link
+              href="/earn/airdrops"
+              className="mt-4 flex items-center justify-center gap-2 w-full py-2 bg-electric/10 text-electric text-sm font-medium rounded-lg hover:bg-electric/20 transition-all"
+            >
+              <Sparkles className="w-4 h-4" />
+              Claim Rewards
+            </Link>
+          </div>
 
-// Asset Row Component
-function AssetRow({ 
-  asset, 
-  isSelected, 
-  isFavorite, 
-  onSelect, 
-  onToggleFavorite 
-}: { 
-  asset: MarketAsset;
-  isSelected: boolean;
-  isFavorite: boolean;
-  onSelect: () => void;
-  onToggleFavorite: () => void;
-}) {
-  return (
-    <div
-      className={`flex items-center gap-3 px-2 py-2 rounded-lg cursor-pointer transition-all ${
-        isSelected ? 'bg-gold/10' : 'hover:bg-white/5'
-      }`}
-    >
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleFavorite();
-        }}
-        className="text-slate-500 hover:text-gold transition-colors"
-      >
-        {isFavorite ? (
-          <Star className="w-4 h-4 fill-gold text-gold" />
+          {/* Quick Actions */}
+          <div className="bg-white/5 rounded-2xl border border-white/5 p-4">
+            <h3 className="font-semibold text-cream mb-4">Quick Actions</h3>
+            <div className="grid grid-cols-2 gap-2">
+              <Link
+                href="/dashboard/wallet"
+                className="flex flex-col items-center gap-2 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
+              >
+                <ArrowDownLeft className="w-5 h-5 text-profit" />
+                <span className="text-xs text-slate-400">Deposit</span>
+              </Link>
+              <Link
+                href="/dashboard/wallet"
+                className="flex flex-col items-center gap-2 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
+              >
+                <ArrowUpRight className="w-5 h-5 text-loss" />
+                <span className="text-xs text-slate-400">Withdraw</span>
+              </Link>
+              <Link
+                href="/earn/referral"
+                className="flex flex-col items-center gap-2 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
+              >
+                <Users className="w-5 h-5 text-electric" />
+                <span className="text-xs text-slate-400">Refer</span>
+              </Link>
+              <Link
+                href="/dashboard/settings"
+                className="flex flex-col items-center gap-2 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-all"
+              >
+                <Shield className="w-5 h-5 text-gold" />
+                <span className="text-xs text-slate-400">Security</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Open Positions Summary */}
+      {(stockPositions.length > 0 || marginPositions.length > 0) && (
+        <div className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
+          <div className="flex items-center justify-between p-4 border-b border-white/5">
+            <h2 className="text-lg font-semibold text-cream">Open Positions</h2>
+            <Link href="/dashboard/portfolio" className="text-sm text-gold hover:text-gold/80">
+              View All
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="text-xs text-slate-400 border-b border-white/5">
+                  <th className="text-left p-4">Asset</th>
+                  <th className="text-left p-4">Type</th>
+                  <th className="text-right p-4">Size</th>
+                  <th className="text-right p-4">Entry</th>
+                  <th className="text-right p-4">Current</th>
+                  <th className="text-right p-4">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stockPositions.slice(0, 3).map(position => (
+                  <tr key={position.id} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="p-4">
+                      <div className="flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4 text-green-500" />
+                        <span className="text-sm font-medium text-cream">{position.symbol}</span>
+                      </div>
+                    </td>
+                    <td className="p-4 text-sm text-slate-400">Stock</td>
+                    <td className="p-4 text-sm text-cream text-right">{position.qty}</td>
+                    <td className="p-4 text-sm text-cream text-right font-mono">${position.avgEntry.toFixed(2)}</td>
+                    <td className="p-4 text-sm text-cream text-right font-mono">${position.currentPrice.toFixed(2)}</td>
+                    <td className={`p-4 text-sm font-semibold text-right ${position.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {position.unrealizedPnL >= 0 ? '+' : ''}${position.unrealizedPnL.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+                {marginPositions.slice(0, 3).map(position => (
+                  <tr key={position.id} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="p-4">
+                      <div className="flex items-center gap-2">
+                        <Globe className="w-4 h-4 text-blue-500" />
+                        <span className="text-sm font-medium text-cream">{position.symbol}</span>
+                      </div>
+                    </td>
+                    <td className="p-4 text-sm text-slate-400 capitalize">
+                      {position.type} ({position.side})
+                    </td>
+                    <td className="p-4 text-sm text-cream text-right">{position.qty} @ {position.leverage}x</td>
+                    <td className="p-4 text-sm text-cream text-right font-mono">${position.avgEntry.toFixed(4)}</td>
+                    <td className="p-4 text-sm text-cream text-right font-mono">${position.currentPrice.toFixed(4)}</td>
+                    <td className={`p-4 text-sm font-semibold text-right ${position.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {position.unrealizedPnL >= 0 ? '+' : ''}${position.unrealizedPnL.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Recent Activity */}
+      <div className="bg-white/5 rounded-2xl border border-white/5 p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-cream">Recent Activity</h3>
+          <Link href="/dashboard/history" className="text-sm text-gold hover:text-gold/80">
+            View History
+          </Link>
+        </div>
+        {tradeHistory.length === 0 ? (
+          <div className="text-center py-8">
+            <Activity className="w-12 h-12 text-slate-600 mx-auto mb-3" />
+            <p className="text-slate-400">No recent activity</p>
+            <p className="text-xs text-slate-500 mt-1">Your trades will appear here</p>
+          </div>
         ) : (
-          <StarOff className="w-4 h-4" />
+          <div className="space-y-2">
+            {tradeHistory.slice(0, 5).map(trade => (
+              <div
+                key={trade.id}
+                className="flex items-center gap-3 p-3 bg-white/5 rounded-xl"
+              >
+                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                  trade.status === 'won' ? 'bg-profit/10' : 'bg-loss/10'
+                }`}>
+                  {trade.status === 'won' ? (
+                    <CheckCircle className="w-5 h-5 text-profit" />
+                  ) : (
+                    <AlertCircle className="w-5 h-5 text-loss" />
+                  )}
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-cream">
+                    {trade.direction === 'up' ? 'CALL' : 'PUT'} {trade.asset?.symbol}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    ${trade.amount} • {new Date(trade.closedAt || trade.createdAt).toLocaleString()}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className={`text-sm font-semibold ${
+                    trade.status === 'won' ? 'text-profit' : 'text-loss'
+                  }`}>
+                    {trade.profit && trade.profit >= 0 ? '+' : ''}${(trade.profit || 0).toFixed(2)}
+                  </p>
+                  <p className={`text-xs ${
+                    trade.status === 'won' ? 'text-profit' : 'text-loss'
+                  }`}>
+                    {trade.status}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
-      </button>
-      <div className="flex-1 flex items-center gap-3" onClick={onSelect}>
-        <div className="w-8 h-8 bg-orange-500/20 rounded-lg flex items-center justify-center text-sm">
-          ₿
-        </div>
-        <div className="flex-1">
-          <p className="text-sm font-medium text-cream">{asset.symbol}/USD</p>
-          <p className="text-xs text-slate-500">{asset.name}</p>
-        </div>
-        <div className="text-right">
-          <p className="text-sm font-mono text-cream">${asset.price.toLocaleString()}</p>
-          <p className={`text-xs ${asset.changePercent24h >= 0 ? 'text-profit' : 'text-loss'}`}>
-            {asset.changePercent24h >= 0 ? '+' : ''}{asset.changePercent24h.toFixed(2)}%
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Active Trade Card Component
-function ActiveTradeCard({ trade, currentPrice }: { trade: Trade; currentPrice: number }) {
-  const [timeLeft, setTimeLeft] = useState(0);
-  
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const remaining = Math.max(0, (trade.expiresAt.getTime() - Date.now()) / 1000);
-      setTimeLeft(remaining);
-    }, 100);
-    return () => clearInterval(interval);
-  }, [trade.expiresAt]);
-
-  const currentPnL = trade.direction === 'up'
-    ? currentPrice > trade.entryPrice ? trade.amount * (trade.payout / 100) : -trade.amount
-    : currentPrice < trade.entryPrice ? trade.amount * (trade.payout / 100) : -trade.amount;
-
-  const isWinning = currentPnL > 0;
-
-  const formatTime = (seconds: number) => {
-    if (seconds >= 60) {
-      const mins = Math.floor(seconds / 60);
-      const secs = Math.floor(seconds % 60);
-      return `${mins}:${secs.toString().padStart(2, '0')}`;
-    }
-    return seconds.toFixed(1) + 's';
-  };
-
-  return (
-    <div className={`flex-shrink-0 w-48 p-3 rounded-xl border ${
-      isWinning ? 'bg-profit/10 border-profit/20' : 'bg-loss/10 border-loss/20'
-    }`}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          {trade.direction === 'up' ? (
-            <TrendingUp className={`w-4 h-4 ${isWinning ? 'text-profit' : 'text-loss'}`} />
-          ) : (
-            <TrendingDown className={`w-4 h-4 ${isWinning ? 'text-profit' : 'text-loss'}`} />
-          )}
-          <span className="text-xs font-medium text-cream">{trade.asset.symbol}</span>
-        </div>
-        <div className="flex items-center gap-1 text-xs text-slate-400">
-          <Timer className="w-3 h-3" />
-          {formatTime(timeLeft)}
-        </div>
-      </div>
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500">${trade.amount}</span>
-        <span className={`text-sm font-semibold ${isWinning ? 'text-profit' : 'text-loss'}`}>
-          {isWinning ? '+' : ''}{currentPnL.toFixed(2)}
-        </span>
-      </div>
-      {/* Progress bar */}
-      <div className="mt-2 h-1 bg-white/10 rounded-full overflow-hidden">
-        <div 
-          className={`h-full transition-all ${isWinning ? 'bg-profit' : 'bg-loss'}`}
-          style={{ width: `${(1 - timeLeft / trade.duration) * 100}%` }}
-        />
       </div>
     </div>
   );

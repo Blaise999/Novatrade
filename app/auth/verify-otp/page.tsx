@@ -10,7 +10,7 @@ import { useEmail } from '@/hooks/useEmail';
 
 export default function VerifyOTPPage() {
   const router = useRouter();
-  const { otpEmail, otpName, setUser } = useAuthStore();
+  const { otpEmail, otpName, redirectUrl, setUser, setRedirectUrl } = useAuthStore();
   const { sendOTP, verifyOTP, sendWelcome, loading: emailLoading } = useEmail();
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
@@ -118,7 +118,10 @@ export default function VerifyOTPPage() {
         
         setTimeout(() => {
           setUser(mockUser);
-          router.push('/kyc');
+          // Redirect to stored URL or wallet (deposit) page
+          const destination = redirectUrl || '/dashboard/wallet';
+          setRedirectUrl(null); // Clear the redirect URL after using it
+          router.push(destination);
         }, 2000);
       } else {
         setError(result.error || 'Invalid verification code');
@@ -177,7 +180,7 @@ export default function VerifyOTPPage() {
         <div>
           <h2 className="text-2xl font-display font-bold text-cream">Email Verified!</h2>
           <p className="mt-2 text-slate-400">
-            Your account has been created successfully. Redirecting to complete your profile...
+            Your account has been created successfully. Redirecting to your dashboard...
           </p>
         </div>
         <div className="flex items-center justify-center gap-2 text-gold">

@@ -243,7 +243,7 @@ export default function MarketsPage() {
           {/* CTA */}
           <div className="text-center">
             <Link
-              href="/auth/signup"
+              href="/auth/signup?redirect=/dashboard/wallet"
               className="inline-flex items-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
             >
               Open Free Account

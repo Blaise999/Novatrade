@@ -18,9 +18,11 @@ interface AuthState {
   isLoading: boolean;
   otpEmail: string | null;
   otpName: string | null;
+  redirectUrl: string | null;
   setUser: (user: User | null) => void;
   setOtpEmail: (email: string | null) => void;
   setOtpName: (name: string | null) => void;
+  setRedirectUrl: (url: string | null) => void;
   logout: () => void;
   updateBalance: (balance: Partial<AccountBalance>) => void;
   updateKYC: (status: User['kycStatus'], level: User['kycLevel']) => void;
@@ -34,10 +36,12 @@ export const useAuthStore = create<AuthState>()(
       isLoading: true,
       otpEmail: null,
       otpName: null,
+      redirectUrl: null,
       setUser: (user) => set({ user, isAuthenticated: !!user, isLoading: false }),
       setOtpEmail: (email) => set({ otpEmail: email }),
       setOtpName: (name) => set({ otpName: name }),
-      logout: () => set({ user: null, isAuthenticated: false, otpEmail: null, otpName: null }),
+      setRedirectUrl: (url) => set({ redirectUrl: url }),
+      logout: () => set({ user: null, isAuthenticated: false, otpEmail: null, otpName: null, redirectUrl: null }),
       updateBalance: (balance) => set((state) => ({
         user: state.user ? {
           ...state.user,
@@ -54,7 +58,7 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'novatrade-auth',
-      partialize: (state) => ({ user: state.user, isAuthenticated: state.isAuthenticated })
+      partialize: (state) => ({ user: state.user, isAuthenticated: state.isAuthenticated, redirectUrl: state.redirectUrl })
     }
   )
 );
