@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import Image from 'next/image';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -432,9 +433,18 @@ export default function CopyTradingPage() {
 
                 {/* Balance Check */}
                 {user && parseFloat(copyAmount) > user.balance.available && (
-                  <p className="text-sm text-loss text-center">
-                    Insufficient balance. Available: ${user.balance.available.toLocaleString()}
-                  </p>
+                  <div className="p-3 bg-loss/10 rounded-xl border border-loss/20 text-center">
+                    <p className="text-sm text-loss mb-2">
+                      Insufficient balance. Available: ${user.balance.available.toLocaleString()}
+                    </p>
+                    <Link
+                      href="/dashboard/wallet"
+                      className="inline-flex items-center gap-2 text-sm text-gold hover:text-gold/80 font-medium"
+                    >
+                      <Wallet className="w-4 h-4" />
+                      Deposit Funds
+                    </Link>
+                  </div>
                 )}
 
                 {/* Copy Button */}

@@ -127,17 +127,18 @@ export const useTradingAccountStore = create<TradingAccountState>()(
       initializeAccounts: (userId) => {
         const now = new Date();
         
+        // Accounts start with $0 - Admin adds balance when user deposits/pays
         const spotAccount: TradingAccount = {
           id: `spot_${userId}`,
           userId,
           type: 'spot',
-          cash: 10000,
-          equity: 10000,
-          availableToTrade: 10000,
-          availableToWithdraw: 10000,
-          balance: 10000,
+          cash: 0,
+          equity: 0,
+          availableToTrade: 0,
+          availableToWithdraw: 0,
+          balance: 0,
           marginUsed: 0,
-          freeMargin: 10000,
+          freeMargin: 0,
           leverage: 1,
           unrealizedPnL: 0,
           realizedPnL: 0,
@@ -147,17 +148,18 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           updatedAt: now,
         };
         
+        // Margin account also starts with $0
         const marginAccount: TradingAccount = {
           id: `margin_${userId}`,
           userId,
           type: 'margin',
-          cash: 10000,
-          equity: 10000,
-          availableToTrade: 10000,
-          availableToWithdraw: 10000,
-          balance: 10000,
+          cash: 0,
+          equity: 0,
+          availableToTrade: 0,
+          availableToWithdraw: 0,
+          balance: 0,
           marginUsed: 0,
-          freeMargin: 10000,
+          freeMargin: 0,
           leverage: 100,
           marginLevel: undefined,
           unrealizedPnL: 0,

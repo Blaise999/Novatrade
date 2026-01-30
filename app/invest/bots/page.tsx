@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
   Bot,
@@ -21,6 +22,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
+import { useAuthStore } from '@/lib/store';
 
 const bots = [
   {
@@ -124,7 +126,17 @@ const stats = [
 ];
 
 export default function BotsPage() {
+  const { isAuthenticated } = useAuthStore();
+  const router = useRouter();
   const [selectedRisk, setSelectedRisk] = useState<string | null>(null);
+
+  const handleActivateBot = (botId: string) => {
+    if (isAuthenticated) {
+      router.push(`/dashboard/wallet?bot=${botId}`);
+    } else {
+      router.push(`/auth/signup?redirect=/dashboard/wallet&bot=${botId}`);
+    }
+  };
 
   const filteredBots = selectedRisk
     ? bots.filter(b => b.riskLevel === selectedRisk)
@@ -263,8 +275,8 @@ export default function BotsPage() {
                   ))}
                 </ul>
 
-                <Link
-                  href={`/auth/signup?redirect=/dashboard/wallet&bot=${bot.id}`}
+                <button
+                  onClick={() => handleActivateBot(bot.id)}
                   className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
                     bot.free
                       ? 'bg-profit text-void hover:bg-profit/90'
@@ -273,7 +285,7 @@ export default function BotsPage() {
                 >
                   <Play className="w-4 h-4" />
                   Activate Bot
-                </Link>
+                </button>
               </motion.div>
             ))}
           </div>
@@ -302,13 +314,13 @@ export default function BotsPage() {
 
           {/* CTA */}
           <div className="text-center">
-            <Link
-              href="/auth/signup"
+            <button
+              onClick={() => router.push(isAuthenticated ? '/dashboard/wallet' : '/auth/signup?redirect=/dashboard/wallet')}
               className="inline-flex items-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
             >
               Start Auto-Trading Now
               <ArrowRight className="w-5 h-5" />
-            </Link>
+            </button>
           </div>
         </div>
       </main>

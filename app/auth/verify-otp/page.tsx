@@ -95,7 +95,7 @@ export default function VerifyOTPPage() {
         // Send welcome email
         await sendWelcome(otpEmail!, otpName || 'User');
         
-        // Create mock user
+        // Create mock user - Account starts with $0, admin adds balance when user pays
         const mockUser = {
           id: 'user_' + Math.random().toString(36).substr(2, 9),
           email: otpEmail!,
@@ -109,9 +109,9 @@ export default function VerifyOTPPage() {
           twoFactorEnabled: false,
           currency: 'USD',
           balance: {
-            available: 0,
+            available: 0,  // Starts at $0 - Admin adds balance after deposit confirmation
             pending: 0,
-            bonus: 100, // Welcome bonus
+            bonus: 0,      // No automatic bonus - Admin controls this
             currency: 'USD'
           }
         };

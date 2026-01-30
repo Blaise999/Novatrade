@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
   Coins,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
+import { useAuthStore } from '@/lib/store';
 
 const stakingPools = [
   {
@@ -88,9 +90,19 @@ const stakingPools = [
 ];
 
 export default function StakingPage() {
+  const { isAuthenticated } = useAuthStore();
+  const router = useRouter();
   const [selectedPool, setSelectedPool] = useState(stakingPools[0]);
   const [selectedLock, setSelectedLock] = useState(stakingPools[0].lockPeriods[1]);
   const [stakeAmount, setStakeAmount] = useState(1000);
+
+  const handleStakeNow = () => {
+    if (isAuthenticated) {
+      router.push(`/dashboard/wallet?stake=${selectedPool.token}`);
+    } else {
+      router.push(`/auth/signup?redirect=/dashboard/wallet&stake=${selectedPool.token}`);
+    }
+  };
 
   const calculateRewards = () => {
     const dailyRate = selectedLock.apy / 365 / 100;
@@ -266,19 +278,19 @@ export default function StakingPage() {
 
                 {/* Action Buttons */}
                 <div className="flex gap-3">
-                  <Link
-                    href={`/auth/signup?redirect=/dashboard/wallet&stake=${selectedPool.token}`}
+                  <button
+                    onClick={handleStakeNow}
                     className="flex-1 flex items-center justify-center gap-2 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
                   >
                     <Lock className="w-5 h-5" />
                     Stake Now
-                  </Link>
-                  <Link
-                    href="/auth/signup?redirect=/dashboard/wallet"
+                  </button>
+                  <button
+                    onClick={() => router.push(isAuthenticated ? '/dashboard/wallet' : '/auth/signup?redirect=/dashboard/wallet')}
                     className="px-6 py-4 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-all"
                   >
                     <Wallet className="w-5 h-5" />
-                  </Link>
+                  </button>
                 </div>
               </div>
 

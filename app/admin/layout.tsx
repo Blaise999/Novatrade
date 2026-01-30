@@ -19,14 +19,17 @@ import {
   Wallet,
   TrendingUp,
   Calendar,
-  Database
+  Database,
+  CreditCard
 } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 
 const navigation = [
   { name: 'Dashboard', href: '/admin', icon: LayoutDashboard },
+  { name: 'Deposits', href: '/admin/deposits', icon: CreditCard },
   { name: 'Sessions', href: '/admin/sessions', icon: Calendar },
   { name: 'Signals', href: '/admin/signals', icon: Signal },
+  { name: 'Markets', href: '/admin/markets', icon: TrendingUp },
   { name: 'Users', href: '/admin/users', icon: Users },
   { name: 'Settings', href: '/admin/settings', icon: Settings },
 ];

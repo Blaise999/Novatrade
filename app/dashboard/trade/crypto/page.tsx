@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
@@ -21,7 +22,8 @@ import {
   Zap,
   BarChart2,
   CandlestickChart,
-  LineChart as LineChartIcon
+  LineChart as LineChartIcon,
+  Wallet
 } from 'lucide-react';
 import { useAuthStore, useTradingStore } from '@/lib/store';
 import { marketAssets } from '@/lib/data';
@@ -552,9 +554,18 @@ export default function CryptoTradingPage() {
 
         {/* Insufficient Balance Warning */}
         {user && tradeAmount > user.balance.available && (
-          <p className="text-xs text-loss text-center mt-2">
-            Insufficient balance. Please deposit funds.
-          </p>
+          <div className="p-3 bg-loss/10 rounded-xl border border-loss/20 mt-2">
+            <p className="text-xs text-loss text-center mb-2">
+              Insufficient balance. Available: ${user.balance.available.toLocaleString()}
+            </p>
+            <Link
+              href="/dashboard/wallet"
+              className="flex items-center justify-center gap-2 text-xs text-gold hover:text-gold/80 font-medium"
+            >
+              <Wallet className="w-3 h-3" />
+              Deposit Funds
+            </Link>
+          </div>
         )}
       </div>
 
