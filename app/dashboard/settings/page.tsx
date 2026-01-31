@@ -21,7 +21,7 @@ import {
   Fingerprint,
   LogOut
 } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
 
 const tabs = [
   { id: 'profile', label: 'Profile', icon: User },
@@ -31,7 +31,7 @@ const tabs = [
 ];
 
 export default function SettingsPage() {
-  const { user, logout } = useAuthStore();
+  const { user, logout } = useStore();
   const [activeTab, setActiveTab] = useState('profile');
   const [showPassword, setShowPassword] = useState(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);

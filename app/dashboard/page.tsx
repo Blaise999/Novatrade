@@ -31,18 +31,27 @@ import { useStore } from '@/lib/store-supabase';
 // ============================================
 const PortfolioChart = ({ data, height = 200 }: { data: number[]; height?: number }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(300);
+  const [dimensions, setDimensions] = useState({ width: 300, height: height });
 
   useEffect(() => {
-    const updateWidth = () => {
+    const updateDimensions = () => {
       if (containerRef.current) {
-        setWidth(containerRef.current.offsetWidth);
+        const rect = containerRef.current.getBoundingClientRect();
+        setDimensions({
+          width: rect.width || 300,
+          height: rect.height || height,
+        });
       }
     };
-    updateWidth();
-    window.addEventListener('resize', updateWidth);
-    return () => window.removeEventListener('resize', updateWidth);
-  }, []);
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    // Re-check after DOM settles
+    const timeout = setTimeout(updateDimensions, 100);
+    return () => {
+      window.removeEventListener('resize', updateDimensions);
+      clearTimeout(timeout);
+    };
+  }, [height]);
 
   if (data.length === 0) {
     return (
@@ -56,9 +65,10 @@ const PortfolioChart = ({ data, height = 200 }: { data: number[]; height?: numbe
     );
   }
 
+  const { width, height: chartContainerHeight } = dimensions;
   const padding = 16;
-  const chartWidth = width - padding * 2;
-  const chartHeight = height - padding * 2;
+  const chartWidth = Math.max(width - padding * 2, 10);
+  const chartHeight = Math.max(chartContainerHeight - padding * 2, 10);
 
   const minVal = Math.min(...data);
   const maxVal = Math.max(...data);
@@ -74,8 +84,8 @@ const PortfolioChart = ({ data, height = 200 }: { data: number[]; height?: numbe
   const isPositive = data[data.length - 1] >= data[0];
 
   return (
-    <div ref={containerRef} style={{ height }}>
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full">
+    <div ref={containerRef} className="w-full h-full">
+      <svg viewBox={`0 0 ${width} ${chartContainerHeight}`} className="w-full h-full" preserveAspectRatio="none">
         <defs>
           <linearGradient id="chartGradient" x1="0%" y1="0%" x2="0%" y2="100%">
             <stop offset="0%" stopColor={isPositive ? '#10B981' : '#EF4444'} stopOpacity="0.3" />
@@ -314,7 +324,7 @@ export default function DashboardPage() {
             <Link href="/dashboard/history" className="text-[10px] sm:text-xs text-gold hover:underline">View History</Link>
           </div>
           <div className="h-36 sm:h-44 lg:h-52">
-            <PortfolioChart data={portfolioHistory} height={typeof window !== 'undefined' ? (window.innerWidth < 640 ? 144 : window.innerWidth < 1024 ? 176 : 208) : 176} />
+            <PortfolioChart data={portfolioHistory} />
           </div>
         </div>
 

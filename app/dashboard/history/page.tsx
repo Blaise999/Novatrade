@@ -18,7 +18,7 @@ import {
   BarChart3,
   Target
 } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
 
 type FilterType = 'all' | 'won' | 'lost' | 'pending';
 type AssetFilter = 'all' | 'crypto' | 'forex' | 'stocks';
@@ -40,7 +40,7 @@ const tradeHistory = [
 ];
 
 export default function HistoryPage() {
-  const { user } = useAuthStore();
+  const { user } = useStore();
   const [statusFilter, setStatusFilter] = useState<FilterType>('all');
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');

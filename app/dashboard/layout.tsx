@@ -27,7 +27,8 @@ import {
   BarChart3,
   Copy
 } from 'lucide-react';
-import { useAuthStore, useUIStore, useNotificationStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
+import { useUIStore, useNotificationStore } from '@/lib/store';
 
 const navigation = [
   { 
@@ -78,7 +79,7 @@ export default function DashboardLayout({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, logout } = useAuthStore();
+  const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
   const { unreadCount } = useNotificationStore();
   
@@ -88,20 +89,20 @@ export default function DashboardLayout({
 
   // Redirect if not authenticated
   useEffect(() => {
-    if (!user) {
+    if (!isLoading && !isAuthenticated) {
       router.push('/auth/login');
     }
-  }, [user, router]);
+  }, [isLoading, isAuthenticated, router]);
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     router.push('/');
   };
 
   const isActive = (href: string) => pathname === href;
   const isChildActive = (children: any[]) => children?.some(child => pathname === child.href);
 
-  if (!user) {
+  if (isLoading || !user) {
     return (
       <div className="min-h-screen bg-void flex items-center justify-center">
         <div className="animate-spin w-8 h-8 border-2 border-gold border-t-transparent rounded-full" />
@@ -377,9 +378,9 @@ export default function DashboardLayout({
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${user.balance.available.toLocaleString()}
-                {user.balance.bonus > 0 && (
-                  <span className="text-profit text-xs ml-1">+${user.balance.bonus}</span>
+                ${(user?.balance || 0).toLocaleString()}
+                {(user?.bonusBalance || 0) > 0 && (
+                  <span className="text-profit text-xs ml-1">+${user?.bonusBalance || 0}</span>
                 )}
               </p>
             </div>

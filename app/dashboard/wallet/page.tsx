@@ -37,7 +37,8 @@ import {
   CheckCircle2,
   XCircle
 } from 'lucide-react';
-import { useAuthStore, useWalletStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
+import { useWalletStore } from '@/lib/store';
 import { useMembershipStore, TIER_CONFIG, MembershipTier } from '@/lib/membership-tiers';
 import { useDepositSettingsStore, CryptoWallet, BankAccount, PaymentProcessor } from '@/lib/deposit-settings';
 
@@ -64,7 +65,7 @@ type PaymentMethod = 'crypto' | 'bank' | 'processor';
 
 function WalletContent() {
   const router = useRouter();
-  const { user } = useAuthStore();
+  const { user } = useStore();
   const { address: walletAddress, isConnected } = useWalletStore();
   const { currentTier } = useMembershipStore();
   const searchParams = useSearchParams();
@@ -267,8 +268,8 @@ function WalletContent() {
             </div>
             <span className="text-sm text-cream/60">Available Balance</span>
           </div>
-          <p className="text-2xl font-bold text-cream">${user?.balance.available.toLocaleString() || '0.00'}</p>
-          {(user?.balance.available || 0) === 0 && <p className="text-xs text-gold mt-2">Deposit to start trading</p>}
+          <p className="text-2xl font-bold text-cream">${(user?.balance || 0).toLocaleString()}</p>
+          {(user?.balance || 0) === 0 && <p className="text-xs text-gold mt-2">Deposit to start trading</p>}
         </div>
 
         <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
@@ -278,7 +279,7 @@ function WalletContent() {
             </div>
             <span className="text-sm text-cream/60">Total Deposited</span>
           </div>
-          <p className="text-2xl font-bold text-cream">${user?.balance.bonus?.toLocaleString() || '0.00'}</p>
+          <p className="text-2xl font-bold text-cream">${(user?.totalDeposited || 0).toLocaleString()}</p>
         </div>
 
         <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
@@ -769,7 +770,7 @@ function WalletContent() {
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
               <h2 className="text-lg font-semibold text-cream mb-4">Withdraw Funds</h2>
               
-              {(user?.balance.available || 0) === 0 ? (
+              {(user?.balance || 0) === 0 ? (
                 <div className="text-center py-12">
                   <Wallet className="w-12 h-12 text-cream/20 mx-auto mb-4" />
                   <h3 className="text-lg font-semibold text-cream mb-2">No Funds to Withdraw</h3>

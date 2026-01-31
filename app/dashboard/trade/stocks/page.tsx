@@ -23,7 +23,7 @@ import {
   Activity,
   Wallet
 } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
 import { useTradingAccountStore } from '@/lib/trading-store';
 import { marketAssets } from '@/lib/data';
 import { StockPosition } from '@/lib/trading-types';
@@ -49,7 +49,7 @@ const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'];
 type MobileTab = 'chart' | 'trade' | 'portfolio';
 
 export default function StockTradingPage() {
-  const { user } = useAuthStore();
+  const { user } = useStore();
   const { 
     spotAccount, 
     stockPositions, 

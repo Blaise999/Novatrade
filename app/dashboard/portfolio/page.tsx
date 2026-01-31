@@ -20,7 +20,8 @@ import {
   ArrowUpRight,
   ArrowDownRight
 } from 'lucide-react';
-import { useAuthStore, useTradingStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
+import { useTradingStore } from '@/lib/store';
 
 // Mock portfolio data
 const portfolioAllocation = [
@@ -48,7 +49,7 @@ const recentPositions = [
 ];
 
 export default function PortfolioPage() {
-  const { user } = useAuthStore();
+  const { user } = useStore();
   const { tradeHistory, activeTrades } = useTradingStore();
   const [selectedPeriod, setSelectedPeriod] = useState<'1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'>('1M');
 
@@ -90,7 +91,7 @@ export default function PortfolioPage() {
             <Wallet className="w-5 h-5 text-gold" />
           </div>
           <p className="text-3xl font-bold text-cream">
-            ${((user?.balance.available || 0) + (user?.balance.bonus || 0)).toLocaleString()}
+            ${((user?.balance || 0) + (user?.bonusBalance || 0)).toLocaleString()}
           </p>
           <p className="text-sm text-profit mt-2">+12.5% this month</p>
         </motion.div>

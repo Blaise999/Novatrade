@@ -24,7 +24,7 @@ import {
   Zap
 } from 'lucide-react';
 import { topTraders } from '@/lib/data';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/store-supabase';
 import { Trader } from '@/lib/types';
 
 // Risk level colors
@@ -37,7 +37,7 @@ const riskColors: Record<number, { bg: string; text: string; label: string }> = 
 };
 
 export default function CopyTradingPage() {
-  const { user, updateBalance } = useAuthStore();
+  const { user } = useStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFilter, setSelectedFilter] = useState<'all' | 'crypto' | 'forex' | 'stocks'>('all');
   const [sortBy, setSortBy] = useState<'return' | 'winRate' | 'followers'>('return');
@@ -74,13 +74,11 @@ export default function CopyTradingPage() {
     if (!selectedTrader || !user) return;
     
     const amount = parseFloat(copyAmount);
-    if (amount > user.balance.available) return;
+    const userBalance = user.balance || 0;
+    if (amount > userBalance) return;
     
-    // Simulate copying
-    updateBalance({
-      available: user.balance.available - amount
-    });
-    
+    // Note: Balance deduction should be handled by backend API
+    // This is just UI state for now
     setCopiedTraders([...copiedTraders, selectedTrader.id]);
     setShowCopyModal(false);
     setSelectedTrader(null);
@@ -432,10 +430,10 @@ export default function CopyTradingPage() {
                 </div>
 
                 {/* Balance Check */}
-                {user && parseFloat(copyAmount) > user.balance.available && (
+                {user && parseFloat(copyAmount) > (user.balance || 0) && (
                   <div className="p-3 bg-loss/10 rounded-xl border border-loss/20 text-center">
                     <p className="text-sm text-loss mb-2">
-                      Insufficient balance. Available: ${user.balance.available.toLocaleString()}
+                      Insufficient balance. Available: ${(user.balance || 0).toLocaleString()}
                     </p>
                     <Link
                       href="/dashboard/wallet"
@@ -450,7 +448,7 @@ export default function CopyTradingPage() {
                 {/* Copy Button */}
                 <button
                   onClick={handleCopyTrader}
-                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || !!(user && parseFloat(copyAmount) > user.balance.available)}
+                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || !!(user && parseFloat(copyAmount) > (user.balance || 0))}
 
                   className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
