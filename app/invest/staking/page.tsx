@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 const stakingPools = [
   {
@@ -90,7 +90,7 @@ const stakingPools = [
 ];
 
 export default function StakingPage() {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated } = useStore();
   const router = useRouter();
   const [selectedPool, setSelectedPool] = useState(stakingPools[0]);
   const [selectedLock, setSelectedLock] = useState(stakingPools[0].lockPeriods[1]);

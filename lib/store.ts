@@ -18,10 +18,12 @@ interface AuthState {
   isLoading: boolean;
   otpEmail: string | null;
   otpName: string | null;
+  otpPassword: string | null;
   redirectUrl: string | null;
   setUser: (user: User | null) => void;
   setOtpEmail: (email: string | null) => void;
   setOtpName: (name: string | null) => void;
+  setOtpPassword: (password: string | null) => void;
   setRedirectUrl: (url: string | null) => void;
   logout: () => void;
   updateBalance: (balance: Partial<AccountBalance>) => void;
@@ -36,12 +38,14 @@ export const useAuthStore = create<AuthState>()(
       isLoading: true,
       otpEmail: null,
       otpName: null,
+      otpPassword: null,
       redirectUrl: null,
       setUser: (user) => set({ user, isAuthenticated: !!user, isLoading: false }),
       setOtpEmail: (email) => set({ otpEmail: email }),
       setOtpName: (name) => set({ otpName: name }),
+      setOtpPassword: (password) => set({ otpPassword: password }),
       setRedirectUrl: (url) => set({ redirectUrl: url }),
-      logout: () => set({ user: null, isAuthenticated: false, otpEmail: null, otpName: null, redirectUrl: null }),
+      logout: () => set({ user: null, isAuthenticated: false, otpEmail: null, otpName: null, otpPassword: null, redirectUrl: null }),
       updateBalance: (balance) => set((state) => ({
         user: state.user ? {
           ...state.user,

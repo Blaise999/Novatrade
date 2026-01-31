@@ -102,6 +102,7 @@ interface StoreState {
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
   updateProfile: (updates: Partial<User>) => Promise<boolean>;
+  updateKycStatus: (status: User['kycStatus']) => Promise<boolean>;
 
   // Balance Actions
   getBalance: () => Promise<{ available: number; bonus: number }>;
@@ -352,6 +353,29 @@ export const useStore = create<StoreState>((set, get) => ({
           last_name: updates.lastName,
           phone: updates.phone,
           avatar_url: updates.avatarUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', user.id);
+
+      if (error) return false;
+
+      // Refresh user data
+      await get().refreshUser();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  updateKycStatus: async (status: User['kycStatus']) => {
+    const { user } = get();
+    if (!user) return false;
+
+    try {
+      const { error } = await supabase
+        .from('users')
+        .update({
+          kyc_status: status,
           updated_at: new Date().toISOString(),
         })
         .eq('id', user.id);

@@ -25,7 +25,8 @@ import {
   Clock,
   Gift
 } from 'lucide-react';
-import { useAuthStore, useKYCStore } from '@/lib/store';
+import { useKYCStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 // Validation schemas for each step
 const personalInfoSchema = z.object({
@@ -62,7 +63,7 @@ const nationalities = [
 
 export default function KYCPage() {
   const router = useRouter();
-  const { user, updateKYC } = useAuthStore();
+  const { user, updateKycStatus } = useStore();
   const { currentStep, data, updateData, setStep, setSubmitting, isSubmitting } = useKYCStore();
   
   const [idFrontFile, setIdFrontFile] = useState<File | null>(null);
@@ -101,7 +102,7 @@ export default function KYCPage() {
     try {
       // Simulate API submission
       await new Promise(resolve => setTimeout(resolve, 2000));
-      updateKYC('in_review', 1);
+      await updateKycStatus('pending');
       setStep(5); // Move to success step
     } finally {
       setSubmitting(false);

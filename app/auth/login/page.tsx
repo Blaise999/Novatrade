@@ -17,7 +17,7 @@ import {
   Loader2,
   Fingerprint
 } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 const loginSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -29,7 +29,7 @@ type LoginFormData = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
   const router = useRouter();
-  const { setUser } = useAuthStore();
+  const { login, error: storeError, clearError } = useStore();
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,39 +45,21 @@ export default function LoginPage() {
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true);
     setError(null);
+    clearError();
     
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Authenticate with Supabase database
+      const success = await login(data.email, data.password);
       
-      // Mock successful login
-      const mockUser = {
-        id: 'user_' + Math.random().toString(36).substr(2, 9),
-        email: data.email,
-        firstName: 'John',
-        lastName: 'Trader',
-        emailVerified: true,
-        phoneVerified: true,
-        kycStatus: 'approved' as const,
-        kycLevel: 3 as const,
-        walletConnected: false,
-        createdAt: new Date(),
-        lastLogin: new Date(),
-        twoFactorEnabled: false,
-        country: 'US',
-        currency: 'USD',
-        balance: {
-          available: 10000,
-          pending: 0,
-          bonus: 100,
-          currency: 'USD'
-        }
-      };
-      
-      setUser(mockUser);
-      router.push('/dashboard');
-    } catch (err) {
-      setError('Invalid email or password. Please try again.');
+      if (success) {
+        // Successful login - redirect to dashboard
+        router.push('/dashboard');
+      } else {
+        // Login failed - user not found in database or wrong password
+        setError('Invalid email or password. Please check your credentials or sign up for a new account.');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Login failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -256,39 +238,14 @@ export default function LoginPage() {
           </div>
           <div className="flex-1">
             <p className="text-sm font-medium text-cream">Try Demo Account</p>
-            <p className="text-xs text-slate-400">Practice with $100,000 virtual funds</p>
+            <p className="text-xs text-slate-400">Practice with virtual funds - Sign up first!</p>
           </div>
-          <button 
-            onClick={() => {
-              const demoUser = {
-                id: 'demo_user',
-                email: 'demo@novatrade.com',
-                firstName: 'Demo',
-                lastName: 'Trader',
-                emailVerified: true,
-                phoneVerified: true,
-                kycStatus: 'approved' as const,
-                kycLevel: 3 as const,
-                walletConnected: false,
-                createdAt: new Date(),
-                lastLogin: new Date(),
-                twoFactorEnabled: false,
-                country: 'US',
-                currency: 'USD',
-                balance: {
-                  available: 100000,
-                  pending: 0,
-                  bonus: 0,
-                  currency: 'USD'
-                }
-              };
-              setUser(demoUser);
-              router.push('/dashboard');
-            }}
+          <Link 
+            href="/auth/signup?demo=true"
             className="text-sm text-gold hover:text-gold/80 font-medium"
           >
-            Start Demo →
-          </button>
+            Sign Up Free →
+          </Link>
         </div>
       </div>
 

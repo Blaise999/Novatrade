@@ -20,6 +20,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { useEmail } from '@/hooks/useEmail';
 
 const signUpSchema = z.object({
@@ -47,7 +48,7 @@ export default function SignUpPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectUrl = searchParams.get('redirect') || '/dashboard/wallet';
-  const { setOtpEmail, setOtpName, setRedirectUrl } = useAuthStore();
+  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useAuthStore();
   const { sendOTP, loading: emailLoading, error: emailError } = useEmail();
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -90,9 +91,10 @@ export default function SignUpPage() {
       const result = await sendOTP(data.email, data.name, 'email_verification');
       
       if (result.success) {
-        // Store email and name for OTP verification
+        // Store email, name, and password for OTP verification
         setOtpEmail(data.email);
         setOtpName(data.name);
+        setOtpPassword(data.password); // Store password for registration after OTP verification
         
         // Redirect to OTP verification
         router.push('/auth/verify-otp');
@@ -295,9 +297,9 @@ export default function SignUpPage() {
             </div>
             <span className="text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
               I agree to the{' '}
-              <Link href="/terms" className="text-gold hover:underline">Terms of Service</Link>
+              <Link href="/legal/terms" className="text-gold hover:underline">Terms of Service</Link>
               {' '}and{' '}
-              <Link href="/privacy" className="text-gold hover:underline">Privacy Policy</Link>
+              <Link href="/legal/privacy" className="text-gold hover:underline">Privacy Policy</Link>
             </span>
           </label>
           {errors.acceptTerms && (

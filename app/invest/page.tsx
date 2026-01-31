@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 const investmentPlans = [
   {
@@ -118,7 +118,7 @@ const investmentPlans = [
 ];
 
 export default function InvestmentPlansPage() {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated } = useStore();
   const router = useRouter();
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [investAmount, setInvestAmount] = useState(1000);

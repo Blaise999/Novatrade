@@ -6,11 +6,13 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from 'lucide-react';
 import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { useEmail } from '@/hooks/useEmail';
 
 export default function VerifyOTPPage() {
   const router = useRouter();
-  const { otpEmail, otpName, redirectUrl, setUser, setRedirectUrl } = useAuthStore();
+  const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useAuthStore();
+  const { signup } = useStore();
   const { sendOTP, verifyOTP, sendWelcome, loading: emailLoading } = useEmail();
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
@@ -28,12 +30,12 @@ export default function VerifyOTPPage() {
     }
   }, [countdown]);
 
-  // Redirect if no email
+  // Redirect if no email or password (signup data missing)
   useEffect(() => {
-    if (!otpEmail) {
+    if (!otpEmail || !otpPassword) {
       router.push('/auth/signup');
     }
-  }, [otpEmail, router]);
+  }, [otpEmail, otpPassword, router]);
 
   // Focus first input on mount
   useEffect(() => {
@@ -90,39 +92,39 @@ export default function VerifyOTPPage() {
       const result = await verifyOTP(otpEmail!, code, 'email_verification');
       
       if (result.success) {
-        setIsVerified(true);
-        
-        // Send welcome email
-        await sendWelcome(otpEmail!, otpName || 'User');
-        
-        // Create mock user - Account starts with $0, admin adds balance when user pays
-        const mockUser = {
-          id: 'user_' + Math.random().toString(36).substr(2, 9),
-          email: otpEmail!,
-          name: otpName || 'User',
-          emailVerified: true,
-          phoneVerified: false,
-          kycStatus: 'not_started' as const,
-          kycLevel: 0 as const,
-          walletConnected: false,
-          createdAt: new Date(),
-          twoFactorEnabled: false,
-          currency: 'USD',
-          balance: {
-            available: 0,  // Starts at $0 - Admin adds balance after deposit confirmation
-            pending: 0,
-            bonus: 0,      // No automatic bonus - Admin controls this
-            currency: 'USD'
+        // Check if we have password (meaning this is a signup flow)
+        if (otpPassword) {
+          // Register user in Supabase database
+          const nameParts = (otpName || 'User').split(' ');
+          const firstName = nameParts[0];
+          const lastName = nameParts.slice(1).join(' ') || undefined;
+          
+          const signupSuccess = await signup(otpEmail!, otpPassword, firstName, lastName);
+          
+          if (signupSuccess) {
+            setIsVerified(true);
+            
+            // Send welcome email
+            await sendWelcome(otpEmail!, otpName || 'User');
+            
+            // Clear the stored password for security
+            setOtpPassword(null);
+            
+            setTimeout(() => {
+              // Redirect to stored URL or wallet (deposit) page
+              const destination = redirectUrl || '/dashboard/wallet';
+              router.push(destination);
+            }, 2000);
+          } else {
+            setError('Failed to create account. Email may already be registered. Please try logging in.');
           }
-        };
-        
-        setTimeout(() => {
-          setUser(mockUser);
-          // Redirect to stored URL or wallet (deposit) page
-          const destination = redirectUrl || '/dashboard/wallet';
-          setRedirectUrl(null); // Clear the redirect URL after using it
-          router.push(destination);
-        }, 2000);
+        } else {
+          // This is just email verification (not signup), redirect to login
+          setError('Missing registration data. Please sign up again.');
+          setTimeout(() => {
+            router.push('/auth/signup');
+          }, 2000);
+        }
       } else {
         setError(result.error || 'Invalid verification code');
       }

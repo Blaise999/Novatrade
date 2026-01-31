@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 // Deposit-based pricing tiers
 const pricingTiers = [
@@ -177,7 +177,7 @@ const comparisonFeatures = [
 
 export default function PricingPage() {
   const router = useRouter();
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated } = useStore();
   const [email, setEmail] = useState('');
 
   const handleGetStarted = (tier: typeof pricingTiers[0]) => {

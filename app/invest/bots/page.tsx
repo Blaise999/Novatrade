@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 const bots = [
   {
@@ -126,7 +126,7 @@ const stats = [
 ];
 
 export default function BotsPage() {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated } = useStore();
   const router = useRouter();
   const [selectedRisk, setSelectedRisk] = useState<string | null>(null);
 
