@@ -24,7 +24,7 @@ import {
   HelpCircle,
   Users
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 // ============================================
 // WORKING CHART COMPONENT

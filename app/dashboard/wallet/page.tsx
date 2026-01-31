@@ -6,7 +6,6 @@ import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Wallet,
-  ArrowUpRight,
   ArrowDownLeft,
   Copy,
   CheckCircle,
@@ -14,10 +13,8 @@ import {
   Bitcoin,
   Building2,
   QrCode,
-  ExternalLink,
   Clock,
   Shield,
-  Zap,
   ChevronRight,
   X,
   AlertCircle,
@@ -25,29 +22,25 @@ import {
   Bot,
   Coins,
   Gift,
-  ArrowRight,
   Upload,
-  Camera,
   MessageCircle,
   Mail,
-  Phone,
-  ChevronDown,
   Info,
   Loader2,
   CheckCircle2,
   XCircle
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { useWalletStore } from '@/lib/store';
 import { useMembershipStore, TIER_CONFIG, MembershipTier } from '@/lib/membership-tiers';
 import { useDepositSettingsStore, CryptoWallet, BankAccount, PaymentProcessor } from '@/lib/deposit-settings';
 
 // Investment plan info
 const investmentPlans: Record<string, { name: string; roi: string; min: number }> = {
-  'starter': { name: 'Starter Plan', roi: '5%', min: 100 },
-  'growth': { name: 'Growth Plan', roi: '12%', min: 1000 },
-  'premium': { name: 'Premium Plan', roi: '20%', min: 10000 },
-  'elite': { name: 'Elite Plan', roi: '35%', min: 50000 },
+  starter: { name: 'Starter Plan', roi: '5%', min: 100 },
+  growth: { name: 'Growth Plan', roi: '12%', min: 1000 },
+  premium: { name: 'Premium Plan', roi: '20%', min: 10000 },
+  elite: { name: 'Elite Plan', roi: '35%', min: 50000 }
 };
 
 // Bot info
@@ -57,11 +50,14 @@ const botInfo: Record<string, { name: string; min: number }> = {
   'arbitrage-bot': { name: 'Arbitrage Bot', min: 500 },
   'momentum-bot': { name: 'Momentum Bot', min: 250 },
   'copy-bot': { name: 'Copy Trading Bot', min: 100 },
-  'ai-bot': { name: 'AI Trading Bot', min: 1000 },
+  'ai-bot': { name: 'AI Trading Bot', min: 1000 }
 };
 
 type DepositStep = 'method' | 'details' | 'confirm' | 'submitted';
 type PaymentMethod = 'crypto' | 'bank' | 'processor';
+
+// For safely reading label fields from TierConfig without TS errors
+type TierLabelConfig = { displayName?: string; name?: string; label?: string; title?: string };
 
 function WalletContent() {
   const router = useRouter();
@@ -69,7 +65,7 @@ function WalletContent() {
   const { address: walletAddress, isConnected } = useWalletStore();
   const { currentTier } = useMembershipStore();
   const searchParams = useSearchParams();
-  
+
   // Deposit settings from admin store
   const {
     cryptoWallets,
@@ -84,16 +80,16 @@ function WalletContent() {
     getEnabledBankAccounts,
     getEnabledPaymentProcessors,
     submitDeposit,
-    getUserDeposits,
+    getUserDeposits
   } = useDepositSettingsStore();
-  
+
   // Get query parameters for context
   const planId = searchParams.get('plan');
   const stakeToken = searchParams.get('stake');
   const botId = searchParams.get('bot');
   const tierId = searchParams.get('tier') as MembershipTier | null;
   const tierAmount = searchParams.get('amount');
-  
+
   // State
   const [activeTab, setActiveTab] = useState<'deposit' | 'withdraw' | 'history'>('deposit');
   const [depositStep, setDepositStep] = useState<DepositStep>('method');
@@ -114,7 +110,7 @@ function WalletContent() {
   const enabledCrypto = getEnabledCryptoWallets();
   const enabledBanks = getEnabledBankAccounts();
   const enabledProcessors = getEnabledPaymentProcessors();
-  
+
   // User's deposit history
   const userDeposits = user ? getUserDeposits(user.id) : [];
 
@@ -122,7 +118,22 @@ function WalletContent() {
   const selectedPlan = planId ? investmentPlans[planId] : null;
   const selectedBot = botId ? botInfo[botId] : null;
   const selectedTier = tierId ? TIER_CONFIG[tierId] : null;
+
   const hasContext = selectedPlan || stakeToken || selectedBot || selectedTier;
+
+  // ✅ FIX: TierConfig might not have displayName — compute a safe label
+  const selectedTierLabel = (() => {
+    if (!tierId || !selectedTier) return null;
+    const cfg = selectedTier as unknown as TierLabelConfig;
+    return (
+      cfg.displayName ??
+      cfg.name ??
+      cfg.label ??
+      cfg.title ??
+      // fallback: turn "gold" -> "Gold"
+      tierId.charAt(0).toUpperCase() + tierId.slice(1)
+    );
+  })();
 
   // Set minimum amount based on context
   useEffect(() => {
@@ -145,21 +156,19 @@ function WalletContent() {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
-        setProofImage(reader.result as string);
-      };
+      reader.onloadend = () => setProofImage(reader.result as string);
       reader.readAsDataURL(file);
     }
   };
 
   const handleSubmitDeposit = async () => {
     if (!user) return;
-    
+
     setIsSubmitting(true);
-    
+
     let methodId = '';
     let methodName = '';
-    
+
     if (selectedMethodType === 'crypto' && selectedCrypto) {
       methodId = selectedCrypto.id;
       methodName = `${selectedCrypto.name} (${selectedCrypto.network})`;
@@ -170,21 +179,22 @@ function WalletContent() {
       methodId = selectedProcessor.id;
       methodName = selectedProcessor.name;
     }
-    
-    const depositId = submitDeposit({
-      oderId: `ORD-${Date.now()}`,
-      amount: parseFloat(amount),
-      method: selectedMethodType!,
-      methodId,
-      methodName,
-      transactionRef,
-      proofImage: proofImage || undefined,
-      userId: user.id,
-      userEmail: user.email,
-    });
-    
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
+
+    // ✅ FIX: oderId -> orderId
+ submitDeposit({
+  amount: parseFloat(amount),
+  method: selectedMethodType!,
+  methodId,
+  methodName,
+  transactionRef,
+  proofImage: proofImage || undefined,
+  userId: user.id,
+  userEmail: user.email,
+});
+
+
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
     setIsSubmitting(false);
     setDepositStep('submitted');
     setShowSuccess(true);
@@ -236,21 +246,24 @@ function WalletContent() {
                   {selectedBot && <Bot className="w-6 h-6 text-gold" />}
                   {selectedTier && <Gift className="w-6 h-6 text-gold" />}
                 </div>
+
                 <div>
                   <h3 className="text-lg font-bold text-cream">
                     {selectedPlan && `You selected: ${selectedPlan.name}`}
                     {stakeToken && `You want to stake: ${stakeToken}`}
                     {selectedBot && `You selected: ${selectedBot.name}`}
-                    {selectedTier && `Upgrade to: ${selectedTier.displayName} Tier`}
+                    {selectedTier && `Upgrade to: ${selectedTierLabel ?? 'Tier'} Tier`}
                   </h3>
+
                   <p className="text-sm text-cream/70 mt-1">
                     {selectedPlan && `Minimum: $${selectedPlan.min} • Expected ROI: ${selectedPlan.roi}`}
                     {stakeToken && `Deposit funds to start staking ${stakeToken}`}
                     {selectedBot && `Minimum allocation: $${selectedBot.min}`}
-                    {selectedTier && `Deposit $${tierAmount} to unlock ${selectedTier.displayName} benefits`}
+                    {selectedTier && `Deposit $${tierAmount ?? ''} to unlock ${selectedTierLabel ?? 'tier'} benefits`}
                   </p>
                 </div>
               </div>
+
               <button onClick={() => setDismissedBanner(true)} className="p-1 hover:bg-white/10 rounded-lg">
                 <X className="w-5 h-5 text-cream/50" />
               </button>
@@ -298,9 +311,14 @@ function WalletContent() {
         {(['deposit', 'withdraw', 'history'] as const).map((tab) => (
           <button
             key={tab}
-            onClick={() => { setActiveTab(tab); if (tab === 'deposit') resetDeposit(); }}
+            onClick={() => {
+              setActiveTab(tab);
+              if (tab === 'deposit') resetDeposit();
+            }}
             className={`px-5 py-2.5 rounded-xl font-medium transition-all capitalize whitespace-nowrap ${
-              activeTab === tab ? 'bg-gold text-void' : 'bg-white/5 text-cream/60 hover:text-cream hover:bg-white/10'
+              activeTab === tab
+                ? 'bg-gold text-void'
+                : 'bg-white/5 text-cream/60 hover:text-cream hover:bg-white/10'
             }`}
           >
             {tab}
@@ -312,32 +330,43 @@ function WalletContent() {
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Left Column - Deposit/Withdraw Form */}
         <div className="lg:col-span-2">
+          {/* Deposit Tab */}
           {activeTab === 'deposit' && (
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
               {/* Step Indicator */}
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-2">
-                  {['method', 'details', 'confirm'].map((step, idx) => (
+                  {(['method', 'details', 'confirm'] as const).map((step, idx) => (
                     <div key={step} className="flex items-center">
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                        depositStep === step || (depositStep === 'submitted' && idx < 3)
-                          ? 'bg-gold text-void'
-                          : ['method', 'details', 'confirm'].indexOf(depositStep) > idx
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                          depositStep === step || (depositStep === 'submitted' && idx < 3)
+                            ? 'bg-gold text-void'
+                            : ['method', 'details', 'confirm'].indexOf(depositStep as any) > idx
                             ? 'bg-profit text-void'
                             : 'bg-white/10 text-cream/50'
-                      }`}>
-                        {['method', 'details', 'confirm'].indexOf(depositStep) > idx || depositStep === 'submitted' ? (
+                        }`}
+                      >
+                        {['method', 'details', 'confirm'].indexOf(depositStep as any) > idx ||
+                        depositStep === 'submitted' ? (
                           <CheckCircle className="w-4 h-4" />
-                        ) : idx + 1}
+                        ) : (
+                          idx + 1
+                        )}
                       </div>
                       {idx < 2 && (
-                        <div className={`w-8 sm:w-12 h-0.5 mx-1 sm:mx-2 ${
-                          ['method', 'details', 'confirm'].indexOf(depositStep) > idx ? 'bg-profit' : 'bg-white/10'
-                        }`} />
+                        <div
+                          className={`w-8 sm:w-12 h-0.5 mx-1 sm:mx-2 ${
+                            ['method', 'details', 'confirm'].indexOf(depositStep as any) > idx
+                              ? 'bg-profit'
+                              : 'bg-white/10'
+                          }`}
+                        />
                       )}
                     </div>
                   ))}
                 </div>
+
                 {depositStep !== 'method' && depositStep !== 'submitted' && (
                   <button
                     onClick={() => {
@@ -355,7 +384,7 @@ function WalletContent() {
               {depositStep === 'method' && (
                 <div>
                   <h2 className="text-lg font-semibold text-cream mb-4">Select Payment Method</h2>
-                  
+
                   {/* Crypto Options */}
                   {enabledCrypto.length > 0 && (
                     <div className="mb-6">
@@ -409,7 +438,9 @@ function WalletContent() {
                             </div>
                             <div className="flex-1 min-w-0">
                               <p className="font-medium text-cream truncate">{bank.bankName}</p>
-                              <p className="text-xs text-cream/50">{bank.currency} • {bank.country}</p>
+                              <p className="text-xs text-cream/50">
+                                {bank.currency} • {bank.country}
+                              </p>
                             </div>
                             <ChevronRight className="w-4 h-4 text-cream/30 flex-shrink-0" />
                           </button>
@@ -450,18 +481,27 @@ function WalletContent() {
                   )}
 
                   {/* No methods enabled */}
-                  {enabledCrypto.length === 0 && enabledBanks.length === 0 && enabledProcessors.length === 0 && (
-                    <div className="text-center py-12">
-                      <AlertCircle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
-                      <h3 className="text-lg font-semibold text-cream mb-2">No Payment Methods Available</h3>
-                      <p className="text-cream/60 mb-4">Please contact support to make a deposit.</p>
-                      {supportEmail && (
-                        <a href={`mailto:${supportEmail}`} className="inline-flex items-center gap-2 px-4 py-2 bg-gold text-void font-medium rounded-xl hover:bg-gold/90 transition-colors">
-                          <Mail className="w-4 h-4" /> Contact Support
-                        </a>
-                      )}
-                    </div>
-                  )}
+                  {enabledCrypto.length === 0 &&
+                    enabledBanks.length === 0 &&
+                    enabledProcessors.length === 0 && (
+                      <div className="text-center py-12">
+                        <AlertCircle className="w-12 h-12 text-yellow-500 mx-auto mb-4" />
+                        <h3 className="text-lg font-semibold text-cream mb-2">
+                          No Payment Methods Available
+                        </h3>
+                        <p className="text-cream/60 mb-4">
+                          Please contact support to make a deposit.
+                        </p>
+                        {supportEmail && (
+                          <a
+                            href={`mailto:${supportEmail}`}
+                            className="inline-flex items-center gap-2 px-4 py-2 bg-gold text-void font-medium rounded-xl hover:bg-gold/90 transition-colors"
+                          >
+                            <Mail className="w-4 h-4" /> Contact Support
+                          </a>
+                        )}
+                      </div>
+                    )}
                 </div>
               )}
 
@@ -469,7 +509,7 @@ function WalletContent() {
               {depositStep === 'details' && (
                 <div>
                   <h2 className="text-lg font-semibold text-cream mb-4">Payment Details</h2>
-                  
+
                   {/* Crypto Details */}
                   {selectedMethodType === 'crypto' && selectedCrypto && (
                     <div className="p-4 bg-gradient-to-br from-orange-500/10 to-yellow-500/10 rounded-xl border border-orange-500/20 mb-6">
@@ -482,21 +522,28 @@ function WalletContent() {
                           <p className="text-sm text-cream/60">{selectedCrypto.network} Network</p>
                         </div>
                       </div>
-                      
+
                       <div className="flex justify-center mb-4">
                         <div className="w-40 h-40 sm:w-48 sm:h-48 bg-white rounded-xl p-2 flex items-center justify-center">
                           <QrCode className="w-full h-full text-void" />
                         </div>
                       </div>
-                      
+
                       <div className="mb-4">
                         <label className="text-xs text-cream/50 mb-1 block">Deposit Address</label>
                         <div className="flex items-center gap-2 p-3 bg-void/50 rounded-lg">
                           <code className="flex-1 text-xs sm:text-sm text-gold font-mono break-all">
                             {selectedCrypto.address}
                           </code>
-                          <button onClick={() => handleCopy(selectedCrypto.address)} className="p-2 hover:bg-white/10 rounded-lg transition-colors flex-shrink-0">
-                            {copied ? <CheckCircle className="w-4 h-4 text-profit" /> : <Copy className="w-4 h-4 text-cream/60" />}
+                          <button
+                            onClick={() => handleCopy(selectedCrypto.address)}
+                            className="p-2 hover:bg-white/10 rounded-lg transition-colors flex-shrink-0"
+                          >
+                            {copied ? (
+                              <CheckCircle className="w-4 h-4 text-profit" />
+                            ) : (
+                              <Copy className="w-4 h-4 text-cream/60" />
+                            )}
                           </button>
                         </div>
                       </div>
@@ -504,7 +551,8 @@ function WalletContent() {
                       <div className="flex items-center gap-2 p-3 bg-yellow-500/10 rounded-lg text-sm">
                         <AlertCircle className="w-4 h-4 text-yellow-500 flex-shrink-0" />
                         <span className="text-yellow-500 text-xs sm:text-sm">
-                          Only send {selectedCrypto.symbol} on {selectedCrypto.network}. Min: ${selectedCrypto.minDeposit}
+                          Only send {selectedCrypto.symbol} on {selectedCrypto.network}. Min: $
+                          {selectedCrypto.minDeposit}
                         </span>
                       </div>
                     </div>
@@ -526,35 +574,46 @@ function WalletContent() {
                       <div className="space-y-3">
                         <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                           <span className="text-cream/60 text-sm">Account Name</span>
-                          <span className="text-cream font-medium text-sm">{selectedBank.accountName}</span>
+                          <span className="text-cream font-medium text-sm">
+                            {selectedBank.accountName}
+                          </span>
                         </div>
+
                         <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                           <span className="text-cream/60 text-sm">Account Number</span>
                           <div className="flex items-center gap-2">
-                            <span className="text-cream font-mono text-sm">{selectedBank.accountNumber}</span>
+                            <span className="text-cream font-mono text-sm">
+                              {selectedBank.accountNumber}
+                            </span>
                             <button onClick={() => handleCopy(selectedBank.accountNumber)}>
                               <Copy className="w-4 h-4 text-cream/40 hover:text-cream" />
                             </button>
                           </div>
                         </div>
+
                         {selectedBank.routingNumber && (
                           <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                             <span className="text-cream/60 text-sm">Routing Number</span>
-                            <span className="text-cream font-mono text-sm">{selectedBank.routingNumber}</span>
+                            <span className="text-cream font-mono text-sm">
+                              {selectedBank.routingNumber}
+                            </span>
                           </div>
                         )}
+
                         {selectedBank.swiftCode && (
                           <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                             <span className="text-cream/60 text-sm">SWIFT Code</span>
                             <span className="text-cream font-mono text-sm">{selectedBank.swiftCode}</span>
                           </div>
                         )}
+
                         {selectedBank.iban && (
                           <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                             <span className="text-cream/60 text-sm">IBAN</span>
                             <span className="text-cream font-mono text-sm">{selectedBank.iban}</span>
                           </div>
                         )}
+
                         <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                           <span className="text-cream/60 text-sm">Currency</span>
                           <span className="text-cream text-sm">{selectedBank.currency}</span>
@@ -586,12 +645,15 @@ function WalletContent() {
                         <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                           <span className="text-cream/60 text-sm">Account</span>
                           <div className="flex items-center gap-2">
-                            <span className="text-cream font-medium text-sm">{selectedProcessor.accountId}</span>
+                            <span className="text-cream font-medium text-sm">
+                              {selectedProcessor.accountId}
+                            </span>
                             <button onClick={() => handleCopy(selectedProcessor.accountId)}>
                               <Copy className="w-4 h-4 text-cream/40 hover:text-cream" />
                             </button>
                           </div>
                         </div>
+
                         <div className="flex justify-between p-3 bg-void/30 rounded-lg">
                           <span className="text-cream/60 text-sm">Name</span>
                           <span className="text-cream text-sm">{selectedProcessor.accountName}</span>
@@ -619,13 +681,16 @@ function WalletContent() {
                         className="w-full pl-8 pr-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream text-lg font-medium focus:border-gold focus:outline-none"
                       />
                     </div>
+
                     <div className="flex flex-wrap gap-2 mt-3">
                       {quickAmounts.map((amt) => (
                         <button
                           key={amt}
                           onClick={() => setAmount(amt.toString())}
                           className={`px-3 sm:px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                            amount === amt.toString() ? 'bg-gold text-void' : 'bg-white/5 text-cream/60 hover:bg-white/10 hover:text-cream'
+                            amount === amt.toString()
+                              ? 'bg-gold text-void'
+                              : 'bg-white/5 text-cream/60 hover:bg-white/10 hover:text-cream'
                           }`}
                         >
                           ${amt}
@@ -648,11 +713,13 @@ function WalletContent() {
               {depositStep === 'confirm' && (
                 <div>
                   <h2 className="text-lg font-semibold text-cream mb-4">Confirm Deposit</h2>
-                  
+
                   <div className="p-4 bg-void/50 rounded-xl border border-white/10 mb-6">
                     <div className="flex justify-between py-2 border-b border-white/5">
                       <span className="text-cream/60">Amount</span>
-                      <span className="text-cream font-semibold">${parseFloat(amount).toLocaleString()}</span>
+                      <span className="text-cream font-semibold">
+                        ${parseFloat(amount).toLocaleString()}
+                      </span>
                     </div>
                     <div className="flex justify-between py-2 border-b border-white/5">
                       <span className="text-cream/60">Method</span>
@@ -694,7 +761,10 @@ function WalletContent() {
                       ) : (
                         <div className="relative">
                           <img src={proofImage} alt="Payment proof" className="w-full h-40 object-cover rounded-xl" />
-                          <button onClick={() => setProofImage(null)} className="absolute top-2 right-2 p-1 bg-void/80 rounded-lg hover:bg-void">
+                          <button
+                            onClick={() => setProofImage(null)}
+                            className="absolute top-2 right-2 p-1 bg-void/80 rounded-lg hover:bg-void"
+                          >
                             <X className="w-4 h-4 text-cream" />
                           </button>
                         </div>
@@ -709,11 +779,18 @@ function WalletContent() {
                         <p className="mb-2">{depositInstructions}</p>
                         <p className="text-blue-400/70">
                           Need help?{' '}
-                          <a href={`mailto:${supportEmail}`} className="text-blue-400 underline">{supportEmail}</a>
+                          <a href={`mailto:${supportEmail}`} className="text-blue-400 underline">
+                            {supportEmail}
+                          </a>
                           {supportWhatsApp && (
                             <>
                               {' '}or{' '}
-                              <a href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`} className="text-blue-400 underline">WhatsApp</a>
+                              <a
+                                href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`}
+                                className="text-blue-400 underline"
+                              >
+                                WhatsApp
+                              </a>
                             </>
                           )}
                         </p>
@@ -723,13 +800,21 @@ function WalletContent() {
 
                   <button
                     onClick={handleSubmitDeposit}
-                    disabled={isSubmitting || (requireProof && !proofImage) || (selectedMethodType === 'crypto' && !transactionRef)}
+                    disabled={
+                      isSubmitting ||
+                      (requireProof && !proofImage) ||
+                      (selectedMethodType === 'crypto' && !transactionRef)
+                    }
                     className="w-full py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     {isSubmitting ? (
-                      <><Loader2 className="w-5 h-5 animate-spin" /> Submitting...</>
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" /> Submitting...
+                      </>
                     ) : (
-                      <><CheckCircle className="w-5 h-5" /> Submit Deposit Request</>
+                      <>
+                        <CheckCircle className="w-5 h-5" /> Submit Deposit Request
+                      </>
                     )}
                   </button>
                 </div>
@@ -745,18 +830,27 @@ function WalletContent() {
                   <p className="text-cream/60 mb-6 max-w-md mx-auto">
                     Your deposit request has been submitted. Our team will verify and credit your account within 1-24 hours.
                   </p>
-                  
+
                   <div className="p-4 bg-gold/10 rounded-xl border border-gold/20 mb-6 max-w-md mx-auto">
                     <p className="text-sm text-cream/70">
-                      Amount: <span className="text-cream font-semibold">${parseFloat(amount).toLocaleString()}</span>
+                      Amount:{' '}
+                      <span className="text-cream font-semibold">
+                        ${parseFloat(amount).toLocaleString()}
+                      </span>
                     </p>
                   </div>
 
                   <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                    <button onClick={resetDeposit} className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
+                    <button
+                      onClick={resetDeposit}
+                      className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors"
+                    >
                       Make Another Deposit
                     </button>
-                    <Link href="/dashboard" className="px-6 py-3 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-colors">
+                    <Link
+                      href="/dashboard"
+                      className="px-6 py-3 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-colors"
+                    >
                       Go to Dashboard
                     </Link>
                   </div>
@@ -769,13 +863,16 @@ function WalletContent() {
           {activeTab === 'withdraw' && (
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
               <h2 className="text-lg font-semibold text-cream mb-4">Withdraw Funds</h2>
-              
+
               {(user?.balance || 0) === 0 ? (
                 <div className="text-center py-12">
                   <Wallet className="w-12 h-12 text-cream/20 mx-auto mb-4" />
                   <h3 className="text-lg font-semibold text-cream mb-2">No Funds to Withdraw</h3>
                   <p className="text-cream/60 mb-4">Deposit funds first before you can withdraw.</p>
-                  <button onClick={() => setActiveTab('deposit')} className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
+                  <button
+                    onClick={() => setActiveTab('deposit')}
+                    className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors"
+                  >
                     Make a Deposit
                   </button>
                 </div>
@@ -787,11 +884,18 @@ function WalletContent() {
                       <p className="text-sm text-yellow-500 font-medium">Withdrawal Request</p>
                       <p className="text-sm text-yellow-500/70 mt-1">
                         To request a withdrawal, please contact support at{' '}
-                        <a href={`mailto:${supportEmail}`} className="underline">{supportEmail}</a>
+                        <a href={`mailto:${supportEmail}`} className="underline">
+                          {supportEmail}
+                        </a>
                         {supportWhatsApp && (
                           <>
                             {' '}or{' '}
-                            <a href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`} className="underline">WhatsApp</a>
+                            <a
+                              href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`}
+                              className="underline"
+                            >
+                              WhatsApp
+                            </a>
                           </>
                         )}
                       </p>
@@ -806,7 +910,7 @@ function WalletContent() {
           {activeTab === 'history' && (
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
               <h2 className="text-lg font-semibold text-cream mb-4">Transaction History</h2>
-              
+
               {userDeposits.length === 0 ? (
                 <div className="text-center py-12">
                   <Clock className="w-12 h-12 text-cream/20 mx-auto mb-4" />
@@ -819,13 +923,22 @@ function WalletContent() {
                     <div key={deposit.id} className="p-4 bg-white/5 rounded-xl border border-white/5">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                            deposit.status === 'confirmed' ? 'bg-profit/10' :
-                            deposit.status === 'rejected' ? 'bg-loss/10' : 'bg-yellow-500/10'
-                          }`}>
-                            {deposit.status === 'confirmed' ? <CheckCircle2 className="w-5 h-5 text-profit" /> :
-                             deposit.status === 'rejected' ? <XCircle className="w-5 h-5 text-loss" /> :
-                             <Clock className="w-5 h-5 text-yellow-500" />}
+                          <div
+                            className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                              deposit.status === 'confirmed'
+                                ? 'bg-profit/10'
+                                : deposit.status === 'rejected'
+                                ? 'bg-loss/10'
+                                : 'bg-yellow-500/10'
+                            }`}
+                          >
+                            {deposit.status === 'confirmed' ? (
+                              <CheckCircle2 className="w-5 h-5 text-profit" />
+                            ) : deposit.status === 'rejected' ? (
+                              <XCircle className="w-5 h-5 text-loss" />
+                            ) : (
+                              <Clock className="w-5 h-5 text-yellow-500" />
+                            )}
                           </div>
                           <div>
                             <p className="font-medium text-cream">${deposit.amount.toLocaleString()}</p>
@@ -833,13 +946,20 @@ function WalletContent() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <span className={`text-xs font-medium px-2 py-1 rounded-full ${
-                            deposit.status === 'confirmed' ? 'bg-profit/10 text-profit' :
-                            deposit.status === 'rejected' ? 'bg-loss/10 text-loss' : 'bg-yellow-500/10 text-yellow-500'
-                          }`}>
+                          <span
+                            className={`text-xs font-medium px-2 py-1 rounded-full ${
+                              deposit.status === 'confirmed'
+                                ? 'bg-profit/10 text-profit'
+                                : deposit.status === 'rejected'
+                                ? 'bg-loss/10 text-loss'
+                                : 'bg-yellow-500/10 text-yellow-500'
+                            }`}
+                          >
                             {deposit.status}
                           </span>
-                          <p className="text-xs text-cream/40 mt-1">{new Date(deposit.createdAt).toLocaleDateString()}</p>
+                          <p className="text-xs text-cream/40 mt-1">
+                            {new Date(deposit.createdAt).toLocaleDateString()}
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -856,13 +976,21 @@ function WalletContent() {
             <h3 className="text-lg font-semibold text-cream mb-4">Need Help?</h3>
             <div className="space-y-3">
               {supportEmail && (
-                <a href={`mailto:${supportEmail}`} className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors">
+                <a
+                  href={`mailto:${supportEmail}`}
+                  className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
+                >
                   <Mail className="w-5 h-5 text-gold" />
                   <span className="text-sm text-cream">{supportEmail}</span>
                 </a>
               )}
               {supportWhatsApp && (
-                <a href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors">
+                <a
+                  href={`https://wa.me/${supportWhatsApp.replace(/[^0-9]/g, '')}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
+                >
                   <MessageCircle className="w-5 h-5 text-profit" />
                   <span className="text-sm text-cream">{supportWhatsApp}</span>
                 </a>
@@ -873,17 +1001,28 @@ function WalletContent() {
           <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
             <h3 className="text-lg font-semibold text-cream mb-4">Quick Actions</h3>
             <div className="space-y-2">
-              <Link href="/dashboard/trade/fx" className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors">
+              <Link
+                href="/dashboard/trade/fx"
+                className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
+              >
                 <TrendingUp className="w-5 h-5 text-gold" />
                 <span className="text-sm text-cream">Trade Forex</span>
                 <ChevronRight className="w-4 h-4 text-cream/30 ml-auto" />
               </Link>
-              <Link href="/dashboard/trade/crypto" className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors">
+
+              <Link
+                href="/dashboard/trade/crypto"
+                className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
+              >
                 <Bitcoin className="w-5 h-5 text-orange-500" />
                 <span className="text-sm text-cream">Trade Crypto</span>
                 <ChevronRight className="w-4 h-4 text-cream/30 ml-auto" />
               </Link>
-              <Link href="/invest/plans" className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors">
+
+              <Link
+                href="/invest/plans"
+                className="flex items-center gap-3 p-3 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
+              >
                 <Gift className="w-5 h-5 text-electric" />
                 <span className="text-sm text-cream">Investment Plans</span>
                 <ChevronRight className="w-4 h-4 text-cream/30 ml-auto" />
@@ -896,7 +1035,9 @@ function WalletContent() {
               <Shield className="w-5 h-5 text-electric flex-shrink-0" />
               <div>
                 <p className="text-sm font-medium text-cream">Secure Deposits</p>
-                <p className="text-xs text-slate-400 mt-1">All deposits are verified manually for your security.</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  All deposits are verified manually for your security.
+                </p>
               </div>
             </div>
           </div>
@@ -908,19 +1049,21 @@ function WalletContent() {
 
 export default function WalletPage() {
   return (
-    <Suspense fallback={
-      <div className="p-4 lg:p-6 max-w-6xl mx-auto">
-        <div className="animate-pulse">
-          <div className="h-8 bg-white/10 rounded w-32 mb-2"></div>
-          <div className="h-4 bg-white/10 rounded w-48 mb-6"></div>
-          <div className="grid sm:grid-cols-3 gap-4 mb-6">
-            <div className="h-32 bg-white/5 rounded-2xl"></div>
-            <div className="h-32 bg-white/5 rounded-2xl"></div>
-            <div className="h-32 bg-white/5 rounded-2xl"></div>
+    <Suspense
+      fallback={
+        <div className="p-4 lg:p-6 max-w-6xl mx-auto">
+          <div className="animate-pulse">
+            <div className="h-8 bg-white/10 rounded w-32 mb-2"></div>
+            <div className="h-4 bg-white/10 rounded w-48 mb-6"></div>
+            <div className="grid sm:grid-cols-3 gap-4 mb-6">
+              <div className="h-32 bg-white/5 rounded-2xl"></div>
+              <div className="h-32 bg-white/5 rounded-2xl"></div>
+              <div className="h-32 bg-white/5 rounded-2xl"></div>
+            </div>
           </div>
         </div>
-      </div>
-    }>
+      }
+    >
       <WalletContent />
     </Suspense>
   );

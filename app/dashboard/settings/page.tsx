@@ -2,40 +2,45 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
+import Link from 'next/link';
 import {
   User,
   Shield,
   Bell,
   Palette,
   Globe,
-  CreditCard,
-  Key,
   Smartphone,
-  Mail,
   CheckCircle,
-  AlertTriangle,
   ChevronRight,
   Eye,
   EyeOff,
-  Lock,
-  Fingerprint,
-  LogOut
+  LogOut,
+  AlertCircle,
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 const tabs = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'preferences', label: 'Preferences', icon: Palette },
-];
+] as const;
+
+type TabId = (typeof tabs)[number]['id'];
 
 export default function SettingsPage() {
   const { user, logout } = useStore();
-  const [activeTab, setActiveTab] = useState('profile');
+  const [activeTab, setActiveTab] = useState<TabId>('profile');
   const [showPassword, setShowPassword] = useState(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
-  
+
+  // ✅ KYC status matches your store type:
+  // "none" | "pending" | "verified" | "rejected" | undefined
+  const kycStatus = user?.kycStatus ?? 'none';
+  const isVerified = kycStatus === 'verified';
+  const isPending = kycStatus === 'pending';
+  const isRejected = kycStatus === 'rejected';
+
   // Notification settings
   const [notifications, setNotifications] = useState({
     tradeAlerts: true,
@@ -57,12 +62,27 @@ export default function SettingsPage() {
     confirmTrades: true,
   });
 
+  const avatarLetter =
+    user?.firstName?.[0] ??
+    user?.email?.[0]?.toUpperCase() ??
+    'U';
+
   return (
     <div className="p-4 lg:p-6 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-display font-bold text-cream">Settings</h1>
-        <p className="text-slate-400 mt-1">Manage your account and preferences</p>
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-cream">Settings</h1>
+          <p className="text-slate-400 mt-1">Manage your account and preferences</p>
+        </div>
+
+        <button
+          onClick={logout}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-cream/80 hover:text-cream transition-colors"
+        >
+          <LogOut className="w-4 h-4" />
+          Sign out
+        </button>
       </div>
 
       <div className="flex flex-col lg:flex-row gap-6">
@@ -99,7 +119,7 @@ export default function SettingsPage() {
                 <h2 className="text-lg font-semibold text-cream mb-4">Profile Picture</h2>
                 <div className="flex items-center gap-4">
                   <div className="w-20 h-20 bg-gradient-to-br from-electric to-gold rounded-2xl flex items-center justify-center text-void text-2xl font-bold">
-                    {user?.firstName?.[0] || user?.email[0].toUpperCase()}
+                    {avatarLetter}
                   </div>
                   <div className="space-y-2">
                     <button className="px-4 py-2 bg-gold text-void text-sm font-medium rounded-lg hover:bg-gold/90 transition-colors">
@@ -163,24 +183,45 @@ export default function SettingsPage() {
                     <h2 className="text-lg font-semibold text-cream">Verification Status</h2>
                     <p className="text-sm text-slate-400 mt-1">Complete KYC to unlock all features</p>
                   </div>
-                  <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
-                    user?.kycStatus === 'approved' ? 'bg-profit/10 text-profit' :
-                    user?.kycStatus === 'pending' || user?.kycStatus === 'in_review' ? 'bg-yellow-500/10 text-yellow-500' :
-                    'bg-slate-500/10 text-slate-400'
-                  }`}>
-                    {user?.kycStatus === 'approved' ? 'Verified' :
-                     user?.kycStatus === 'pending' || user?.kycStatus === 'in_review' ? 'In Review' :
-                     'Not Verified'}
+
+                  <span
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                      isVerified
+                        ? 'bg-profit/10 text-profit'
+                        : isPending
+                        ? 'bg-yellow-500/10 text-yellow-500'
+                        : isRejected
+                        ? 'bg-loss/10 text-loss'
+                        : 'bg-slate-500/10 text-slate-400'
+                    }`}
+                  >
+                    {isVerified
+                      ? 'Verified'
+                      : isPending
+                      ? 'In Review'
+                      : isRejected
+                      ? 'Rejected'
+                      : 'Not Verified'}
                   </span>
                 </div>
-                {user?.kycStatus !== 'approved' && (
-                  <a
+
+                {!isVerified && (
+                  <Link
                     href="/kyc"
                     className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-electric/10 text-electric text-sm font-medium rounded-lg hover:bg-electric/20 transition-colors"
                   >
                     Complete Verification
                     <ChevronRight className="w-4 h-4" />
-                  </a>
+                  </Link>
+                )}
+
+                {isRejected && (
+                  <div className="mt-4 p-3 bg-loss/10 border border-loss/20 rounded-xl flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-loss mt-0.5" />
+                    <p className="text-sm text-loss/90">
+                      Your verification was rejected. Please re-submit your documents.
+                    </p>
+                  </div>
                 )}
               </div>
             </motion.div>
@@ -205,6 +246,7 @@ export default function SettingsPage() {
                         className="w-full px-4 py-3 pr-12 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
                       />
                       <button
+                        type="button"
                         onClick={() => setShowPassword(!showPassword)}
                         className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500"
                       >
@@ -247,14 +289,17 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   <button
+                    type="button"
                     onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
                     className={`relative w-14 h-7 rounded-full transition-colors ${
                       twoFactorEnabled ? 'bg-profit' : 'bg-white/10'
                     }`}
                   >
-                    <span className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${
-                      twoFactorEnabled ? 'left-8' : 'left-1'
-                    }`} />
+                    <span
+                      className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${
+                        twoFactorEnabled ? 'left-8' : 'left-1'
+                      }`}
+                    />
                   </button>
                 </div>
                 {twoFactorEnabled && (
@@ -327,17 +372,22 @@ export default function SettingsPage() {
                         <p className="text-xs text-slate-500">{item.desc}</p>
                       </div>
                       <button
-                        onClick={() => setNotifications({
-                          ...notifications,
-                          [item.key]: !notifications[item.key as keyof typeof notifications]
-                        })}
+                        type="button"
+                        onClick={() =>
+                          setNotifications({
+                            ...notifications,
+                            [item.key]: !notifications[item.key as keyof typeof notifications],
+                          })
+                        }
                         className={`relative w-12 h-6 rounded-full transition-colors ${
                           notifications[item.key as keyof typeof notifications] ? 'bg-profit' : 'bg-white/10'
                         }`}
                       >
-                        <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                          notifications[item.key as keyof typeof notifications] ? 'left-7' : 'left-1'
-                        }`} />
+                        <span
+                          className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                            notifications[item.key as keyof typeof notifications] ? 'left-7' : 'left-1'
+                          }`}
+                        />
                       </button>
                     </div>
                   ))}
@@ -352,14 +402,17 @@ export default function SettingsPage() {
                     <p className="text-xs text-slate-500">Receive critical alerts via SMS</p>
                   </div>
                   <button
+                    type="button"
                     onClick={() => setNotifications({ ...notifications, smsAlerts: !notifications.smsAlerts })}
                     className={`relative w-12 h-6 rounded-full transition-colors ${
                       notifications.smsAlerts ? 'bg-profit' : 'bg-white/10'
                     }`}
                   >
-                    <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                      notifications.smsAlerts ? 'left-7' : 'left-1'
-                    }`} />
+                    <span
+                      className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                        notifications.smsAlerts ? 'left-7' : 'left-1'
+                      }`}
+                    />
                   </button>
                 </div>
               </div>
@@ -406,6 +459,7 @@ export default function SettingsPage() {
                     </select>
                   </div>
                 </div>
+
                 <div className="mt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
@@ -413,30 +467,37 @@ export default function SettingsPage() {
                       <p className="text-xs text-slate-500">Play sounds on trade execution</p>
                     </div>
                     <button
+                      type="button"
                       onClick={() => setPreferences({ ...preferences, soundEffects: !preferences.soundEffects })}
                       className={`relative w-12 h-6 rounded-full transition-colors ${
                         preferences.soundEffects ? 'bg-profit' : 'bg-white/10'
                       }`}
                     >
-                      <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                        preferences.soundEffects ? 'left-7' : 'left-1'
-                      }`} />
+                      <span
+                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                          preferences.soundEffects ? 'left-7' : 'left-1'
+                        }`}
+                      />
                     </button>
                   </div>
+
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-cream">Confirm Trades</p>
                       <p className="text-xs text-slate-500">Show confirmation before executing</p>
                     </div>
                     <button
+                      type="button"
                       onClick={() => setPreferences({ ...preferences, confirmTrades: !preferences.confirmTrades })}
                       className={`relative w-12 h-6 rounded-full transition-colors ${
                         preferences.confirmTrades ? 'bg-profit' : 'bg-white/10'
                       }`}
                     >
-                      <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                        preferences.confirmTrades ? 'left-7' : 'left-1'
-                      }`} />
+                      <span
+                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                          preferences.confirmTrades ? 'left-7' : 'left-1'
+                        }`}
+                      />
                     </button>
                   </div>
                 </div>

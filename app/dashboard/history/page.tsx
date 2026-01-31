@@ -18,7 +18,7 @@ import {
   BarChart3,
   Target
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 type FilterType = 'all' | 'won' | 'lost' | 'pending';
 type AssetFilter = 'all' | 'crypto' | 'forex' | 'stocks';

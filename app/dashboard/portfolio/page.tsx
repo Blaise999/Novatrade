@@ -20,7 +20,7 @@ import {
   ArrowUpRight,
   ArrowDownRight
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { useTradingStore } from '@/lib/store';
 
 // Mock portfolio data

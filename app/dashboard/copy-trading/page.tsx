@@ -24,7 +24,7 @@ import {
   Zap
 } from 'lucide-react';
 import { topTraders } from '@/lib/data';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { Trader } from '@/lib/types';
 
 // Risk level colors

@@ -27,7 +27,7 @@ import {
   BarChart3,
   Copy
 } from 'lucide-react';
-import { useStore } from '@/lib/store-supabase';
+import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore, useNotificationStore } from '@/lib/store';
 
 const navigation = [

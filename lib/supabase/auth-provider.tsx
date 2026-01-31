@@ -2,29 +2,31 @@
 
 /**
  * SUPABASE AUTH PROVIDER
- * 
+ *
  * Wrap your app with this to automatically handle auth state.
- * 
- * Usage in layout.tsx:
- * 
- *   import { AuthProvider } from '@/lib/supabase/auth-provider';
- *   
- *   export default function Layout({ children }) {
- *     return (
- *       <AuthProvider>
- *         {children}
- *       </AuthProvider>
- *     );
- *   }
  */
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { useStore } from '../store-supabase';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+  type ComponentType,
+} from 'react';
+import { useStore } from './store-supabase';
+
+type AuthUser = {
+  id?: string;
+  email?: string;
+  role?: string;
+  [key: string]: any;
+};
 
 interface AuthContextType {
   isLoading: boolean;
   isAuthenticated: boolean;
-  user: ReturnType<typeof useStore>['user'];
+  user: AuthUser | null;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -34,15 +36,23 @@ const AuthContext = createContext<AuthContextType>({
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { user, isAuthenticated, isLoading, checkSession } = useStore();
+  // ✅ Your store typings currently resolve to `unknown`, so TS won't allow `.user`
+  // We safely read fields via `any` and then cast to our own AuthUser type.
+  const store = useStore() as any;
+
+  const user = (store?.user ?? null) as AuthUser | null;
+  const isAuthenticated = Boolean(store?.isAuthenticated);
+  const isLoading = Boolean(store?.isLoading);
+  const checkSession = (store?.checkSession ??
+    (async () => {})) as () => Promise<any>;
+
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
-    // Check session on mount
     checkSession().finally(() => setInitialized(true));
-  }, [checkSession]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Show loading spinner while checking session
   if (!initialized) {
     return (
       <div className="min-h-screen bg-void flex items-center justify-center">
@@ -67,10 +77,10 @@ export function useAuth() {
 }
 
 // HOC to protect routes
-export function withAuth<P extends object>(Component: React.ComponentType<P>) {
+export function withAuth<P extends object>(Component: ComponentType<P>) {
   return function AuthenticatedComponent(props: P) {
     const { isAuthenticated, isLoading } = useAuth();
-    
+
     if (isLoading) {
       return (
         <div className="min-h-screen bg-void flex items-center justify-center">
@@ -91,10 +101,10 @@ export function withAuth<P extends object>(Component: React.ComponentType<P>) {
 }
 
 // HOC to protect admin routes
-export function withAdmin<P extends object>(Component: React.ComponentType<P>) {
+export function withAdmin<P extends object>(Component: ComponentType<P>) {
   return function AdminComponent(props: P) {
     const { user, isAuthenticated, isLoading } = useAuth();
-    
+
     if (isLoading) {
       return (
         <div className="min-h-screen bg-void flex items-center justify-center">

@@ -5,7 +5,7 @@
  * for persistent storage across sessions and devices.
  */
 
-import { supabase, createServerClient } from './supabase';
+import { supabase, createServerClient } from '../supabase';
 
 // ============================================
 // TYPES
