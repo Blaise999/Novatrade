@@ -120,8 +120,7 @@ export default function AdminMarketsPage() {
       low,
       close,
       volume,
-    
-      createdBy: 'admin',
+
     });
 
     // ✅ FIX 2: Use derived spread, not selectedPair.spread
