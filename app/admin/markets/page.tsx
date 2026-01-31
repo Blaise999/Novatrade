@@ -4,27 +4,17 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
-  TrendingDown,
-  Plus,
-  Minus,
   Play,
   Pause,
-  RefreshCw,
-  Settings,
-  ChevronDown,
-  ChevronUp,
   CandlestickChart,
-  Target,
   Zap,
   AlertTriangle,
   CheckCircle,
   X,
   BookOpen,
   Edit3,
-  Trash2,
-  Clock
 } from 'lucide-react';
-import { useAdminMarketStore, OHLCCandle, CustomPair } from '@/lib/admin-markets';
+import { useAdminMarketStore, CustomPair } from '@/lib/admin-markets';
 
 const patternOptions = [
   { id: 'bull-flag', name: 'Bull Flag', description: 'Strong move up, consolidation, breakout' },
@@ -49,31 +39,37 @@ export default function AdminMarketsPage() {
     generateDoubleBottom,
     generateBreakout,
   } = useAdminMarketStore();
-  
+
   const [selectedPair, setSelectedPair] = useState<CustomPair>(customPairs[0]);
   const [showPriceModal, setShowPriceModal] = useState(false);
   const [showPatternModal, setShowPatternModal] = useState(false);
   const [showCandleModal, setShowCandleModal] = useState(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  
+
   // New price inputs
   const [newBid, setNewBid] = useState('');
   const [newAsk, setNewAsk] = useState('');
-  
+
   // New candle inputs
   const [candleOpen, setCandleOpen] = useState('');
   const [candleHigh, setCandleHigh] = useState('');
   const [candleLow, setCandleLow] = useState('');
   const [candleClose, setCandleClose] = useState('');
   const [candleVolume, setCandleVolume] = useState('1000');
-  
+
   // Selected pattern
   const [selectedPattern, setSelectedPattern] = useState(patternOptions[0].id);
   const [patternBasePrice, setPatternBasePrice] = useState('1.0000');
-  
+
   const currentPrice = currentPrices[selectedPair.id];
   const pairCandles = candles[selectedPair.id] || [];
   const isTradingPaused = isPaused[selectedPair.id] || false;
+
+  // ✅ FIX: CustomPair has no `spread`. Derive it from currentPrices, fallback to 0.0002
+  const effectiveSpread =
+    currentPrice && typeof currentPrice.ask === 'number' && typeof currentPrice.bid === 'number'
+      ? Math.max(currentPrice.ask - currentPrice.bid, 0)
+      : 0.0002;
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
@@ -83,6 +79,7 @@ export default function AdminMarketsPage() {
   const handleSetPrice = () => {
     const bid = parseFloat(newBid);
     const ask = parseFloat(newAsk);
+
     if (isNaN(bid) || isNaN(ask) || bid <= 0 || ask <= 0) {
       showNotification('error', 'Invalid price values');
       return;
@@ -91,6 +88,7 @@ export default function AdminMarketsPage() {
       showNotification('error', 'Ask must be greater than Bid');
       return;
     }
+
     setCurrentPrice(selectedPair.id, bid, ask);
     showNotification('success', `Price updated to ${bid.toFixed(5)} / ${ask.toFixed(5)}`);
     setShowPriceModal(false);
@@ -104,8 +102,8 @@ export default function AdminMarketsPage() {
     const low = parseFloat(candleLow);
     const close = parseFloat(candleClose);
     const volume = parseFloat(candleVolume);
-    
-    if ([open, high, low, close].some(isNaN) || [open, high, low, close].some(v => v <= 0)) {
+
+    if ([open, high, low, close].some(isNaN) || [open, high, low, close].some((v) => v <= 0)) {
       showNotification('error', 'Invalid candle values');
       return;
     }
@@ -113,22 +111,22 @@ export default function AdminMarketsPage() {
       showNotification('error', 'High must be >= max(open,close), Low must be <= min(open,close)');
       return;
     }
-    
+
+    // ✅ FIX 1: Remove `pairId` from the candle payload (your type doesn’t have it)
     addCandle(selectedPair.id, {
-      pairId: selectedPair.id,
-      timestamp: Date.now(),
+      timestamp: new Date(),
       open,
       high,
       low,
       close,
       volume,
-      isSimulated: true,
+    
       createdBy: 'admin',
     });
-    
-    // Update current price to match candle close
-    setCurrentPrice(selectedPair.id, close, close + selectedPair.spread);
-    
+
+    // ✅ FIX 2: Use derived spread, not selectedPair.spread
+    setCurrentPrice(selectedPair.id, close, close + effectiveSpread);
+
     showNotification('success', 'Candle added successfully');
     setShowCandleModal(false);
     setCandleOpen('');
@@ -143,7 +141,7 @@ export default function AdminMarketsPage() {
       showNotification('error', 'Invalid base price');
       return;
     }
-    
+
     switch (selectedPattern) {
       case 'bull-flag':
         generateBullFlag(selectedPair.id, basePrice);
@@ -161,8 +159,11 @@ export default function AdminMarketsPage() {
         generateBreakout(selectedPair.id, basePrice, 'down');
         break;
     }
-    
-    showNotification('success', `Generated ${patternOptions.find(p => p.id === selectedPattern)?.name} pattern`);
+
+    showNotification(
+      'success',
+      `Generated ${patternOptions.find((p) => p.id === selectedPattern)?.name} pattern`
+    );
     setShowPatternModal(false);
   };
 
@@ -180,8 +181,14 @@ export default function AdminMarketsPage() {
     const current = currentPrice?.bid || 1;
     const change = direction === 'up' ? amount : -amount;
     const newBidPrice = current + change;
-    setCurrentPrice(selectedPair.id, newBidPrice, newBidPrice + selectedPair.spread);
-    showNotification('success', `Price adjusted ${direction === 'up' ? '+' : ''}${(change * 10000).toFixed(1)} pips`);
+
+    // ✅ FIX: use derived spread
+    setCurrentPrice(selectedPair.id, newBidPrice, newBidPrice + effectiveSpread);
+
+    showNotification(
+      'success',
+      `Price adjusted ${direction === 'up' ? '+' : ''}${(change * 10000).toFixed(1)} pips`
+    );
   };
 
   return (
@@ -197,7 +204,7 @@ export default function AdminMarketsPage() {
         {customPairs.map((pair) => {
           const price = currentPrices[pair.id];
           const paused = isPaused[pair.id];
-          
+
           return (
             <button
               key={pair.id}
@@ -213,9 +220,7 @@ export default function AdminMarketsPage() {
                   <span className="text-2xl">📚</span>
                   <span className="font-semibold text-cream">{pair.symbol}</span>
                 </div>
-                {paused && (
-                  <span className="px-2 py-0.5 bg-loss/20 text-loss text-xs rounded">PAUSED</span>
-                )}
+                {paused && <span className="px-2 py-0.5 bg-loss/20 text-loss text-xs rounded">PAUSED</span>}
               </div>
               <p className="text-sm text-cream/50">{pair.name}</p>
               {price && (
@@ -245,9 +250,7 @@ export default function AdminMarketsPage() {
             <button
               onClick={toggleTrading}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium transition-colors ${
-                isTradingPaused
-                  ? 'bg-profit text-void hover:bg-profit/90'
-                  : 'bg-loss text-white hover:bg-loss/90'
+                isTradingPaused ? 'bg-profit text-void hover:bg-profit/90' : 'bg-loss text-white hover:bg-loss/90'
               }`}
             >
               {isTradingPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
@@ -268,7 +271,7 @@ export default function AdminMarketsPage() {
               </div>
             </div>
             <div className="mt-3 pt-3 border-t border-white/10 text-center">
-              <p className="text-xs text-cream/50">Spread: {selectedPair.spread * 10000} pips</p>
+              <p className="text-xs text-cream/50">Spread: {(effectiveSpread * 10000).toFixed(1)} pips</p>
             </div>
           </div>
 
@@ -310,11 +313,12 @@ export default function AdminMarketsPage() {
             </button>
             <button
               onClick={() => {
-                const current = currentPrice?.close || 1;
-                setCandleOpen(current.toFixed(5));
-                setCandleHigh((current + 0.001).toFixed(5));
-                setCandleLow((current - 0.001).toFixed(5));
-                setCandleClose(current.toFixed(5));
+                const mid = currentPrice ? (currentPrice.bid + currentPrice.ask) / 2 : 1;
+
+                setCandleOpen(mid.toFixed(5));
+                setCandleHigh((mid + 0.001).toFixed(5));
+                setCandleLow((mid - 0.001).toFixed(5));
+                setCandleClose(mid.toFixed(5));
                 setShowCandleModal(true);
               }}
               className="flex items-center justify-center gap-2 py-3 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20"
@@ -364,12 +368,8 @@ export default function AdminMarketsPage() {
       {/* Recent Candles */}
       <div className="mt-6 bg-white/5 rounded-2xl border border-white/10 p-6">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-cream">
-            Recent Candles ({pairCandles.length})
-          </h2>
-          <button className="text-sm text-gold hover:text-gold/80">
-            View All
-          </button>
+          <h2 className="text-lg font-semibold text-cream">Recent Candles ({pairCandles.length})</h2>
+          <button className="text-sm text-gold hover:text-gold/80">View All</button>
         </div>
 
         {pairCandles.length === 0 ? (
@@ -391,25 +391,30 @@ export default function AdminMarketsPage() {
                 </tr>
               </thead>
               <tbody>
-                {pairCandles.slice(-10).reverse().map((candle) => {
-                  const isGreen = candle.close >= candle.open;
-                  return (
-                    <tr key={candle.id} className="border-b border-white/5">
-                      <td className="py-2 text-cream/70">
-                        {new Date(candle.timestamp).toLocaleTimeString()}
-                      </td>
-                      <td className="py-2 text-right font-mono text-cream">{candle.open.toFixed(5)}</td>
-                      <td className="py-2 text-right font-mono text-profit">{candle.high.toFixed(5)}</td>
-                      <td className="py-2 text-right font-mono text-loss">{candle.low.toFixed(5)}</td>
-                      <td className="py-2 text-right font-mono text-cream">{candle.close.toFixed(5)}</td>
-                      <td className="py-2 text-right">
-                        <span className={`px-2 py-0.5 rounded text-xs ${isGreen ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
-                          {isGreen ? 'BULL' : 'BEAR'}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {pairCandles
+                  .slice(-10)
+                  .reverse()
+                  .map((candle: any) => {
+                    const isGreen = candle.close >= candle.open;
+                    return (
+                      <tr key={candle.id} className="border-b border-white/5">
+                        <td className="py-2 text-cream/70">{new Date(candle.timestamp).toLocaleTimeString()}</td>
+                        <td className="py-2 text-right font-mono text-cream">{candle.open.toFixed(5)}</td>
+                        <td className="py-2 text-right font-mono text-profit">{candle.high.toFixed(5)}</td>
+                        <td className="py-2 text-right font-mono text-loss">{candle.low.toFixed(5)}</td>
+                        <td className="py-2 text-right font-mono text-cream">{candle.close.toFixed(5)}</td>
+                        <td className="py-2 text-right">
+                          <span
+                            className={`px-2 py-0.5 rounded text-xs ${
+                              isGreen ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                            }`}
+                          >
+                            {isGreen ? 'BULL' : 'BEAR'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
           </div>
@@ -439,7 +444,7 @@ export default function AdminMarketsPage() {
                   <X className="w-5 h-5 text-cream/50" />
                 </button>
               </div>
-              
+
               <div className="space-y-4 mb-6">
                 <div>
                   <label className="block text-sm text-cream/50 mb-2">Bid Price</label>
@@ -464,7 +469,7 @@ export default function AdminMarketsPage() {
                   />
                 </div>
               </div>
-              
+
               <div className="flex gap-3">
                 <button
                   onClick={() => setShowPriceModal(false)}
@@ -507,7 +512,7 @@ export default function AdminMarketsPage() {
                   <X className="w-5 h-5 text-cream/50" />
                 </button>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-4 mb-6">
                 <div>
                   <label className="block text-sm text-cream/50 mb-2">Open</label>
@@ -550,7 +555,7 @@ export default function AdminMarketsPage() {
                   />
                 </div>
               </div>
-              
+
               <div className="flex gap-3">
                 <button
                   onClick={() => setShowCandleModal(false)}
@@ -593,12 +598,14 @@ export default function AdminMarketsPage() {
                   <X className="w-5 h-5 text-cream/50" />
                 </button>
               </div>
-              
+
               <div className="p-4 bg-gold/10 border border-gold/20 rounded-xl mb-4">
-                <p className="font-medium text-cream">{patternOptions.find(p => p.id === selectedPattern)?.name}</p>
-                <p className="text-sm text-cream/50">{patternOptions.find(p => p.id === selectedPattern)?.description}</p>
+                <p className="font-medium text-cream">{patternOptions.find((p) => p.id === selectedPattern)?.name}</p>
+                <p className="text-sm text-cream/50">
+                  {patternOptions.find((p) => p.id === selectedPattern)?.description}
+                </p>
               </div>
-              
+
               <div className="mb-6">
                 <label className="block text-sm text-cream/50 mb-2">Base Price</label>
                 <input
@@ -610,14 +617,14 @@ export default function AdminMarketsPage() {
                 />
                 <p className="text-xs text-cream/40 mt-2">Pattern will be generated around this price level</p>
               </div>
-              
+
               <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl mb-6 flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
                 <p className="text-xs text-yellow-500/80">
                   This will add 30-50 candles to create the pattern. Current price will be updated.
                 </p>
               </div>
-              
+
               <div className="flex gap-3">
                 <button
                   onClick={() => setShowPatternModal(false)}

@@ -1,166 +1,279 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { Shield, Eye, EyeOff, AlertCircle, Lock, Mail } from 'lucide-react';
-import { useAdminAuthStore } from '@/lib/admin-store';
+import {
+  Users,
+  Wallet,
+  TrendingUp,
+  DollarSign,
+  ArrowUpRight,
+  ArrowDownRight,
+  Clock,
+  CheckCircle,
+  AlertCircle,
+  Activity,
+  BarChart3,
+  CreditCard,
+  Eye
+} from 'lucide-react';
+import { useDepositSettingsStore } from '@/lib/deposit-settings';
 
-export default function AdminLoginPage() {
-  const router = useRouter();
-  const { login } = useAdminAuthStore();
+export default function AdminDashboardPage() {
+  const { pendingDeposits, confirmedDeposits, getPendingDeposits } = useDepositSettingsStore();
+  const pending = getPendingDeposits();
   
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
+  // Mock stats - in production these would come from your database
+  const [stats, setStats] = useState({
+    totalUsers: 1247,
+    activeUsers: 892,
+    totalDeposits: 458320,
+    pendingDeposits: pending.length,
+    totalTrades: 15892,
+    openTrades: 342,
+    totalVolume: 2450000,
+    todayVolume: 125000
+  });
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setIsLoading(true);
-
-    try {
-      const success = await login(email, password);
-      if (success) {
-        router.push('/admin');
-      } else {
-        setError('Invalid credentials. Access denied.');
-      }
-    } catch (err) {
-      setError('An error occurred. Please try again.');
-    } finally {
-      setIsLoading(false);
+  const quickStats = [
+    {
+      title: 'Total Users',
+      value: stats.totalUsers.toLocaleString(),
+      change: '+12.5%',
+      positive: true,
+      icon: Users,
+      color: 'bg-blue-500/10 text-blue-500'
+    },
+    {
+      title: 'Total Deposits',
+      value: `$${stats.totalDeposits.toLocaleString()}`,
+      change: '+8.2%',
+      positive: true,
+      icon: Wallet,
+      color: 'bg-profit/10 text-profit'
+    },
+    {
+      title: 'Pending Deposits',
+      value: pending.length.toString(),
+      change: pending.length > 0 ? 'Action Required' : 'All Clear',
+      positive: pending.length === 0,
+      icon: Clock,
+      color: pending.length > 0 ? 'bg-yellow-500/10 text-yellow-500' : 'bg-profit/10 text-profit',
+      link: '/admin/deposits'
+    },
+    {
+      title: 'Trading Volume',
+      value: `$${(stats.totalVolume / 1000000).toFixed(2)}M`,
+      change: '+15.3%',
+      positive: true,
+      icon: BarChart3,
+      color: 'bg-gold/10 text-gold'
     }
-  };
+  ];
+
+  const recentActivity = [
+    { type: 'deposit', user: 'john@email.com', amount: 500, status: 'pending', time: '2 min ago' },
+    { type: 'trade', user: 'mary@email.com', pair: 'EUR/USD', pnl: 125, time: '5 min ago' },
+    { type: 'deposit', user: 'alex@email.com', amount: 1000, status: 'confirmed', time: '12 min ago' },
+    { type: 'signup', user: 'new@user.com', time: '15 min ago' },
+    { type: 'withdrawal', user: 'trader@email.com', amount: 300, status: 'processing', time: '20 min ago' },
+  ];
 
   return (
-    <div className="min-h-screen bg-void flex items-center justify-center p-4">
-      {/* Background Effects */}
-      <div className="absolute inset-0 overflow-hidden">
-        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-loss/10 rounded-full blur-3xl" />
-        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-gold/5 rounded-full blur-3xl" />
+    <div>
+      {/* Header */}
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-cream">Dashboard Overview</h1>
+        <p className="text-slate-400 mt-1">Welcome back! Here's what's happening today.</p>
       </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="relative w-full max-w-md"
-      >
-        {/* Admin Badge */}
-        <div className="flex justify-center mb-8">
-          <div className="flex items-center gap-3 px-6 py-3 bg-loss/10 border border-loss/20 rounded-full">
-            <Shield className="w-5 h-5 text-loss" />
-            <span className="text-loss font-semibold">ADMIN ACCESS</span>
-          </div>
-        </div>
-
-        {/* Login Card */}
-        <div className="bg-obsidian/80 backdrop-blur-xl rounded-3xl border border-white/10 p-8">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-gradient-to-br from-loss/20 to-gold/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <Lock className="w-8 h-8 text-gold" />
-            </div>
-            <h1 className="text-2xl font-display font-bold text-cream">
-              Admin Portal
-            </h1>
-            <p className="text-slate-400 mt-2">
-              Signal Provider Access Only
-            </p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Email */}
+      {/* Alert for pending deposits */}
+      {pending.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-6 p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-xl flex items-center justify-between"
+        >
+          <div className="flex items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-yellow-500" />
             <div>
-              <label className="block text-sm font-medium text-slate-400 mb-2">
-                Admin Email
-              </label>
-              <div className="relative">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-12 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-loss/50 transition-colors"
-                  placeholder="admin@novatrade.com"
-                  required
-                />
-              </div>
+              <p className="text-yellow-500 font-medium">
+                {pending.length} Pending Deposit{pending.length > 1 ? 's' : ''} Awaiting Approval
+              </p>
+              <p className="text-yellow-500/70 text-sm">
+                Total: ${pending.reduce((sum, d) => sum + d.amount, 0).toLocaleString()}
+              </p>
             </div>
+          </div>
+          <Link
+            href="/admin/deposits"
+            className="px-4 py-2 bg-yellow-500 text-void font-medium rounded-lg hover:bg-yellow-400 transition-colors flex items-center gap-2"
+          >
+            <Eye className="w-4 h-4" />
+            Review Now
+          </Link>
+        </motion.div>
+      )}
 
-            {/* Password */}
-            <div>
-              <label className="block text-sm font-medium text-slate-400 mb-2">
-                Password
-              </label>
-              <div className="relative">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-12 pr-12 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-loss/50 transition-colors"
-                  placeholder="••••••••"
-                  required
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 hover:text-cream transition-colors"
-                >
-                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                </button>
+      {/* Quick Stats */}
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {quickStats.map((stat, index) => (
+          <motion.div
+            key={stat.title}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: index * 0.1 }}
+          >
+            {stat.link ? (
+              <Link href={stat.link} className="block p-5 bg-white/5 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                <div className="flex items-center justify-between mb-3">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stat.color}`}>
+                    <stat.icon className="w-5 h-5" />
+                  </div>
+                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                    stat.positive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                  }`}>
+                    {stat.change}
+                  </span>
+                </div>
+                <p className="text-2xl font-bold text-cream">{stat.value}</p>
+                <p className="text-sm text-cream/50 mt-1">{stat.title}</p>
+              </Link>
+            ) : (
+              <div className="p-5 bg-white/5 rounded-2xl border border-white/5">
+                <div className="flex items-center justify-between mb-3">
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stat.color}`}>
+                    <stat.icon className="w-5 h-5" />
+                  </div>
+                  <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                    stat.positive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                  }`}>
+                    {stat.change}
+                  </span>
+                </div>
+                <p className="text-2xl font-bold text-cream">{stat.value}</p>
+                <p className="text-sm text-cream/50 mt-1">{stat.title}</p>
               </div>
-            </div>
-
-            {/* Error */}
-            {error && (
-              <motion.div
-                initial={{ opacity: 0, y: -10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center gap-2 p-3 bg-loss/10 border border-loss/20 rounded-xl text-loss text-sm"
-              >
-                <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                {error}
-              </motion.div>
             )}
+          </motion.div>
+        ))}
+      </div>
 
-            {/* Submit */}
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full py-3 bg-gradient-to-r from-loss to-loss/80 text-white font-semibold rounded-xl hover:shadow-lg hover:shadow-loss/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {isLoading ? (
-                <>
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Authenticating...
-                </>
-              ) : (
-                <>
-                  <Shield className="w-5 h-5" />
-                  Access Admin Panel
-                </>
-              )}
-            </button>
-          </form>
-
-          {/* Demo Credentials */}
-          <div className="mt-6 p-4 bg-gold/5 border border-gold/10 rounded-xl">
-            <p className="text-xs text-gold font-medium mb-2">Demo Credentials:</p>
-            <div className="space-y-1 text-xs text-slate-400 font-mono">
-              <p>Email: admin@novatrade.com</p>
-              <p>Password: admin123</p>
-            </div>
+      {/* Main Content Grid */}
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Recent Activity */}
+        <div className="lg:col-span-2 bg-white/5 rounded-2xl border border-white/5 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-cream">Recent Activity</h2>
+            <Activity className="w-5 h-5 text-cream/30" />
+          </div>
+          <div className="space-y-3">
+            {recentActivity.map((activity, index) => (
+              <div key={index} className="flex items-center justify-between p-3 bg-void/30 rounded-xl">
+                <div className="flex items-center gap-3">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                    activity.type === 'deposit' ? 'bg-profit/10' :
+                    activity.type === 'withdrawal' ? 'bg-loss/10' :
+                    activity.type === 'trade' ? 'bg-gold/10' : 'bg-blue-500/10'
+                  }`}>
+                    {activity.type === 'deposit' && <ArrowDownRight className="w-4 h-4 text-profit" />}
+                    {activity.type === 'withdrawal' && <ArrowUpRight className="w-4 h-4 text-loss" />}
+                    {activity.type === 'trade' && <TrendingUp className="w-4 h-4 text-gold" />}
+                    {activity.type === 'signup' && <Users className="w-4 h-4 text-blue-500" />}
+                  </div>
+                  <div>
+                    <p className="text-sm text-cream">
+                      {activity.type === 'signup' ? 'New user registered' :
+                       activity.type === 'trade' ? `Trade on ${activity.pair}` :
+                       `${activity.type.charAt(0).toUpperCase() + activity.type.slice(1)}`}
+                    </p>
+                    <p className="text-xs text-cream/50">{activity.user}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  {activity.amount && (
+                    <p className={`text-sm font-medium ${
+                      activity.type === 'deposit' ? 'text-profit' : 'text-loss'
+                    }`}>
+                      {activity.type === 'deposit' ? '+' : '-'}${activity.amount}
+                    </p>
+                  )}
+                  {activity.pnl !== undefined && (
+                    <p className={`text-sm font-medium ${activity.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {activity.pnl >= 0 ? '+' : ''}${activity.pnl}
+                    </p>
+                  )}
+                  <p className="text-xs text-cream/40">{activity.time}</p>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Warning */}
-        <p className="text-center text-xs text-slate-500 mt-6">
-          ⚠️ Unauthorized access is strictly prohibited and monitored.
-        </p>
-      </motion.div>
+        {/* Quick Actions */}
+        <div className="space-y-4">
+          <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
+            <h2 className="text-lg font-semibold text-cream mb-4">Quick Actions</h2>
+            <div className="space-y-2">
+              <Link
+                href="/admin/deposits"
+                className="flex items-center gap-3 p-3 bg-void/30 rounded-xl hover:bg-void/50 transition-colors"
+              >
+                <CreditCard className="w-5 h-5 text-gold" />
+                <span className="text-sm text-cream">Review Deposits</span>
+                {pending.length > 0 && (
+                  <span className="ml-auto px-2 py-0.5 bg-loss text-white text-xs rounded-full">
+                    {pending.length}
+                  </span>
+                )}
+              </Link>
+              <Link
+                href="/admin/users"
+                className="flex items-center gap-3 p-3 bg-void/30 rounded-xl hover:bg-void/50 transition-colors"
+              >
+                <Users className="w-5 h-5 text-blue-500" />
+                <span className="text-sm text-cream">Manage Users</span>
+              </Link>
+              <Link
+                href="/admin/markets"
+                className="flex items-center gap-3 p-3 bg-void/30 rounded-xl hover:bg-void/50 transition-colors"
+              >
+                <TrendingUp className="w-5 h-5 text-profit" />
+                <span className="text-sm text-cream">Control Markets</span>
+              </Link>
+              <Link
+                href="/admin/settings"
+                className="flex items-center gap-3 p-3 bg-void/30 rounded-xl hover:bg-void/50 transition-colors"
+              >
+                <Activity className="w-5 h-5 text-electric" />
+                <span className="text-sm text-cream">Platform Settings</span>
+              </Link>
+            </div>
+          </div>
+
+          {/* System Status */}
+          <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
+            <h2 className="text-lg font-semibold text-cream mb-4">System Status</h2>
+            <div className="space-y-3">
+              {[
+                { name: 'API Server', status: 'online' },
+                { name: 'Database', status: 'online' },
+                { name: 'Payment Gateway', status: 'online' },
+                { name: 'WebSocket', status: 'online' },
+              ].map((service) => (
+                <div key={service.name} className="flex items-center justify-between">
+                  <span className="text-sm text-cream/70">{service.name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 bg-profit rounded-full animate-pulse" />
+                    <span className="text-xs text-profit capitalize">{service.status}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

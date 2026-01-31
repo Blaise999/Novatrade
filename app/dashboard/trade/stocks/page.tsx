@@ -21,13 +21,10 @@ import {
   Building2,
   X,
   Activity,
-  Lock,
-  Crown,
   Wallet
 } from 'lucide-react';
 import { useAuthStore } from '@/lib/store';
 import { useTradingAccountStore } from '@/lib/trading-store';
-import { useMembershipStore, TIER_CONFIG, canPerformAction } from '@/lib/membership-tiers';
 import { marketAssets } from '@/lib/data';
 import { StockPosition } from '@/lib/trading-types';
 
@@ -60,8 +57,8 @@ export default function StockTradingPage() {
     executeStockSell, 
     updateStockPositionPrice 
   } = useTradingAccountStore();
-  const { currentTier } = useMembershipStore();
-  const tierConfig = TIER_CONFIG[currentTier];
+  
+  // Stocks are FREE for all users - no tier restrictions
   
   // State
   const [selectedAsset, setSelectedAsset] = useState(stockAssets[0]);
@@ -92,8 +89,8 @@ export default function StockTradingPage() {
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartDimensions, setChartDimensions] = useState({ width: 300, height: 250 });
   
-  // Check if user can trade
-  const canTrade = canPerformAction(currentTier, 'trade');
+  // Stocks are free for ALL users - no restrictions
+  const canTrade = true;
   
   // Filter assets
   const filteredAssets = stockAssets.filter(asset =>
@@ -466,25 +463,7 @@ export default function StockTradingPage() {
         
         {/* Trading Panel */}
         <div className={`${mobileTab === 'trade' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}>
-          {/* Tier Gate */}
-          {!canTrade && (
-            <div className="p-4 m-3 bg-gold/10 border border-gold/30 rounded-xl">
-              <div className="flex items-center gap-3 mb-2">
-                <Lock className="w-5 h-5 text-gold" />
-                <span className="font-semibold text-cream">Trading Locked</span>
-              </div>
-              <p className="text-sm text-cream/70 mb-3">
-                Upgrade to Starter tier ($500) or higher to access live stock trading.
-              </p>
-              <Link
-                href="/pricing"
-                className="flex items-center justify-center gap-2 w-full py-2 bg-gold text-void font-semibold rounded-lg hover:bg-gold/90 transition-colors"
-              >
-                <Crown className="w-4 h-4" />
-                Upgrade Now
-              </Link>
-            </div>
-          )}
+          {/* Stocks are FREE for all users! */}
           
           {/* Account Summary */}
           <div className="p-3 border-b border-white/10">

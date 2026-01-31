@@ -134,11 +134,11 @@ export default function HelpPage() {
 
       {/* Quick Contact */}
       <div className="grid sm:grid-cols-3 gap-4">
-        <motion.a
-          href="#"
+        <motion.button
+          onClick={() => window.open('mailto:support@novatrade.com', '_blank')}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="p-5 bg-white/5 rounded-2xl border border-white/5 hover:border-white/10 transition-all group"
+          className="p-5 bg-white/5 rounded-2xl border border-white/5 hover:border-white/10 transition-all group text-left"
         >
           <div className="w-12 h-12 bg-gold/10 rounded-xl flex items-center justify-center mb-3">
             <MessageCircle className="w-6 h-6 text-gold" />
@@ -149,7 +149,7 @@ export default function HelpPage() {
             <span className="w-2 h-2 bg-profit rounded-full animate-pulse" />
             Available 24/7
           </div>
-        </motion.a>
+        </motion.button>
 
         <motion.a
           href="mailto:support@novatrade.com"
