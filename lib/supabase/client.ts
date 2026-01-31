@@ -4,8 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 // SUPABASE CLIENT CONFIGURATION
 // ============================================
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://your-project.supabase.co';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'your-anon-key';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://nibeakgmmusddttmazzu.supabase.co';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5pYmVha2dtbXVzZGR0dG1henp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3OTA1NjUsImV4cCI6MjA4NTM2NjU2NX0.DJWwjZrS6PDym4-aWescc8cogrvXZr4BEIG2jrsHOg0';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   realtime: {
