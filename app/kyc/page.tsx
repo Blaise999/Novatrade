@@ -140,7 +140,7 @@ export default function KYCPage() {
           </Link>
           
           <button
-            onClick={() => router.push('/dashboard')}
+            onClick={() => router.push('/connect-wallet')}
             className="text-sm text-slate-400 hover:text-cream transition-colors"
           >
             Skip for now
@@ -811,14 +811,11 @@ function SuccessStep() {
           onClick={() => router.push('/connect-wallet')}
           className="w-full max-w-md py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
         >
-          Connect Wallet
+          Continue to Wallet Connection
         </button>
-        <button
-          onClick={() => router.push('/dashboard')}
-          className="w-full max-w-md py-4 bg-white/5 border border-white/10 text-cream font-semibold rounded-xl hover:bg-white/10 transition-all"
-        >
-          Go to Dashboard
-        </button>
+        <p className="text-xs text-slate-500 text-center">
+          You can also connect your wallet later from Settings
+        </p>
       </div>
     </motion.div>
   );

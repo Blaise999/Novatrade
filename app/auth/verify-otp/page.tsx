@@ -111,8 +111,9 @@ export default function VerifyOTPPage() {
             setOtpPassword(null);
             
             setTimeout(() => {
-              // Redirect to stored URL or wallet (deposit) page
-              const destination = redirectUrl || '/dashboard/wallet';
+              // Redirect to stored URL or KYC verification
+              // New users go through: Signup → OTP → KYC → Wallet Connect → Dashboard
+              const destination = redirectUrl || '/kyc';
               router.push(destination);
             }, 2000);
           } else {

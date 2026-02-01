@@ -36,6 +36,19 @@ export default function ConnectWalletPage() {
   const { data: ensName } = useEnsName({ address, chainId: mainnet.id });
   const { data: balance } = useBalance({ address });
   const [copied, setCopied] = useState(false);
+  const [hasRedirected, setHasRedirected] = useState(false);
+
+  // Auto-redirect to dashboard when wallet connects (for onboarding flow)
+  useEffect(() => {
+    if (isConnected && address && !hasRedirected) {
+      // Small delay to show success state before redirect
+      const timer = setTimeout(() => {
+        setHasRedirected(true);
+        router.push('/dashboard');
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [isConnected, address, hasRedirected, router]);
 
   const copyAddress = async () => {
     if (address) {
@@ -98,75 +111,63 @@ export default function ConnectWalletPage() {
                   <p className="text-cream/60">Connecting...</p>
                 </div>
               ) : isConnected && address ? (
-                // Connected State
+                // Connected State - Redirecting
                 <div className="space-y-6">
-                  {/* Wallet Info */}
-                  <div className="p-4 bg-white/5 rounded-xl">
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-xs text-cream/50">Connected Address</span>
-                      <div className="flex items-center gap-1.5">
-                        <div className={`w-2 h-2 rounded-full ${chain?.id === 1 ? 'bg-profit' : 'bg-yellow-500'}`} />
-                        <span className="text-xs text-cream/50">{chain?.name || 'Unknown'}</span>
+                  {hasRedirected ? (
+                    <div className="text-center py-8">
+                      <div className="w-16 h-16 bg-profit/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Check className="w-8 h-8 text-profit" />
                       </div>
+                      <p className="text-lg font-semibold text-cream mb-2">Wallet Connected!</p>
+                      <p className="text-cream/60">Redirecting to dashboard...</p>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <p className="text-lg font-mono text-cream flex-1">
-                        {ensName || truncateAddress(address)}
-                      </p>
-                      <button
-                        onClick={copyAddress}
-                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                      >
-                        {copied ? (
-                          <Check className="w-4 h-4 text-profit" />
-                        ) : (
-                          <Copy className="w-4 h-4 text-cream/50" />
+                  ) : (
+                    <>
+                      {/* Wallet Info */}
+                      <div className="p-4 bg-white/5 rounded-xl">
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-xs text-cream/50">Connected Address</span>
+                          <div className="flex items-center gap-1.5">
+                            <div className={`w-2 h-2 rounded-full ${chain?.id === 1 ? 'bg-profit' : 'bg-yellow-500'}`} />
+                            <span className="text-xs text-cream/50">{chain?.name || 'Unknown'}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-lg font-mono text-cream flex-1">
+                            {ensName || truncateAddress(address)}
+                          </p>
+                          <button
+                            onClick={copyAddress}
+                            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                          >
+                            {copied ? (
+                              <Check className="w-4 h-4 text-profit" />
+                            ) : (
+                              <Copy className="w-4 h-4 text-cream/50" />
+                            )}
+                          </button>
+                          <a
+                            href={`https://${chain?.id === 1 ? '' : 'sepolia.'}etherscan.io/address/${address}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                          >
+                            <ExternalLink className="w-4 h-4 text-cream/50" />
+                          </a>
+                        </div>
+                        {balance && (
+                          <p className="text-2xl font-bold text-cream mt-3">
+                            {parseFloat(formatEther(balance.value)).toFixed(4)} {balance.symbol}
+                          </p>
                         )}
-                      </button>
-                      <a
-                        href={`https://${chain?.id === 1 ? '' : 'sepolia.'}etherscan.io/address/${address}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
-                      >
-                        <ExternalLink className="w-4 h-4 text-cream/50" />
-                      </a>
-                    </div>
-                    {balance && (
-                      <p className="text-2xl font-bold text-cream mt-3">
-                        {parseFloat(formatEther(balance.value)).toFixed(4)} {balance.symbol}
-                      </p>
-                    )}
-                  </div>
-
-                  {/* Actions */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <Link
-                      href="/dashboard"
-                      className="flex items-center justify-center gap-2 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all"
-                    >
-                      <Sparkles className="w-4 h-4" />
-                      Dashboard
-                    </Link>
-                    <button
-                      onClick={() => disconnect()}
-                      className="flex items-center justify-center gap-2 py-3 bg-white/5 text-cream font-semibold rounded-xl hover:bg-white/10 transition-all"
-                    >
-                      Disconnect
-                    </button>
-                  </div>
-
-                  {/* Network Warning */}
-                  {chain?.id !== 1 && (
-                    <div className="flex items-start gap-3 p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl">
-                      <AlertCircle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
-                      <div>
-                        <p className="text-sm text-yellow-500 font-medium">Testnet Connected</p>
-                        <p className="text-xs text-yellow-500/70 mt-0.5">
-                          You're on {chain?.name}. Switch to Mainnet for real transactions.
-                        </p>
                       </div>
-                    </div>
+
+                      {/* Redirecting indicator */}
+                      <div className="text-center">
+                        <div className="w-6 h-6 border-2 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-2" />
+                        <p className="text-sm text-cream/60">Redirecting to dashboard...</p>
+                      </div>
+                    </>
                   )}
                 </div>
               ) : (
@@ -213,6 +214,19 @@ export default function ConnectWalletPage() {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Skip Option */}
+                  <div className="pt-4 border-t border-white/10">
+                    <Link
+                      href="/dashboard"
+                      className="w-full flex items-center justify-center gap-2 py-3 bg-white/5 text-cream/70 font-medium rounded-xl hover:bg-white/10 hover:text-cream transition-all"
+                    >
+                      Skip for now
+                    </Link>
+                    <p className="text-xs text-cream/40 text-center mt-2">
+                      You can connect your wallet later from settings
+                    </p>
                   </div>
                 </div>
               )}

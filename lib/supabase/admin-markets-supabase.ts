@@ -5,7 +5,17 @@
  * for persistent storage across sessions and devices.
  */
 
-import { supabase, createServerClient } from '../supabase';
+import { supabase, isSupabaseConfigured } from './supabase-client';
+import { createServerSupabaseClient } from './supabase-client';
+
+// Helper to check if Supabase is available before making calls
+const checkSupabase = () => {
+  if (!isSupabaseConfigured()) {
+    console.warn('Supabase not configured - admin market features unavailable');
+    return false;
+  }
+  return true;
+};
 
 // ============================================
 // TYPES
@@ -93,41 +103,58 @@ export interface TradeOutcome {
 export const customPairsService = {
   // Get all custom pairs
   async getAll(): Promise<CustomPair[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('custom_pairs')
       .select('*')
       .order('created_at', { ascending: false });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching custom pairs:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get enabled pairs only (for users)
   async getEnabled(): Promise<CustomPair[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('custom_pairs')
       .select('*')
       .eq('is_enabled', true)
       .order('symbol');
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching enabled pairs:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Create new pair
-  async create(pair: Omit<CustomPair, 'id' | 'created_at'>): Promise<CustomPair> {
+  async create(pair: Omit<CustomPair, 'id' | 'created_at'>): Promise<CustomPair | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('custom_pairs')
       .insert(pair)
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error creating pair:', error);
+      return null;
+    }
     return data;
   },
 
   // Update pair
-  async update(id: string, updates: Partial<CustomPair>): Promise<CustomPair> {
+  async update(id: string, updates: Partial<CustomPair>): Promise<CustomPair | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('custom_pairs')
       .update({ ...updates, updated_at: new Date().toISOString() })
@@ -135,32 +162,49 @@ export const customPairsService = {
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error updating pair:', error);
+      return null;
+    }
     return data;
   },
 
   // Update current price
-  async updatePrice(symbol: string, price: number): Promise<void> {
+  async updatePrice(symbol: string, price: number): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('custom_pairs')
       .update({ current_price: price, updated_at: new Date().toISOString() })
       .eq('symbol', symbol);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error updating price:', error);
+      return false;
+    }
+    return true;
   },
 
   // Delete pair
-  async delete(id: string): Promise<void> {
+  async delete(id: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('custom_pairs')
       .delete()
       .eq('id', id);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error deleting pair:', error);
+      return false;
+    }
+    return true;
   },
 
   // Toggle enabled status
-  async toggle(id: string): Promise<CustomPair> {
+  async toggle(id: string): Promise<CustomPair | null> {
+    if (!checkSupabase()) return null;
+    
     const { data: current } = await supabase
       .from('custom_pairs')
       .select('is_enabled')
@@ -174,7 +218,10 @@ export const customPairsService = {
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error toggling pair:', error);
+      return null;
+    }
     return data;
   }
 };
@@ -186,6 +233,8 @@ export const customPairsService = {
 export const priceOverrideService = {
   // Get active override for a pair
   async getActive(pairSymbol: string): Promise<PriceOverride | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('price_overrides')
       .select('*')
@@ -193,23 +242,33 @@ export const priceOverrideService = {
       .eq('is_active', true)
       .single();
     
-    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error fetching price override:', error);
+      return null;
+    }
     return data;
   },
 
   // Get all overrides
   async getAll(): Promise<PriceOverride[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('price_overrides')
       .select('*')
       .order('created_at', { ascending: false });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching overrides:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Set price override (uses DB function)
-  async set(pairSymbol: string, price: number, direction: string, adminId: string): Promise<string> {
+  async set(pairSymbol: string, price: number, direction: string, adminId: string): Promise<string | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .rpc('apply_price_override', {
         p_pair: pairSymbol,
@@ -218,29 +277,44 @@ export const priceOverrideService = {
         p_admin_id: adminId
       });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error setting price override:', error);
+      return null;
+    }
     return data;
   },
 
   // Deactivate override
-  async deactivate(pairSymbol: string): Promise<void> {
+  async deactivate(pairSymbol: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('price_overrides')
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('pair_symbol', pairSymbol)
       .eq('is_active', true);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error deactivating override:', error);
+      return false;
+    }
+    return true;
   },
 
   // Deactivate all overrides
-  async deactivateAll(): Promise<void> {
+  async deactivateAll(): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('price_overrides')
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .eq('is_active', true);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error deactivating all overrides:', error);
+      return false;
+    }
+    return true;
   }
 };
 
@@ -251,28 +325,40 @@ export const priceOverrideService = {
 export const tradingSessionService = {
   // Get all sessions
   async getAll(): Promise<TradingSession[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('trading_sessions')
       .select('*')
       .order('starts_at', { ascending: false });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching sessions:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get active sessions
   async getActive(): Promise<TradingSession[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('trading_sessions')
       .select('*')
       .eq('status', 'active');
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching active sessions:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get upcoming sessions
   async getUpcoming(): Promise<TradingSession[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('trading_sessions')
       .select('*')
@@ -280,55 +366,81 @@ export const tradingSessionService = {
       .gte('starts_at', new Date().toISOString())
       .order('starts_at');
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching upcoming sessions:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Create session
-  async create(session: Omit<TradingSession, 'id' | 'created_at' | 'participants_count' | 'total_volume'>): Promise<TradingSession> {
+  async create(session: Omit<TradingSession, 'id' | 'created_at' | 'participants_count' | 'total_volume'>): Promise<TradingSession | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('trading_sessions')
       .insert(session)
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error creating session:', error);
+      return null;
+    }
     return data;
   },
 
   // Start session
   async start(sessionId: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { data, error } = await supabase
       .rpc('start_trading_session', { p_session_id: sessionId });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error starting session:', error);
+      return false;
+    }
     return data;
   },
 
   // End session
   async end(sessionId: string, endPrice: number): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { data, error } = await supabase
       .rpc('end_trading_session', { 
         p_session_id: sessionId,
         p_end_price: endPrice
       });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error ending session:', error);
+      return false;
+    }
     return data;
   },
 
   // Cancel session
-  async cancel(sessionId: string): Promise<void> {
+  async cancel(sessionId: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('trading_sessions')
       .update({ status: 'cancelled', updated_at: new Date().toISOString() })
       .eq('id', sessionId);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error cancelling session:', error);
+      return false;
+    }
+    return true;
   },
 
   // Update session stats
-  async updateStats(sessionId: string, participants: number, volume: number): Promise<void> {
+  async updateStats(sessionId: string, participants: number, volume: number): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('trading_sessions')
       .update({ 
@@ -338,7 +450,11 @@ export const tradingSessionService = {
       })
       .eq('id', sessionId);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error updating session stats:', error);
+      return false;
+    }
+    return true;
   }
 };
 
@@ -349,18 +465,25 @@ export const tradingSessionService = {
 export const tradeOutcomeService = {
   // Get pending outcomes for a user
   async getForUser(userId: string): Promise<TradeOutcome[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('trade_outcomes')
       .select('*')
       .eq('user_id', userId)
       .eq('is_applied', false);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching user outcomes:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get outcome for specific trade
   async getForTrade(tradeId: string): Promise<TradeOutcome | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('trade_outcomes')
       .select('*')
@@ -368,12 +491,17 @@ export const tradeOutcomeService = {
       .eq('is_applied', false)
       .single();
     
-    if (error && error.code !== 'PGRST116') throw error;
+    if (error && error.code !== 'PGRST116') {
+      console.error('Error fetching trade outcome:', error);
+      return null;
+    }
     return data;
   },
 
   // Force trade outcome
   async force(tradeId: string, outcome: 'win' | 'lose' | 'breakeven', targetPnl: number, adminId: string, note?: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { data, error } = await supabase
       .rpc('force_trade_outcome', {
         p_trade_id: tradeId,
@@ -383,18 +511,27 @@ export const tradeOutcomeService = {
         p_note: note
       });
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error forcing trade outcome:', error);
+      return false;
+    }
     return data;
   },
 
   // Mark outcome as applied
-  async markApplied(outcomeId: string): Promise<void> {
+  async markApplied(outcomeId: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('trade_outcomes')
       .update({ is_applied: true, applied_at: new Date().toISOString() })
       .eq('id', outcomeId);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error marking outcome as applied:', error);
+      return false;
+    }
+    return true;
   }
 };
 
@@ -405,47 +542,68 @@ export const tradeOutcomeService = {
 export const marketPatternService = {
   // Get all patterns
   async getAll(): Promise<MarketPattern[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('market_patterns')
       .select('*')
       .order('name');
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching patterns:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get public patterns
   async getPublic(): Promise<MarketPattern[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('market_patterns')
       .select('*')
       .eq('is_public', true)
       .order('name');
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching public patterns:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Create pattern
-  async create(pattern: Omit<MarketPattern, 'id'>): Promise<MarketPattern> {
+  async create(pattern: Omit<MarketPattern, 'id'>): Promise<MarketPattern | null> {
+    if (!checkSupabase()) return null;
+    
     const { data, error } = await supabase
       .from('market_patterns')
       .insert(pattern)
       .select()
       .single();
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error creating pattern:', error);
+      return null;
+    }
     return data;
   },
 
   // Delete pattern
-  async delete(id: string): Promise<void> {
+  async delete(id: string): Promise<boolean> {
+    if (!checkSupabase()) return false;
+    
     const { error } = await supabase
       .from('market_patterns')
       .delete()
       .eq('id', id);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error deleting pattern:', error);
+      return false;
+    }
+    return true;
   }
 };
 
@@ -456,6 +614,8 @@ export const marketPatternService = {
 export const adminLogService = {
   // Log an action
   async log(adminId: string, action: string, targetType?: string, targetId?: string, details?: any): Promise<void> {
+    if (!checkSupabase()) return;
+    
     const { error } = await supabase
       .from('admin_logs')
       .insert({
@@ -471,18 +631,25 @@ export const adminLogService = {
 
   // Get recent logs
   async getRecent(limit: number = 50): Promise<any[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('admin_logs')
       .select('*, users:admin_id(email)')
       .order('created_at', { ascending: false })
       .limit(limit);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching logs:', error);
+      return [];
+    }
     return data || [];
   },
 
   // Get logs for specific admin
   async getForAdmin(adminId: string, limit: number = 50): Promise<any[]> {
+    if (!checkSupabase()) return [];
+    
     const { data, error } = await supabase
       .from('admin_logs')
       .select('*')
@@ -490,7 +657,10 @@ export const adminLogService = {
       .order('created_at', { ascending: false })
       .limit(limit);
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error fetching admin logs:', error);
+      return [];
+    }
     return data || [];
   }
 };
@@ -502,6 +672,10 @@ export const adminLogService = {
 export const marketSubscriptions = {
   // Subscribe to price changes
   onPriceChange(callback: (payload: any) => void) {
+    if (!checkSupabase()) {
+      return { unsubscribe: () => {} };
+    }
+    
     return supabase
       .channel('price-changes')
       .on(
@@ -514,6 +688,10 @@ export const marketSubscriptions = {
 
   // Subscribe to active overrides
   onOverrideChange(callback: (payload: any) => void) {
+    if (!checkSupabase()) {
+      return { unsubscribe: () => {} };
+    }
+    
     return supabase
       .channel('override-changes')
       .on(
@@ -526,6 +704,10 @@ export const marketSubscriptions = {
 
   // Subscribe to session changes
   onSessionChange(callback: (payload: any) => void) {
+    if (!checkSupabase()) {
+      return { unsubscribe: () => {} };
+    }
+    
     return supabase
       .channel('session-changes')
       .on(
@@ -542,6 +724,8 @@ export const marketSubscriptions = {
 // ============================================
 
 export async function getEffectivePrice(pairSymbol: string, marketPrice: number): Promise<number> {
+  if (!checkSupabase()) return marketPrice;
+  
   const override = await priceOverrideService.getActive(pairSymbol);
   
   if (override?.is_active && override.override_price) {

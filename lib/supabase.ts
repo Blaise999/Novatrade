@@ -1,15 +1,76 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 // These will come from environment variables
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+
+// Check if properly configured
+const isConfigured = supabaseUrl.length > 0 && 
+                     supabaseAnonKey.length > 0 && 
+                     supabaseUrl.includes('supabase.co');
+
+/**
+ * Creates a "disabled" client that handles missing configuration gracefully
+ */
+function createDisabledClient(message: string): SupabaseClient {
+  const handler: ProxyHandler<any> = {
+    get(target, prop) {
+      if (prop === 'auth') {
+        return new Proxy({}, {
+          get(_, authProp) {
+            if (authProp === 'getSession') {
+              return async () => ({ data: { session: null }, error: null });
+            }
+            if (authProp === 'getUser') {
+              return async () => ({ data: { user: null }, error: null });
+            }
+            if (authProp === 'onAuthStateChange') {
+              return () => ({ data: { subscription: { unsubscribe: () => {} } } });
+            }
+            return () => Promise.resolve({ data: null, error: { message } });
+          }
+        });
+      }
+      if (prop === 'from') {
+        return () => new Proxy({}, {
+          get() {
+            return () => Promise.resolve({ data: null, error: { message, code: 'SUPABASE_NOT_CONFIGURED' } });
+          }
+        });
+      }
+      if (prop === 'rpc') {
+        return () => Promise.resolve({ data: null, error: { message, code: 'SUPABASE_NOT_CONFIGURED' } });
+      }
+      if (prop === 'channel') {
+        return () => ({
+          on: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
+          subscribe: () => ({ unsubscribe: () => {} }),
+        });
+      }
+      if (prop === 'removeChannel') {
+        return () => {};
+      }
+      return () => Promise.reject(new Error(message));
+    }
+  };
+  
+  return new Proxy({}, handler) as SupabaseClient;
+}
 
 // Client-side Supabase client (for browser)
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase: SupabaseClient = isConfigured
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : createDisabledClient('Supabase not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local');
 
 // Server-side client with service role (for API routes)
-export const createServerClient = () => {
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+export const createServerClient = (): SupabaseClient => {
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  
+  if (!isConfigured || !serviceRoleKey) {
+    console.error('Server Supabase client requires SUPABASE_SERVICE_ROLE_KEY');
+    return createDisabledClient('Server Supabase client not configured');
+  }
+  
   return createClient(supabaseUrl, serviceRoleKey, {
     auth: {
       autoRefreshToken: false,

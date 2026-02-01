@@ -14,6 +14,7 @@ import {
   Loader2,
   CheckCircle
 } from 'lucide-react';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/supabase-client';
 
 const forgotPasswordSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -25,6 +26,7 @@ export default function ForgotPasswordPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSubmitted, setIsSubmitted] = useState(false);
   const [submittedEmail, setSubmittedEmail] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   const {
     register,
@@ -36,12 +38,38 @@ export default function ForgotPasswordPage() {
 
   const onSubmit = async (data: ForgotPasswordFormData) => {
     setIsLoading(true);
+    setError(null);
     
     try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      if (isSupabaseConfigured()) {
+        // Use Supabase password reset
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(data.email, {
+          redirectTo: `${window.location.origin}/auth/reset-password`,
+        });
+        
+        if (resetError) {
+          setError(resetError.message);
+          return;
+        }
+      } else {
+        // Fallback: Call the email API to send reset link
+        const response = await fetch('/api/email/send-reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: data.email }),
+        });
+        
+        if (!response.ok) {
+          const result = await response.json();
+          setError(result.error || 'Failed to send reset email');
+          return;
+        }
+      }
+      
       setSubmittedEmail(data.email);
       setIsSubmitted(true);
+    } catch (err: any) {
+      setError(err.message || 'Something went wrong. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -112,6 +140,18 @@ export default function ForgotPasswordPage() {
           No worries! Enter your email and we&apos;ll send you reset instructions.
         </p>
       </div>
+
+      {/* Error Alert */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 rounded-xl bg-loss/10 border border-loss/20 flex items-center gap-3"
+        >
+          <AlertCircle className="w-5 h-5 text-loss flex-shrink-0" />
+          <p className="text-sm text-loss">{error}</p>
+        </motion.div>
+      )}
 
       {/* Form */}
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
