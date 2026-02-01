@@ -26,11 +26,15 @@ import { useAdminAuthStore } from '@/lib/admin-store';
 
 const navigation = [
   { name: 'Dashboard', href: '/admin', icon: LayoutDashboard },
-  { name: 'Deposits', href: '/admin/deposits', icon: CreditCard },
-  { name: 'Sessions', href: '/admin/sessions', icon: Calendar },
-  { name: 'Signals', href: '/admin/signals', icon: Signal },
-  { name: 'Markets', href: '/admin/markets', icon: TrendingUp },
   { name: 'Users', href: '/admin/users', icon: Users },
+  { name: 'Balances', href: '/admin/balances', icon: Wallet },
+  { name: 'Trades', href: '/admin/trades', icon: TrendingUp },
+  { name: 'Deposits', href: '/admin/deposits', icon: CreditCard },
+  { name: 'Withdrawals', href: '/admin/withdrawals', icon: Database },
+  { name: 'Markets', href: '/admin/markets', icon: Activity },
+  { name: 'Education', href: '/admin/education', icon: Calendar },
+  { name: 'Sessions', href: '/admin/sessions', icon: Signal },
+  { name: 'Audit Log', href: '/admin/audit', icon: Shield },
   { name: 'Settings', href: '/admin/settings', icon: Settings },
 ];
 

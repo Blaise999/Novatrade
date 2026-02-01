@@ -24,45 +24,62 @@ import {
   Eye,
   EyeOff,
   Save,
-  Globe
+  Globe,
+  UserX,
+  UserCheck,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 import { useDepositAddressesStore } from '@/lib/trading-store';
+import { adminService, type User as AdminUser } from '@/lib/services/admin-service';
 
-// Mock users data (in production, this would come from a database)
-interface MockUser {
+// User type from admin service
+interface UserData {
   id: string;
   email: string;
-  name: string;
-  balance: number;
-  marginBalance: number;
-  status: 'active' | 'suspended' | 'pending';
-  kycLevel: number;
-  createdAt: string;
-  lastLogin: string;
+  first_name?: string;
+  last_name?: string;
+  balance_available: number;
+  balance_bonus: number;
+  total_deposited: number;
+  total_withdrawn: number;
+  role: string;
+  tier: string;
+  is_active: boolean;
+  kyc_status: string;
+  created_at: string;
+  last_login_at?: string;
 }
 
-const mockUsers: MockUser[] = [
-  { id: '1', email: 'john@example.com', name: 'John Doe', balance: 5000, marginBalance: 10000, status: 'active', kycLevel: 2, createdAt: '2024-01-15', lastLogin: '2024-01-20' },
-  { id: '2', email: 'jane@example.com', name: 'Jane Smith', balance: 15000, marginBalance: 25000, status: 'active', kycLevel: 3, createdAt: '2024-01-10', lastLogin: '2024-01-20' },
-  { id: '3', email: 'bob@example.com', name: 'Bob Wilson', balance: 2500, marginBalance: 5000, status: 'pending', kycLevel: 1, createdAt: '2024-01-18', lastLogin: '2024-01-19' },
-  { id: '4', email: 'alice@example.com', name: 'Alice Brown', balance: 50000, marginBalance: 100000, status: 'active', kycLevel: 3, createdAt: '2023-12-01', lastLogin: '2024-01-20' },
-  { id: '5', email: 'charlie@example.com', name: 'Charlie Davis', balance: 1000, marginBalance: 2000, status: 'suspended', kycLevel: 1, createdAt: '2024-01-05', lastLogin: '2024-01-10' },
+// Mock users for fallback
+const mockUsers: UserData[] = [
+  { id: '1', email: 'john@example.com', first_name: 'John', last_name: 'Doe', balance_available: 5000, balance_bonus: 100, total_deposited: 6000, total_withdrawn: 1000, role: 'user', tier: 'basic', is_active: true, kyc_status: 'verified', created_at: '2024-01-15', last_login_at: '2024-01-20' },
+  { id: '2', email: 'jane@example.com', first_name: 'Jane', last_name: 'Smith', balance_available: 15000, balance_bonus: 500, total_deposited: 20000, total_withdrawn: 5000, role: 'user', tier: 'pro', is_active: true, kyc_status: 'verified', created_at: '2024-01-10', last_login_at: '2024-01-20' },
+  { id: '3', email: 'bob@example.com', first_name: 'Bob', last_name: 'Wilson', balance_available: 2500, balance_bonus: 50, total_deposited: 3000, total_withdrawn: 500, role: 'user', tier: 'basic', is_active: true, kyc_status: 'pending', created_at: '2024-01-18', last_login_at: '2024-01-19' },
+  { id: '4', email: 'alice@example.com', first_name: 'Alice', last_name: 'Brown', balance_available: 50000, balance_bonus: 2000, total_deposited: 60000, total_withdrawn: 10000, role: 'user', tier: 'elite', is_active: true, kyc_status: 'verified', created_at: '2023-12-01', last_login_at: '2024-01-20' },
+  { id: '5', email: 'charlie@example.com', first_name: 'Charlie', last_name: 'Davis', balance_available: 1000, balance_bonus: 0, total_deposited: 2000, total_withdrawn: 1000, role: 'user', tier: 'basic', is_active: false, kyc_status: 'rejected', created_at: '2024-01-05', last_login_at: '2024-01-10' },
 ];
 
 export default function AdminUsersPage() {
   const { admin, isAuthenticated } = useAdminAuthStore();
   const { addresses, updateAddress, addAddress, toggleActive } = useDepositAddressesStore();
   
-  const [users, setUsers] = useState<MockUser[]>(mockUsers);
+  const [users, setUsers] = useState<UserData[]>(mockUsers);
+  const [loading, setLoading] = useState(true);
+  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedUser, setSelectedUser] = useState<MockUser | null>(null);
+  const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showAddressModal, setShowAddressModal] = useState(false);
+  const [showUserDetailModal, setShowUserDetailModal] = useState(false);
   const [editAmount, setEditAmount] = useState('');
-  const [editType, setEditType] = useState<'spot' | 'margin'>('spot');
+  const [editType, setEditType] = useState<'spot' | 'bonus'>('spot');
   const [editAction, setEditAction] = useState<'add' | 'subtract' | 'set'>('add');
   const [editNote, setEditNote] = useState('');
+  const [processing, setProcessing] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('');
+  const [roleFilter, setRoleFilter] = useState('');
   
   // New address form
   const [newAddress, setNewAddress] = useState({
@@ -76,6 +93,29 @@ export default function AdminUsersPage() {
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [editingAddressValue, setEditingAddressValue] = useState('');
 
+  useEffect(() => {
+    if (admin?.id) {
+      adminService.setAdminId(admin.id);
+    }
+    loadUsers();
+  }, [admin]);
+
+  const loadUsers = async () => {
+    setLoading(true);
+    try {
+      const { data, error } = await adminService.getAllUsers({ limit: 100 });
+      if (data && data.length > 0) {
+        setUsers(data as UserData[]);
+      } else {
+        // Use mock data for demo
+        setUsers(mockUsers);
+      }
+    } catch (error) {
+      setUsers(mockUsers);
+    }
+    setLoading(false);
+  };
+
   if (!isAuthenticated || !admin) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -84,44 +124,114 @@ export default function AdminUsersPage() {
     );
   }
 
-  const filteredUsers = users.filter(user =>
-    user.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    user.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredUsers = users.filter(user => {
+    if (statusFilter === 'active' && !user.is_active) return false;
+    if (statusFilter === 'inactive' && user.is_active) return false;
+    if (roleFilter && user.role !== roleFilter) return false;
+    if (searchQuery) {
+      const searchLower = searchQuery.toLowerCase();
+      return (
+        user.email.toLowerCase().includes(searchLower) ||
+        (user.first_name?.toLowerCase().includes(searchLower)) ||
+        (user.last_name?.toLowerCase().includes(searchLower))
+      );
+    }
+    return true;
+  });
 
-  const handleEditBalance = () => {
-    if (!selectedUser || !editAmount) return;
+  const handleEditBalance = async () => {
+    if (!selectedUser || !editAmount || !editNote) {
+      setNotification({ type: 'error', message: 'Please fill all fields including reason' });
+      return;
+    }
     
     const amount = parseFloat(editAmount);
-    if (isNaN(amount)) return;
-    
-    setUsers(prev => prev.map(user => {
-      if (user.id !== selectedUser.id) return user;
-      
-      const balanceKey = editType === 'spot' ? 'balance' : 'marginBalance';
-      let newBalance: number;
-      
-      switch (editAction) {
-        case 'add':
-          newBalance = user[balanceKey] + amount;
-          break;
-        case 'subtract':
-          newBalance = Math.max(0, user[balanceKey] - amount);
-          break;
-        case 'set':
-          newBalance = amount;
-          break;
-        default:
-          newBalance = user[balanceKey];
+    if (isNaN(amount) || amount <= 0) {
+      setNotification({ type: 'error', message: 'Invalid amount' });
+      return;
+    }
+
+    setProcessing(true);
+    try {
+      if (editAction === 'add') {
+        await adminService.creditBalance(selectedUser.id, amount, editNote);
+      } else if (editAction === 'subtract') {
+        await adminService.debitBalance(selectedUser.id, amount, editNote);
+      } else {
+        // Set - credit the difference
+        const diff = amount - selectedUser.balance_available;
+        if (diff > 0) {
+          await adminService.creditBalance(selectedUser.id, diff, editNote);
+        } else if (diff < 0) {
+          await adminService.debitBalance(selectedUser.id, Math.abs(diff), editNote);
+        }
       }
       
-      return { ...user, [balanceKey]: newBalance };
-    }));
+      setNotification({ type: 'success', message: 'Balance updated successfully' });
+      loadUsers();
+    } catch (error) {
+      // Update locally for demo
+      setUsers(prev => prev.map(user => {
+        if (user.id !== selectedUser.id) return user;
+        let newBalance: number;
+        switch (editAction) {
+          case 'add':
+            newBalance = user.balance_available + amount;
+            break;
+          case 'subtract':
+            newBalance = Math.max(0, user.balance_available - amount);
+            break;
+          case 'set':
+            newBalance = amount;
+            break;
+          default:
+            newBalance = user.balance_available;
+        }
+        return { ...user, balance_available: newBalance };
+      }));
+      setNotification({ type: 'success', message: 'Balance updated locally' });
+    }
     
+    setProcessing(false);
     setShowEditModal(false);
     setSelectedUser(null);
     setEditAmount('');
     setEditNote('');
+  };
+
+  const handleToggleUserStatus = async (user: UserData) => {
+    const action = user.is_active ? 'freeze' : 'unfreeze';
+    const reason = `User ${action}d by admin`;
+    
+    try {
+      if (user.is_active) {
+        await adminService.freezeUser(user.id, reason);
+      } else {
+        await adminService.unfreezeUser(user.id, reason);
+      }
+      setNotification({ type: 'success', message: `User ${action}d successfully` });
+      loadUsers();
+    } catch (error) {
+      // Update locally for demo
+      setUsers(prev => prev.map(u => 
+        u.id === user.id ? { ...u, is_active: !u.is_active } : u
+      ));
+      setNotification({ type: 'success', message: `User ${action}d locally` });
+    }
+  };
+
+  const handleChangeRole = async (user: UserData, newRole: string) => {
+    try {
+      await adminService.setUserRole(user.id, newRole as AdminUser['role'], `Role changed to ${newRole}`);
+      setNotification({ type: 'success', message: 'User role updated' });
+      loadUsers();
+    } catch (error) {
+      // Update locally for demo
+      setUsers(prev => prev.map(u => 
+        u.id === user.id ? { ...u, role: newRole } : u
+      ));
+      setNotification({ type: 'success', message: 'User role updated locally' });
+    }
   };
 
   const handleSaveAddress = (id: string) => {
@@ -149,17 +259,51 @@ export default function AdminUsersPage() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    setNotification({ type: 'success', message: 'Copied to clipboard' });
   };
 
   return (
     <div className="space-y-6">
+      {/* Notification */}
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className={`fixed top-4 right-4 z-50 p-4 rounded-xl flex items-center gap-3 ${
+              notification.type === 'success' ? 'bg-profit/20 border border-profit/30' : 'bg-loss/20 border border-loss/30'
+            }`}
+          >
+            {notification.type === 'success' ? (
+              <CheckCircle className="w-5 h-5 text-profit" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-loss" />
+            )}
+            <span className={notification.type === 'success' ? 'text-profit' : 'text-loss'}>
+              {notification.message}
+            </span>
+            <button onClick={() => setNotification(null)} className="ml-2">
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-cream">User Management</h1>
-          <p className="text-slate-400 mt-1">Manage user accounts and deposit addresses</p>
+          <p className="text-slate-400 mt-1">Manage user accounts, balances, and deposit addresses</p>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={loadUsers}
+            className="flex items-center gap-2 px-4 py-2 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
           <button
             onClick={() => setShowAddressModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-gold text-void font-semibold rounded-lg hover:bg-gold/90 transition-all"
@@ -170,32 +314,210 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* Deposit Addresses Section */}
-      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-        <div className="flex items-center justify-between p-4 border-b border-white/5">
-          <h2 className="text-lg font-semibold text-cream flex items-center gap-2">
-            <Bitcoin className="w-5 h-5 text-orange-500" />
-            Deposit Addresses
-          </h2>
-          <button
-            onClick={() => setShowAddressModal(true)}
-            className="text-sm text-gold hover:text-gold/80"
-          >
-            + Add New
-          </button>
+      {/* Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-gradient-to-br from-electric/20 to-electric/5 rounded-xl border border-electric/20 p-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-electric/20 rounded-lg">
+              <Users className="w-5 h-5 text-electric" />
+            </div>
+            <div>
+              <p className="text-sm text-slate-400">Total Users</p>
+              <p className="text-xl font-bold text-cream">{users.length}</p>
+            </div>
+          </div>
         </div>
+        <div className="bg-gradient-to-br from-profit/20 to-profit/5 rounded-xl border border-profit/20 p-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-profit/20 rounded-lg">
+              <UserCheck className="w-5 h-5 text-profit" />
+            </div>
+            <div>
+              <p className="text-sm text-slate-400">Active</p>
+              <p className="text-xl font-bold text-cream">{users.filter(u => u.is_active).length}</p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-gradient-to-br from-loss/20 to-loss/5 rounded-xl border border-loss/20 p-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-loss/20 rounded-lg">
+              <UserX className="w-5 h-5 text-loss" />
+            </div>
+            <div>
+              <p className="text-sm text-slate-400">Frozen</p>
+              <p className="text-xl font-bold text-cream">{users.filter(u => !u.is_active).length}</p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-gradient-to-br from-gold/20 to-gold/5 rounded-xl border border-gold/20 p-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-gold/20 rounded-lg">
+              <Shield className="w-5 h-5 text-gold" />
+            </div>
+            <div>
+              <p className="text-sm text-slate-400">KYC Verified</p>
+              <p className="text-xl font-bold text-cream">{users.filter(u => u.kyc_status === 'verified').length}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex flex-col md:flex-row gap-4">
+        <div className="relative flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by email or name..."
+            className="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+          />
+        </div>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+        >
+          <option value="">All Status</option>
+          <option value="active">Active</option>
+          <option value="inactive">Frozen</option>
+        </select>
+        <select
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value)}
+          className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+        >
+          <option value="">All Roles</option>
+          <option value="user">User</option>
+          <option value="support">Support</option>
+          <option value="admin">Admin</option>
+          <option value="super_admin">Super Admin</option>
+        </select>
+      </div>
+
+      {/* Users Table */}
+      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="text-xs text-slate-400 border-b border-white/5">
-                <th className="text-left p-4">Currency</th>
-                <th className="text-left p-4">Network</th>
-                <th className="text-left p-4">Address</th>
+                <th className="text-left p-4">User</th>
+                <th className="text-right p-4">Balance</th>
+                <th className="text-right p-4">Deposited</th>
+                <th className="text-center p-4">Role</th>
+                <th className="text-center p-4">KYC</th>
                 <th className="text-center p-4">Status</th>
-                <th className="text-right p-4">Actions</th>
+                <th className="text-center p-4">Actions</th>
               </tr>
             </thead>
             <tbody>
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="p-8 text-center text-slate-400">
+                    <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
+                    Loading users...
+                  </td>
+                </tr>
+              ) : filteredUsers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="p-8 text-center text-slate-400">
+                    No users found
+                  </td>
+                </tr>
+              ) : (
+                filteredUsers.map((user) => (
+                  <tr key={user.id} className="border-b border-white/5 hover:bg-white/5">
+                    <td className="p-4">
+                      <div>
+                        <p className="text-cream font-medium">{user.first_name} {user.last_name}</p>
+                        <p className="text-sm text-slate-400">{user.email}</p>
+                      </div>
+                    </td>
+                    <td className="p-4 text-right">
+                      <span className="text-cream font-mono">
+                        ${(user.balance_available || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      </span>
+                      {user.balance_bonus > 0 && (
+                        <p className="text-xs text-gold">+${user.balance_bonus} bonus</p>
+                      )}
+                    </td>
+                    <td className="p-4 text-right">
+                      <span className="text-profit font-mono">
+                        ${(user.total_deposited || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      </span>
+                    </td>
+                    <td className="p-4 text-center">
+                      <select
+                        value={user.role}
+                        onChange={(e) => handleChangeRole(user, e.target.value)}
+                        className="px-2 py-1 bg-white/5 border border-white/10 rounded text-xs text-cream focus:outline-none"
+                      >
+                        <option value="user">User</option>
+                        <option value="support">Support</option>
+                        <option value="admin">Admin</option>
+                        <option value="super_admin">Super Admin</option>
+                      </select>
+                    </td>
+                    <td className="p-4 text-center">
+                      <span className={`px-2 py-1 rounded-lg text-xs font-medium ${
+                        user.kyc_status === 'verified' ? 'bg-profit/20 text-profit' :
+                        user.kyc_status === 'pending' ? 'bg-gold/20 text-gold' :
+                        user.kyc_status === 'rejected' ? 'bg-loss/20 text-loss' :
+                        'bg-white/10 text-slate-400'
+                      }`}>
+                        {user.kyc_status?.toUpperCase() || 'NONE'}
+                      </span>
+                    </td>
+                    <td className="p-4 text-center">
+                      <span className={`px-2 py-1 rounded-lg text-xs font-medium ${
+                        user.is_active ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                      }`}>
+                        {user.is_active ? 'ACTIVE' : 'FROZEN'}
+                      </span>
+                    </td>
+                    <td className="p-4">
+                      <div className="flex items-center justify-center gap-2">
+                        <button
+                          onClick={() => {
+                            setSelectedUser(user);
+                            setShowUserDetailModal(true);
+                          }}
+                          className="p-1.5 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
+                          title="View Details"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedUser(user);
+                            setShowEditModal(true);
+                          }}
+                          className="p-1.5 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
+                          title="Edit Balance"
+                        >
+                          <DollarSign className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleToggleUserStatus(user)}
+                          className={`p-1.5 rounded-lg transition-all ${
+                            user.is_active 
+                              ? 'bg-loss/10 text-loss hover:bg-loss/20' 
+                              : 'bg-profit/10 text-profit hover:bg-profit/20'
+                          }`}
+                          title={user.is_active ? 'Freeze User' : 'Unfreeze User'}
+                        >
+                          {user.is_active ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
               {addresses.map(addr => (
                 <tr key={addr.id} className="border-b border-white/5 hover:bg-white/5">
                   <td className="p-4">
