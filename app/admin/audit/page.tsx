@@ -1,18 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import type { ElementType } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Shield,
   Search,
-  Filter,
   Download,
   RefreshCw,
   Clock,
   User,
   Eye,
   X,
-  ChevronDown,
   Activity,
   DollarSign,
   UserX,
@@ -24,10 +23,50 @@ import {
   FileText,
   AlertTriangle,
 } from 'lucide-react';
+
 import { useAdminAuthStore } from '@/lib/admin-store';
 import { adminService, type AuditLogEntry } from '@/lib/services/admin-service';
 
-const ACTION_CONFIG: Record<string, { icon: React.ElementType; color: string; label: string }> = {
+const safeJson = (v: unknown) => {
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+};
+
+// ✅ ALWAYS return a string so React children never receive an object {}
+const toDisplayText = (v: unknown): string => {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return String(v);
+  if (typeof v === 'object') return safeJson(v);
+  return String(v);
+};
+
+const getDetailsPreview = (details: unknown): string => {
+  if (details == null) return '';
+  if (typeof details === 'string') return details;
+  if (typeof details === 'number' || typeof details === 'boolean' || typeof details === 'bigint') {
+    return String(details);
+  }
+
+  if (typeof details === 'object') {
+    const rec = details as Record<string, unknown>;
+    const candidate = rec.reason ?? rec.note ?? rec.message;
+
+    // If reason/note/message is a string, show it; otherwise stringify it safely.
+    if (typeof candidate === 'string') return candidate;
+    if (candidate != null) return toDisplayText(candidate);
+
+    // fallback to full object as JSON
+    return safeJson(details);
+  }
+
+  return String(details);
+};
+
+const ACTION_CONFIG: Record<string, { icon: ElementType; color: string; label: string }> = {
   user_update: { icon: Edit, color: 'text-electric', label: 'User Updated' },
   balance_credit: { icon: DollarSign, color: 'text-profit', label: 'Balance Credit' },
   balance_debit: { icon: DollarSign, color: 'text-loss', label: 'Balance Debit' },
@@ -116,55 +155,53 @@ export default function AdminAuditPage() {
   const { admin, isAuthenticated } = useAdminAuthStore();
   const [logs, setLogs] = useState<AuditLogEntry[]>(MOCK_LOGS);
   const [loading, setLoading] = useState(true);
-  
+
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [actionFilter, setActionFilter] = useState('');
   const [targetTypeFilter, setTargetTypeFilter] = useState('');
   const [dateRange, setDateRange] = useState({ from: '', to: '' });
-  
+
   // Modal
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedLog, setSelectedLog] = useState<AuditLogEntry | null>(null);
 
   useEffect(() => {
-    if (admin?.id) {
-      adminService.setAdminId(admin.id);
-    }
-    loadLogs();
-  }, [admin]);
+    if (admin?.id) adminService.setAdminId(admin.id);
+    void loadLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [admin?.id]);
 
   const loadLogs = async () => {
     setLoading(true);
     try {
-      const { data, error } = await adminService.getAuditLogs({ limit: 100 });
-      if (data && data.length > 0) {
-        setLogs(data);
-      } else {
-        // Use mock data for demo
-        setLogs(MOCK_LOGS);
-      }
-    } catch (error) {
-      // Use mock data on error
+      const { data } = await adminService.getAuditLogs({ limit: 100 });
+      if (Array.isArray(data) && data.length > 0) setLogs(data);
+      else setLogs(MOCK_LOGS);
+    } catch {
       setLogs(MOCK_LOGS);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
-  const filteredLogs = logs.filter(log => {
+  const filteredLogs = logs.filter((log) => {
     if (actionFilter && log.action !== actionFilter) return false;
     if (targetTypeFilter && log.target_type !== targetTypeFilter) return false;
+
     if (searchQuery) {
       const searchLower = searchQuery.toLowerCase();
       return (
-        log.action.toLowerCase().includes(searchLower) ||
-        log.target_type?.toLowerCase().includes(searchLower) ||
-        log.target_id?.toLowerCase().includes(searchLower) ||
-        JSON.stringify(log.details).toLowerCase().includes(searchLower)
+        (log.action || '').toLowerCase().includes(searchLower) ||
+        (log.target_type || '').toLowerCase().includes(searchLower) ||
+        (log.target_id || '').toLowerCase().includes(searchLower) ||
+        safeJson(log.details).toLowerCase().includes(searchLower)
       );
     }
-    if (dateRange.from && new Date(log.created_at!) < new Date(dateRange.from)) return false;
-    if (dateRange.to && new Date(log.created_at!) > new Date(dateRange.to + 'T23:59:59')) return false;
+
+    if (dateRange.from && log.created_at && new Date(log.created_at) < new Date(dateRange.from)) return false;
+    if (dateRange.to && log.created_at && new Date(log.created_at) > new Date(dateRange.to + 'T23:59:59')) return false;
+
     return true;
   });
 
@@ -189,21 +226,21 @@ export default function AdminAuditPage() {
   };
 
   const exportLogs = () => {
-    const data = filteredLogs.map(log => ({
-      date: log.created_at,
-      action: log.action,
-      target_type: log.target_type,
-      target_id: log.target_id,
-      details: JSON.stringify(log.details),
-      previous_value: JSON.stringify(log.previous_value),
-      new_value: JSON.stringify(log.new_value),
+    const data = filteredLogs.map((log) => ({
+      date: log.created_at ?? '',
+      action: log.action ?? '',
+      target_type: log.target_type ?? '',
+      target_id: log.target_id ?? '',
+      details: safeJson(log.details),
+      previous_value: safeJson(log.previous_value),
+      new_value: safeJson(log.new_value),
     }));
-    
+
     const csv = [
       Object.keys(data[0] || {}).join(','),
-      ...data.map(row => Object.values(row).join(','))
+      ...data.map((row) => Object.values(row).join(',')),
     ].join('\n');
-    
+
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -263,6 +300,7 @@ export default function AdminAuditPage() {
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl border border-white/10 p-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-profit/20 rounded-lg">
@@ -271,11 +309,12 @@ export default function AdminAuditPage() {
             <div>
               <p className="text-sm text-slate-400">Balance Changes</p>
               <p className="text-xl font-bold text-cream">
-                {logs.filter(l => l.action.includes('balance')).length}
+                {logs.filter((l) => (l.action || '').includes('balance')).length}
               </p>
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl border border-white/10 p-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-electric/20 rounded-lg">
@@ -284,11 +323,12 @@ export default function AdminAuditPage() {
             <div>
               <p className="text-sm text-slate-400">User Actions</p>
               <p className="text-xl font-bold text-cream">
-                {logs.filter(l => l.target_type === 'user').length}
+                {logs.filter((l) => l.target_type === 'user').length}
               </p>
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl border border-white/10 p-4">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-loss/20 rounded-lg">
@@ -297,7 +337,7 @@ export default function AdminAuditPage() {
             <div>
               <p className="text-sm text-slate-400">Trade Interventions</p>
               <p className="text-xl font-bold text-cream">
-                {logs.filter(l => l.target_type === 'trade').length}
+                {logs.filter((l) => l.target_type === 'trade').length}
               </p>
             </div>
           </div>
@@ -316,6 +356,7 @@ export default function AdminAuditPage() {
             className="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
           />
         </div>
+
         <select
           value={actionFilter}
           onChange={(e) => setActionFilter(e.target.value)}
@@ -323,9 +364,12 @@ export default function AdminAuditPage() {
         >
           <option value="">All Actions</option>
           {Object.entries(ACTION_CONFIG).map(([key, config]) => (
-            <option key={key} value={key}>{config.label}</option>
+            <option key={key} value={key}>
+              {config.label}
+            </option>
           ))}
         </select>
+
         <select
           value={targetTypeFilter}
           onChange={(e) => setTargetTypeFilter(e.target.value)}
@@ -339,19 +383,19 @@ export default function AdminAuditPage() {
           <option value="pair">Pairs</option>
           <option value="setting">Settings</option>
         </select>
+
         <input
           type="date"
           value={dateRange.from}
-          onChange={(e) => setDateRange(prev => ({ ...prev, from: e.target.value }))}
+          onChange={(e) => setDateRange((prev) => ({ ...prev, from: e.target.value }))}
           className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-          placeholder="From"
         />
+
         <input
           type="date"
           value={dateRange.to}
-          onChange={(e) => setDateRange(prev => ({ ...prev, to: e.target.value }))}
+          onChange={(e) => setDateRange((prev) => ({ ...prev, to: e.target.value }))}
           className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-          placeholder="To"
         />
       </div>
 
@@ -370,9 +414,11 @@ export default function AdminAuditPage() {
         ) : (
           <div className="divide-y divide-white/5">
             {filteredLogs.map((log) => {
-              const config = getActionConfig(log.action);
+              const config = getActionConfig(log.action || 'unknown');
               const Icon = config.icon;
-              
+
+              const preview = getDetailsPreview(log.details);
+
               return (
                 <div
                   key={log.id}
@@ -386,28 +432,28 @@ export default function AdminAuditPage() {
                     <div className={`p-2 rounded-lg bg-white/5 ${config.color}`}>
                       <Icon className="w-5 h-5" />
                     </div>
+
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between">
                         <h4 className="text-cream font-medium">{config.label}</h4>
                         <span className="text-xs text-slate-500 flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {formatTimeAgo(log.created_at!)}
+                          {log.created_at ? formatTimeAgo(log.created_at) : '—'}
                         </span>
                       </div>
+
                       <p className="text-sm text-slate-400 mt-1">
-                        {log.target_type && (
-                          <span className="capitalize">{log.target_type}: </span>
-                        )}
+                        {log.target_type ? <span className="capitalize">{log.target_type}: </span> : null}
                         <span className="font-mono text-xs">{log.target_id}</span>
                       </p>
-                      {log.details && (
+
+                      {preview ? (
                         <p className="text-sm text-slate-500 mt-1 truncate">
-                          {typeof log.details === 'object' 
-                            ? (log.details as Record<string, unknown>).reason || (log.details as Record<string, unknown>).note || JSON.stringify(log.details)
-                            : log.details}
+                          {preview}
                         </p>
-                      )}
+                      ) : null}
                     </div>
+
                     <button className="p-1.5 bg-white/5 rounded-lg text-slate-400 hover:text-cream">
                       <Eye className="w-4 h-4" />
                     </button>
@@ -436,10 +482,7 @@ export default function AdminAuditPage() {
             >
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-xl font-semibold text-cream">Audit Log Details</h3>
-                <button
-                  onClick={() => setShowDetailModal(false)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
+                <button onClick={() => setShowDetailModal(false)} className="p-2 hover:bg-white/10 rounded-lg">
                   <X className="w-5 h-5 text-slate-400" />
                 </button>
               </div>
@@ -448,57 +491,60 @@ export default function AdminAuditPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Action</p>
-                    <p className={`text-sm font-medium ${getActionConfig(selectedLog.action).color}`}>
-                      {getActionConfig(selectedLog.action).label}
+                    <p className={`text-sm font-medium ${getActionConfig(selectedLog.action || 'unknown').color}`}>
+                      {getActionConfig(selectedLog.action || 'unknown').label}
                     </p>
                   </div>
+
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Date & Time</p>
                     <p className="text-sm text-cream">
-                      {new Date(selectedLog.created_at!).toLocaleString()}
+                      {selectedLog.created_at ? new Date(selectedLog.created_at).toLocaleString() : '—'}
                     </p>
                   </div>
+
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Target Type</p>
                     <p className="text-sm text-cream capitalize">{selectedLog.target_type || 'N/A'}</p>
                   </div>
+
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Target ID</p>
                     <p className="text-sm text-cream font-mono truncate">{selectedLog.target_id || 'N/A'}</p>
                   </div>
                 </div>
 
-                {selectedLog.details && (
+                {selectedLog.details != null && (
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400 mb-2">Details</p>
                     <pre className="text-sm text-cream font-mono whitespace-pre-wrap overflow-x-auto">
-                      {JSON.stringify(selectedLog.details, null, 2)}
+                      {safeJson(selectedLog.details)}
                     </pre>
                   </div>
                 )}
 
-                {selectedLog.previous_value && (
+                {selectedLog.previous_value != null && (
                   <div className="p-3 bg-loss/10 border border-loss/20 rounded-xl">
                     <p className="text-xs text-loss mb-2">Previous Value</p>
                     <pre className="text-sm text-cream font-mono whitespace-pre-wrap overflow-x-auto">
-                      {JSON.stringify(selectedLog.previous_value, null, 2)}
+                      {safeJson(selectedLog.previous_value)}
                     </pre>
                   </div>
                 )}
 
-                {selectedLog.new_value && (
+                {selectedLog.new_value != null && (
                   <div className="p-3 bg-profit/10 border border-profit/20 rounded-xl">
                     <p className="text-xs text-profit mb-2">New Value</p>
                     <pre className="text-sm text-cream font-mono whitespace-pre-wrap overflow-x-auto">
-                      {JSON.stringify(selectedLog.new_value, null, 2)}
+                      {safeJson(selectedLog.new_value)}
                     </pre>
                   </div>
                 )}
 
-                {selectedLog.ip_address && (
+                {(selectedLog as any).ip_address && (
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">IP Address</p>
-                    <p className="text-sm text-cream font-mono">{selectedLog.ip_address}</p>
+                    <p className="text-sm text-cream font-mono">{toDisplayText((selectedLog as any).ip_address)}</p>
                   </div>
                 )}
               </div>
