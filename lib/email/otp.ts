@@ -1,205 +1,350 @@
-// OTP Service for NOVATrADE
-// Handles generation, storage, and verification of OTPs
+// OTP Service for NOVATrADE (Supabase/Postgres-backed)
+// Handles generation, storage, and verification of OTPs reliably on Vercel/serverless
 
-import crypto from 'crypto';
+import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
 
-// In-memory OTP storage (use Redis in production)
-// Structure: { email: { otp: string, expiresAt: number, attempts: number, type: string } }
-const otpStore = new Map<string, {
-  otp: string;
-  expiresAt: number;
-  attempts: number;
-  type: string;
-  createdAt: number;
-}>();
+// ============================================
+// CONFIG
+// ============================================
 
-// Configuration
 const OTP_CONFIG = {
   length: 6,                    // OTP length
-  expiryMinutes: 10,           // OTP expiry time
-  maxAttempts: 3,              // Max verification attempts
-  cooldownMinutes: 1,          // Cooldown between OTP requests
-  cleanupIntervalMs: 60000,    // Cleanup interval (1 minute)
+  expiryMinutes: 10,            // OTP expiry time
+  maxAttempts: 3,               // Max verification attempts
+  cooldownMinutes: 1,           // Cooldown between OTP requests
 };
 
-// OTP Types
-export type OTPType = 'email_verification' | 'password_reset' | 'login' | 'withdrawal' | '2fa';
+export type OTPType =
+  | "email_verification"
+  | "password_reset"
+  | "login"
+  | "withdrawal"
+  | "2fa";
 
-// Generate a secure numeric OTP
+// ============================================
+// SUPABASE ADMIN CLIENT (SERVER ONLY)
+// ============================================
+// IMPORTANT: This file must only run server-side.
+// Do NOT import it into client components.
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseUrl || !supabaseServiceKey) {
+  throw new Error(
+    "Missing Supabase env vars: NEXT_PUBLIC_SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY"
+  );
+}
+
+const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: { persistSession: false },
+});
+
+// ============================================
+// HELPERS
+// ============================================
+
+const normalizeEmail = (email: string) => String(email ?? "").trim().toLowerCase();
+
 export const generateOTP = (length: number = OTP_CONFIG.length): string => {
-  const digits = '0123456789';
-  let otp = '';
-  
-  // Use crypto for secure random generation
+  const digits = "0123456789";
   const randomBytes = crypto.randomBytes(length);
-  for (let i = 0; i < length; i++) {
-    otp += digits[randomBytes[i] % 10];
-  }
-  
+  let otp = "";
+  for (let i = 0; i < length; i++) otp += digits[randomBytes[i] % 10];
   return otp;
 };
 
-// Generate and store OTP for an email
-export const createOTP = (
-  email: string, 
-  type: OTPType = 'email_verification'
-): { otp: string; expiresAt: Date } | { error: string } => {
-  const normalizedEmail = email.toLowerCase().trim();
-  const now = Date.now();
-  
-  // Check if there's an existing OTP that was created recently (cooldown)
-  const existing = otpStore.get(normalizedEmail);
-  if (existing && (now - existing.createdAt) < OTP_CONFIG.cooldownMinutes * 60 * 1000) {
-    const waitSeconds = Math.ceil((OTP_CONFIG.cooldownMinutes * 60 * 1000 - (now - existing.createdAt)) / 1000);
-    return { error: `Please wait ${waitSeconds} seconds before requesting a new code` };
-  }
-  
-  // Generate new OTP
-  const otp = generateOTP();
-  const expiresAt = now + OTP_CONFIG.expiryMinutes * 60 * 1000;
-  
-  // Store OTP
-  otpStore.set(normalizedEmail, {
-    otp,
-    expiresAt,
-    attempts: 0,
-    type,
-    createdAt: now,
-  });
-  
-  return { 
-    otp, 
-    expiresAt: new Date(expiresAt) 
-  };
+// Hash OTP so you never store the raw code in DB
+const hashOTP = (email: string, otp: string): string => {
+  const pepper = process.env.OTP_PEPPER;
+  if (!pepper) throw new Error("Missing OTP_PEPPER env var");
+
+  const e = normalizeEmail(email);
+  const code = String(otp ?? "").trim();
+
+  return crypto.createHash("sha256").update(`${pepper}:${e}:${code}`).digest("hex");
 };
 
-// Verify OTP
-export const verifyOTP = (
-  email: string, 
-  otp: string, 
-  type?: OTPType
-): { success: boolean; error?: string } => {
-  const normalizedEmail = email.toLowerCase().trim();
-  
-  // TESTING MODE: Accept "0000" or "000000" as valid OTP for any email
-  if (otp === '0000' || otp === '000000') {
-    // Clear any existing OTP for this email
-    otpStore.delete(normalizedEmail);
+const nowIso = () => new Date().toISOString();
+
+const futureIsoMinutes = (minutes: number) =>
+  new Date(Date.now() + minutes * 60 * 1000).toISOString();
+
+// ============================================
+// DB MODEL (email_otps table)
+// Columns expected:
+// - email (text)
+// - type (text)
+// - otp_hash (text)
+// - attempts (int)
+// - max_attempts (int)
+// - created_at (timestamptz default now())
+// - expires_at (timestamptz)
+// - used_at (timestamptz nullable)
+// ============================================
+
+type OtpRow = {
+  id: string;
+  email: string;
+  type: string;
+  otp_hash: string;
+  attempts: number;
+  max_attempts: number;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+};
+
+// ============================================
+// CREATE OTP (DB)
+// ============================================
+
+export const createOTP = async (
+  email: string,
+  type: OTPType = "email_verification"
+): Promise<{ otp: string; expiresAt: Date } | { error: string }> => {
+  const normalizedEmail = normalizeEmail(email);
+  const t = type ?? "email_verification";
+
+  if (!normalizedEmail) return { error: "Email is required" };
+
+  const now = Date.now();
+  const cooldownMs = OTP_CONFIG.cooldownMinutes * 60 * 1000;
+
+  // Check cooldown: do we have an active OTP recently created?
+  const { data: existing, error: existingErr } = await supabaseAdmin
+    .from("email_otps")
+    .select("created_at")
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (existingErr) {
+    return { error: existingErr.message };
+  }
+
+  if (existing?.[0]?.created_at) {
+    const createdAtMs = new Date(existing[0].created_at).getTime();
+    if (now - createdAtMs < cooldownMs) {
+      const waitSeconds = Math.ceil((cooldownMs - (now - createdAtMs)) / 1000);
+      return { error: `Please wait ${waitSeconds} seconds before requesting a new code` };
+    }
+  }
+
+  // Generate OTP + hash
+  const otp = generateOTP(OTP_CONFIG.length);
+  const expiresAtIso = futureIsoMinutes(OTP_CONFIG.expiryMinutes);
+  const otpHash = hashOTP(normalizedEmail, otp);
+
+  // Invalidate old active OTPs for this email+type (single active code)
+  const { error: invalidateErr } = await supabaseAdmin
+    .from("email_otps")
+    .update({ used_at: nowIso() })
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null);
+
+  if (invalidateErr) {
+    return { error: invalidateErr.message };
+  }
+
+  // Insert new row
+  const { error: insertErr } = await supabaseAdmin.from("email_otps").insert({
+    email: normalizedEmail,
+    type: t,
+    otp_hash: otpHash,
+    attempts: 0,
+    max_attempts: OTP_CONFIG.maxAttempts,
+    expires_at: expiresAtIso,
+    used_at: null,
+  });
+
+  if (insertErr) {
+    return { error: insertErr.message };
+  }
+
+  return { otp, expiresAt: new Date(expiresAtIso) };
+};
+
+// ============================================
+// VERIFY OTP (DB)
+// ============================================
+
+export const verifyOTP = async (
+  email: string,
+  otp: string,
+  type: OTPType = "email_verification"
+): Promise<{ success: boolean; error?: string }> => {
+  const normalizedEmail = normalizeEmail(email);
+  const code = String(otp ?? "").trim(); // keep as string to preserve leading zeros
+  const t = type ?? "email_verification";
+
+  if (!normalizedEmail || !code) {
+    return { success: false, error: "Email and OTP are required." };
+  }
+
+  // API route already enforces 6 digits, but keeping safe here
+  if (!/^\d{6}$/.test(code)) {
+    return { success: false, error: "Invalid OTP format. Must be 6 digits." };
+  }
+
+  // TESTING MODE (optional) - align with 6-digit rule only
+  if (code === "000000") {
+    await supabaseAdmin
+      .from("email_otps")
+      .update({ used_at: nowIso() })
+      .eq("email", normalizedEmail)
+      .eq("type", t)
+      .is("used_at", null);
+
     return { success: true };
   }
-  
-  const storedData = otpStore.get(normalizedEmail);
-  
-  // Check if OTP exists
-  if (!storedData) {
-    return { success: false, error: 'No verification code found. Please request a new one.' };
+
+  // Fetch latest active OTP row for email+type
+  const { data, error } = await supabaseAdmin
+    .from("email_otps")
+    .select("id, otp_hash, expires_at, attempts, max_attempts, used_at, created_at")
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    return { success: false, error: error.message };
   }
-  
-  // Check if OTP is expired
-  if (Date.now() > storedData.expiresAt) {
-    otpStore.delete(normalizedEmail);
-    return { success: false, error: 'Verification code has expired. Please request a new one.' };
+
+  const row = (data?.[0] as OtpRow | undefined);
+  if (!row) {
+    return { success: false, error: "No verification code found. Please request a new one." };
   }
-  
-  // Check if type matches (if specified)
-  if (type && storedData.type !== type) {
-    return { success: false, error: 'Invalid verification code type.' };
+
+  // Expired?
+  if (Date.now() > new Date(row.expires_at).getTime()) {
+    await supabaseAdmin.from("email_otps").update({ used_at: nowIso() }).eq("id", row.id);
+    return { success: false, error: "Verification code has expired. Please request a new one." };
   }
-  
-  // Check max attempts
-  if (storedData.attempts >= OTP_CONFIG.maxAttempts) {
-    otpStore.delete(normalizedEmail);
-    return { success: false, error: 'Too many failed attempts. Please request a new code.' };
+
+  // Max attempts?
+  if (row.attempts >= row.max_attempts) {
+    await supabaseAdmin.from("email_otps").update({ used_at: nowIso() }).eq("id", row.id);
+    return { success: false, error: "Too many failed attempts. Please request a new code." };
   }
-  
-  // Verify OTP
-  if (storedData.otp !== otp) {
-    storedData.attempts++;
-    const remainingAttempts = OTP_CONFIG.maxAttempts - storedData.attempts;
-    return { 
-      success: false, 
-      error: `Invalid code. ${remainingAttempts} attempt${remainingAttempts !== 1 ? 's' : ''} remaining.`
+
+  // Compare hashes
+  const inputHash = hashOTP(normalizedEmail, code);
+
+  if (row.otp_hash !== inputHash) {
+    const newAttempts = row.attempts + 1;
+
+    await supabaseAdmin.from("email_otps").update({ attempts: newAttempts }).eq("id", row.id);
+
+    const remaining = row.max_attempts - newAttempts;
+    return {
+      success: false,
+      error: `Invalid code. ${remaining} attempt${remaining !== 1 ? "s" : ""} remaining.`,
     };
   }
-  
-  // OTP is valid - remove it (single use)
-  otpStore.delete(normalizedEmail);
+
+  // Valid -> mark used (single-use)
+  await supabaseAdmin.from("email_otps").update({ used_at: nowIso() }).eq("id", row.id);
+
   return { success: true };
 };
 
-// Check if an OTP exists for an email
-export const hasValidOTP = (email: string): boolean => {
-  const normalizedEmail = email.toLowerCase().trim();
-  const storedData = otpStore.get(normalizedEmail);
-  
-  if (!storedData) return false;
-  if (Date.now() > storedData.expiresAt) {
-    otpStore.delete(normalizedEmail);
-    return false;
-  }
-  
-  return true;
+// ============================================
+// OPTIONAL HELPERS
+// ============================================
+
+export const hasValidOTP = async (email: string, type: OTPType = "email_verification"): Promise<boolean> => {
+  const normalizedEmail = normalizeEmail(email);
+  const t = type ?? "email_verification";
+
+  const { data, error } = await supabaseAdmin
+    .from("email_otps")
+    .select("expires_at")
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) return false;
+  const row = data?.[0];
+  if (!row) return false;
+
+  return Date.now() <= new Date(row.expires_at).getTime();
 };
 
-// Get OTP info (without the actual OTP)
-export const getOTPInfo = (email: string): {
-  exists: boolean;
-  expiresAt?: Date;
-  remainingAttempts?: number;
-  type?: string;
-} => {
-  const normalizedEmail = email.toLowerCase().trim();
-  const storedData = otpStore.get(normalizedEmail);
-  
-  if (!storedData || Date.now() > storedData.expiresAt) {
+export const getOTPInfo = async (
+  email: string,
+  type: OTPType = "email_verification"
+): Promise<{ exists: boolean; expiresAt?: Date; remainingAttempts?: number; type?: string }> => {
+  const normalizedEmail = normalizeEmail(email);
+  const t = type ?? "email_verification";
+
+  const { data, error } = await supabaseAdmin
+    .from("email_otps")
+    .select("expires_at, attempts, max_attempts, type")
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error || !data?.[0]) return { exists: false };
+
+  const row = data[0] as any;
+
+  if (Date.now() > new Date(row.expires_at).getTime()) {
     return { exists: false };
   }
-  
+
   return {
     exists: true,
-    expiresAt: new Date(storedData.expiresAt),
-    remainingAttempts: OTP_CONFIG.maxAttempts - storedData.attempts,
-    type: storedData.type,
+    expiresAt: new Date(row.expires_at),
+    remainingAttempts: (row.max_attempts ?? OTP_CONFIG.maxAttempts) - (row.attempts ?? 0),
+    type: row.type,
   };
 };
 
-// Invalidate OTP
-export const invalidateOTP = (email: string): void => {
-  const normalizedEmail = email.toLowerCase().trim();
-  otpStore.delete(normalizedEmail);
+export const invalidateOTP = async (email: string, type: OTPType = "email_verification"): Promise<void> => {
+  const normalizedEmail = normalizeEmail(email);
+  const t = type ?? "email_verification";
+
+  await supabaseAdmin
+    .from("email_otps")
+    .update({ used_at: nowIso() })
+    .eq("email", normalizedEmail)
+    .eq("type", t)
+    .is("used_at", null);
 };
 
-// Cleanup expired OTPs (call periodically)
-export const cleanupExpiredOTPs = (): number => {
-  const now = Date.now();
-  let cleaned = 0;
-  
-  otpStore.forEach((data, email) => {
-    if (now > data.expiresAt) {
-      otpStore.delete(email);
-      cleaned++;
-    }
-  });
-  
-  return cleaned;
-};
+// Keeping these exports for compatibility (no in-memory cleanup needed anymore)
+export const cleanupExpiredOTPs = async (): Promise<number> => {
+  // Mark expired active OTPs as used
+  const { data, error } = await supabaseAdmin
+    .from("email_otps")
+    .update({ used_at: nowIso() })
+    .lt("expires_at", nowIso())
+    .is("used_at", null)
+    .select("id");
 
-// Start automatic cleanup (for server-side)
-let cleanupInterval: NodeJS.Timeout | null = null;
+  if (error) return 0;
+  return Array.isArray(data) ? data.length : 0;
+};
 
 export const startOTPCleanup = (): void => {
-  if (cleanupInterval) return;
-  cleanupInterval = setInterval(cleanupExpiredOTPs, OTP_CONFIG.cleanupIntervalMs);
+  // No-op (DB handles persistence; you can run cleanupExpiredOTPs via cron if you want)
 };
 
 export const stopOTPCleanup = (): void => {
-  if (cleanupInterval) {
-    clearInterval(cleanupInterval);
-    cleanupInterval = null;
-  }
+  // No-op
 };
 
-// Export config for use in templates
 export const getOTPConfig = () => ({
   expiryMinutes: OTP_CONFIG.expiryMinutes,
   maxAttempts: OTP_CONFIG.maxAttempts,
