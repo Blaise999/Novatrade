@@ -14,10 +14,15 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-// Check if properly configured
-const isConfigured = supabaseUrl.length > 0 && 
-                     supabaseAnonKey.length > 0 && 
-                     supabaseUrl.includes('supabase.co');
+// Check if properly configured (not placeholder values)
+const isConfigured = supabaseUrl.length > 20 && 
+                     supabaseAnonKey.length > 20 && 
+                     supabaseUrl.includes('supabase.co') &&
+                     !supabaseUrl.includes('placeholder') &&
+                     !supabaseUrl.includes('xxx') &&
+                     !supabaseUrl.includes('your-') &&
+                     supabaseAnonKey !== 'your-anon-key' &&
+                     supabaseAnonKey !== 'somekey';
 
 // Log warning if not configured (only in development, only on client)
 if (!isConfigured && typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS public.users (
     balance_bonus DECIMAL(15,2) DEFAULT 0,
     total_deposited DECIMAL(15,2) DEFAULT 0,
     kyc_status TEXT DEFAULT 'none' CHECK (kyc_status IN ('none', 'pending', 'verified', 'rejected')),
+    registration_status TEXT DEFAULT 'pending_kyc' CHECK (registration_status IN ('pending_verification', 'pending_kyc', 'pending_wallet', 'complete')),
+    wallet_address TEXT,
     is_active BOOLEAN DEFAULT true,
     referral_code TEXT UNIQUE,
     referred_by UUID REFERENCES public.users(id),

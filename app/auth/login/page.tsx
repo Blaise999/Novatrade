@@ -15,9 +15,10 @@ import {
   ArrowRight,
   AlertCircle,
   Loader2,
-  Fingerprint
+  Fingerprint,
+  Info
 } from 'lucide-react';
-import { useStore } from '@/lib/supabase/store-supabase';
+import { useStore, getRegistrationMessage } from '@/lib/supabase/store-supabase';
 
 const loginSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -33,6 +34,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [registrationMessage, setRegistrationMessage] = useState<string | null>(null);
 
   const {
     register,
@@ -45,15 +47,33 @@ export default function LoginPage() {
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true);
     setError(null);
+    setRegistrationMessage(null);
     clearError();
     
     try {
       // Authenticate with Supabase database
-      const success = await login(data.email, data.password);
+      const result = await login(data.email, data.password);
       
-      if (success) {
-        // Successful login - redirect to dashboard
-        router.push('/dashboard');
+      if (result.success && result.redirect) {
+        // Check if registration is incomplete
+        if (result.redirect !== '/dashboard') {
+          // Show message briefly before redirect
+          const message = getRegistrationMessage(
+            result.redirect === '/kyc' ? 'pending_kyc' :
+            result.redirect === '/connect-wallet' ? 'pending_wallet' :
+            result.redirect === '/auth/verify-otp' ? 'pending_verification' :
+            'complete'
+          );
+          setRegistrationMessage(message);
+          
+          // Wait a moment to show message, then redirect
+          setTimeout(() => {
+            router.push(result.redirect!);
+          }, 1500);
+        } else {
+          // Fully registered - go straight to dashboard
+          router.push('/dashboard');
+        }
       } else {
         // Login failed - user not found in database or wrong password
         setError('Invalid email or password. Please check your credentials or sign up for a new account.');
@@ -82,6 +102,22 @@ export default function LoginPage() {
           </Link>
         </p>
       </div>
+
+      {/* Registration Incomplete Message */}
+      {registrationMessage && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 rounded-xl bg-gold/10 border border-gold/20 flex items-center gap-3"
+        >
+          <Info className="w-5 h-5 text-gold flex-shrink-0" />
+          <div>
+            <p className="text-sm text-gold font-medium">Registration Incomplete</p>
+            <p className="text-sm text-slate-400">{registrationMessage}</p>
+          </div>
+          <Loader2 className="w-5 h-5 text-gold animate-spin ml-auto" />
+        </motion.div>
+      )}
 
       {/* Error Alert */}
       {error && (

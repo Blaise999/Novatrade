@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
+import { useStore } from '@/lib/supabase/store-supabase';
 
 // Truncate address
 function truncateAddress(address: string): string {
@@ -31,6 +32,7 @@ function truncateAddress(address: string): string {
 
 export default function ConnectWalletPage() {
   const router = useRouter();
+  const { updateRegistrationStatus, user } = useStore();
   const { address, isConnected, isConnecting, chain } = useAccount();
   const { disconnect } = useDisconnect();
   const { data: ensName } = useEnsName({ address, chainId: mainnet.id });
@@ -38,17 +40,29 @@ export default function ConnectWalletPage() {
   const [copied, setCopied] = useState(false);
   const [hasRedirected, setHasRedirected] = useState(false);
 
-  // Auto-redirect to dashboard when wallet connects (for onboarding flow)
+  // Handle wallet connection - mark registration as complete
   useEffect(() => {
-    if (isConnected && address && !hasRedirected) {
-      // Small delay to show success state before redirect
-      const timer = setTimeout(() => {
-        setHasRedirected(true);
-        router.push('/dashboard');
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [isConnected, address, hasRedirected, router]);
+    const completeRegistration = async () => {
+      if (isConnected && address && !hasRedirected) {
+        // Mark registration as complete
+        await updateRegistrationStatus('complete');
+        
+        // Small delay to show success state before redirect
+        setTimeout(() => {
+          setHasRedirected(true);
+          router.push('/dashboard');
+        }, 1500);
+      }
+    };
+    
+    completeRegistration();
+  }, [isConnected, address, hasRedirected, router, updateRegistrationStatus]);
+
+  // Handle "Skip for now" - also marks registration complete
+  const handleSkip = async () => {
+    await updateRegistrationStatus('complete');
+    router.push('/dashboard');
+  };
 
   const copyAddress = async () => {
     if (address) {
@@ -218,12 +232,12 @@ export default function ConnectWalletPage() {
 
                   {/* Skip Option */}
                   <div className="pt-4 border-t border-white/10">
-                    <Link
-                      href="/dashboard"
+                    <button
+                      onClick={handleSkip}
                       className="w-full flex items-center justify-center gap-2 py-3 bg-white/5 text-cream/70 font-medium rounded-xl hover:bg-white/10 hover:text-cream transition-all"
                     >
                       Skip for now
-                    </Link>
+                    </button>
                     <p className="text-xs text-cream/40 text-center mt-2">
                       You can connect your wallet later from settings
                     </p>

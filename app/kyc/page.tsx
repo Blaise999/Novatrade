@@ -63,7 +63,7 @@ const nationalities = [
 
 export default function KYCPage() {
   const router = useRouter();
-  const { user, updateKycStatus } = useStore();
+  const { user, updateKycStatus, updateRegistrationStatus } = useStore();
   const { currentStep, data, updateData, setStep, setSubmitting, isSubmitting } = useKYCStore();
   
   const [idFrontFile, setIdFrontFile] = useState<File | null>(null);
@@ -102,7 +102,13 @@ export default function KYCPage() {
     try {
       // Simulate API submission
       await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Update KYC status to pending
       await updateKycStatus('pending');
+      
+      // Advance registration to next step (wallet connection)
+      await updateRegistrationStatus('pending_wallet');
+      
       setStep(5); // Move to success step
     } finally {
       setSubmitting(false);
