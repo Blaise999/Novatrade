@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
@@ -9,11 +9,35 @@ import { useAuthStore } from '@/lib/store';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useEmail } from '@/hooks/useEmail';
 
+function safeStringify(v: any) {
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: any;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    timeout,
+  ]);
+}
+
 export default function VerifyOTPPage() {
   const router = useRouter();
+
   const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useAuthStore();
   const { signup } = useStore();
-  const { sendOTP, verifyOTP, sendWelcome, loading: emailLoading } = useEmail();
+  const { sendOTP, verifyOTP, sendWelcome } = useEmail();
+
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
   const [isResending, setIsResending] = useState(false);
@@ -21,6 +45,31 @@ export default function VerifyOTPPage() {
   const [isVerified, setIsVerified] = useState(false);
   const [countdown, setCountdown] = useState(60);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
+
+  // debug toggle + log
+  const [debug, setDebug] = useState(false);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+
+  const pushLog = useMemo(() => {
+    return (...args: any[]) => {
+      if (!debug) return;
+      const line =
+        `[OTP ${new Date().toISOString()}] ` +
+        args.map((a) => (typeof a === 'string' ? a : safeStringify(a))).join(' ');
+      console.log(line);
+      setDebugLog((prev) => [...prev, line].slice(-100));
+    };
+  }, [debug]);
+
+  useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const enabled = sp.get('debug') === '1' || localStorage.getItem('novatrade_debug') === '1';
+      setDebug(enabled);
+    } catch {
+      setDebug(false);
+    }
+  }, []);
 
   // Countdown timer for resend
   useEffect(() => {
@@ -32,10 +81,13 @@ export default function VerifyOTPPage() {
 
   // Redirect if no email or password (signup data missing)
   useEffect(() => {
+    pushLog('mount state', { otpEmail, otpName, hasPassword: !!otpPassword, redirectUrl });
     if (!otpEmail || !otpPassword) {
+      pushLog('missing otpEmail/otpPassword -> redirect /auth/signup');
       router.push('/auth/signup');
     }
-  }, [otpEmail, otpPassword, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [otpEmail, otpPassword]);
 
   // Focus first input on mount
   useEffect(() => {
@@ -43,18 +95,24 @@ export default function VerifyOTPPage() {
   }, []);
 
   const handleChange = (index: number, value: string) => {
+    // Allow paste of 6 digits (we call this from onPaste too)
     if (value.length > 1) {
-      // Handle paste
-      const pastedValues = value.slice(0, 6).split('');
+      const pastedValues = value.replace(/\s/g, '').slice(0, 6).split('');
       const newOtp = [...otp];
+
       pastedValues.forEach((char, i) => {
         if (index + i < 6 && /^\d$/.test(char)) {
           newOtp[index + i] = char;
         }
       });
+
       setOtp(newOtp);
+      setError(null);
+
       const nextIndex = Math.min(index + pastedValues.length, 5);
       inputRefs.current[nextIndex]?.focus();
+
+      pushLog('paste handled', { index, value, newOtp: newOtp.join('') });
       return;
     }
 
@@ -87,63 +145,88 @@ export default function VerifyOTPPage() {
     setIsLoading(true);
     setError(null);
 
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    pushLog('verify start', { otpEmail, code });
+
     try {
-      // Verify OTP via API
-      const result = await verifyOTP(otpEmail!, code, 'email_verification');
-      
-      if (result.success) {
-        // Check if we have password (meaning this is a signup flow)
-        if (otpPassword) {
-          // Register user in Supabase database
-          const nameParts = (otpName || 'User').split(' ');
-          const firstName = nameParts[0];
-          const lastName = nameParts.slice(1).join(' ') || undefined;
-          
-          const signupSuccess = await signup(otpEmail!, otpPassword, firstName, lastName);
-          
-          if (signupSuccess) {
-            setIsVerified(true);
-            
-            // Send welcome email
-            await sendWelcome(otpEmail!, otpName || 'User');
-            
-            // Clear the stored password for security
-            setOtpPassword(null);
-            
-            setTimeout(() => {
-              // Redirect to stored URL or KYC verification
-              // New users go through: Signup → OTP → KYC → Wallet Connect → Dashboard
-              const destination = redirectUrl || '/kyc';
-              router.push(destination);
-            }, 2000);
-          } else {
-            setError('Failed to create account. Email may already be registered. Please try logging in.');
-          }
-        } else {
-          // This is just email verification (not signup), redirect to login
-          setError('Missing registration data. Please sign up again.');
-          setTimeout(() => {
-            router.push('/auth/signup');
-          }, 2000);
-        }
-      } else {
+      // 1) Verify OTP via API (timeout so it never hangs)
+      const result = await withTimeout(verifyOTP(otpEmail!, code, 'email_verification'), 25000, 'verifyOTP');
+      const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      pushLog('verifyOTP result', result, `elapsed_ms=${Math.round(t1 - t0)}`);
+
+      if (!result.success) {
         setError(result.error || 'Invalid verification code');
+        pushLog('verifyOTP failed', result);
+        return;
       }
-    } catch (err) {
-      setError('Verification failed. Please try again.');
+
+      // 2) Signup flow (must have password)
+      if (!otpPassword) {
+        setError('Missing registration data. Please sign up again.');
+        pushLog('otpPassword missing -> redirect signup');
+        setTimeout(() => router.push('/auth/signup'), 2000);
+        return;
+      }
+
+      const nameParts = (otpName || 'User').split(' ');
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(' ') || undefined;
+
+      pushLog('signup start', { email: otpEmail, firstName, lastName });
+
+      // Signup into Supabase (timeout)
+      const signupSuccess = await withTimeout(
+        signup(otpEmail!, otpPassword, firstName, lastName),
+        25000,
+        'supabase.signup'
+      );
+
+      pushLog('signup result', { signupSuccess });
+
+      if (!signupSuccess) {
+        setError('Failed to create account. Email may already be registered. Please try logging in.');
+        pushLog('signup failed');
+        return;
+      }
+
+      setIsVerified(true);
+
+      // Send welcome email — don’t fail the whole flow if this fails
+      try {
+        pushLog('sendWelcome start');
+        await withTimeout(sendWelcome(otpEmail!, otpName || 'User'), 15000, 'sendWelcome');
+        pushLog('sendWelcome ok');
+      } catch (e: any) {
+        pushLog('sendWelcome failed (ignored)', e?.message || e);
+      }
+
+      // Clear stored password for security
+      setOtpPassword(null);
+
+      setTimeout(() => {
+        const destination = redirectUrl || '/kyc';
+        pushLog('redirect after verify', destination);
+        router.push(destination);
+      }, 2000);
+    } catch (err: any) {
+      const msg = err?.message || 'Verification failed. Please try again.';
+      setError(msg);
+      pushLog('handleVerify threw', err);
     } finally {
       setIsLoading(false);
+      pushLog('verify end (loading=false)');
     }
   };
 
   const handleResend = async () => {
     setIsResending(true);
     setError(null);
-    
+    pushLog('resend start', { otpEmail });
+
     try {
-      // Resend OTP via API
-      const result = await sendOTP(otpEmail!, otpName || 'User', 'email_verification');
-      
+      const result = await withTimeout(sendOTP(otpEmail!, otpName || 'User', 'email_verification'), 20000, 'sendOTP');
+      pushLog('sendOTP result', result);
+
       if (result.success) {
         setCountdown(60);
         setOtp(['', '', '', '', '', '']);
@@ -151,27 +234,27 @@ export default function VerifyOTPPage() {
       } else {
         setError(result.error || 'Failed to resend code');
       }
-    } catch (err) {
-      setError('Failed to resend code. Please try again.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to resend code. Please try again.');
+      pushLog('resend threw', err);
     } finally {
       setIsResending(false);
+      pushLog('resend end');
     }
   };
 
-  // Auto-submit when all digits entered
+  // Auto-submit when all digits entered (safe)
   useEffect(() => {
-    if (otp.every(digit => digit !== '') && !isLoading && !isVerified) {
+    if (otp.every((digit) => digit !== '') && !isLoading && !isVerified) {
+      pushLog('auto-submit triggered', otp.join(''));
       handleVerify();
     }
-  }, [otp]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [otp, isLoading, isVerified]);
 
   if (isVerified) {
     return (
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        className="text-center space-y-6"
-      >
+      <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center space-y-6">
         <motion.div
           initial={{ scale: 0 }}
           animate={{ scale: 1 }}
@@ -182,33 +265,51 @@ export default function VerifyOTPPage() {
         </motion.div>
         <div>
           <h2 className="text-2xl font-display font-bold text-cream">Email Verified!</h2>
-          <p className="mt-2 text-slate-400">
-            Your account has been created successfully. Redirecting to your dashboard...
-          </p>
+          <p className="mt-2 text-slate-400">Your account has been created successfully. Redirecting to your dashboard...</p>
         </div>
         <div className="flex items-center justify-center gap-2 text-gold">
           <Loader2 className="w-5 h-5 animate-spin" />
           <span>Setting up your account...</span>
         </div>
+
+        {debug && (
+          <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4 text-left">
+            <p className="text-xs uppercase tracking-wide text-slate-400">OTP Debug</p>
+            <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{debugLog.join('\n')}</pre>
+          </div>
+        )}
       </motion.div>
     );
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-      className="space-y-8"
-    >
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="space-y-8">
       {/* Back Button */}
-      <Link 
-        href="/auth/signup" 
-        className="inline-flex items-center gap-2 text-slate-400 hover:text-cream transition-colors"
-      >
+      <Link href="/auth/signup" className="inline-flex items-center gap-2 text-slate-400 hover:text-cream transition-colors">
         <ArrowLeft className="w-4 h-4" />
         Back to sign up
       </Link>
+
+      {/* DEBUG PANEL */}
+      {debug && (
+        <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+          <div className="flex items-center justify-between">
+            <p className="text-xs uppercase tracking-wide text-slate-400">OTP Debug</p>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  navigator.clipboard.writeText(debugLog.join('\n'));
+                } catch {}
+              }}
+              className="text-xs text-gold hover:text-gold/80"
+            >
+              Copy log
+            </button>
+          </div>
+          <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{debugLog.join('\n')}</pre>
+        </div>
+      )}
 
       {/* Header */}
       <div className="text-center">
@@ -217,7 +318,8 @@ export default function VerifyOTPPage() {
         </div>
         <h2 className="text-3xl font-display font-bold text-cream">Check your email</h2>
         <p className="mt-2 text-slate-400">
-          We sent a verification code to<br />
+          We sent a verification code to
+          <br />
           <span className="text-cream font-medium">{otpEmail}</span>
         </p>
       </div>
@@ -228,25 +330,29 @@ export default function VerifyOTPPage() {
           {otp.map((digit, index) => (
             <motion.input
               key={index}
-             ref={(el) => {
-  inputRefs.current[index] = el;
-}}
-
+              ref={(el) => {
+                inputRefs.current[index] = el;
+              }}
               type="text"
               inputMode="numeric"
-              maxLength={6}
+              maxLength={1} // ✅ FIXED
               value={digit}
-              onChange={e => handleChange(index, e.target.value)}
-              onKeyDown={e => handleKeyDown(index, e)}
+              onPaste={(e) => {
+                e.preventDefault();
+                const text = e.clipboardData.getData('text');
+                handleChange(index, text);
+              }}
+              onChange={(e) => handleChange(index, e.target.value)}
+              onKeyDown={(e) => handleKeyDown(index, e)}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: index * 0.05 }}
               className={`w-12 h-14 sm:w-14 sm:h-16 text-center text-2xl font-mono font-bold rounded-xl border bg-white/5 text-cream focus:outline-none focus:ring-2 transition-all ${
-                error 
-                  ? 'border-loss focus:ring-loss/20' 
-                  : digit 
-                    ? 'border-gold focus:ring-gold/20' 
-                    : 'border-white/10 focus:border-gold focus:ring-gold/20'
+                error
+                  ? 'border-loss focus:ring-loss/20'
+                  : digit
+                  ? 'border-gold focus:ring-gold/20'
+                  : 'border-white/10 focus:border-gold focus:ring-gold/20'
               }`}
             />
           ))}
@@ -254,11 +360,7 @@ export default function VerifyOTPPage() {
 
         {/* Error Message */}
         {error && (
-          <motion.p
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center text-sm text-loss"
-          >
+          <motion.p initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="text-center text-sm text-loss">
             {error}
           </motion.p>
         )}
@@ -267,7 +369,7 @@ export default function VerifyOTPPage() {
       {/* Verify Button */}
       <button
         onClick={handleVerify}
-        disabled={otp.some(digit => !digit) || isLoading}
+        disabled={otp.some((d) => !d) || isLoading}
         className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
       >
         {isLoading ? (
@@ -285,9 +387,7 @@ export default function VerifyOTPPage() {
         <p className="text-slate-400 text-sm">
           Didn&apos;t receive the code?{' '}
           {countdown > 0 ? (
-            <span className="text-slate-500">
-              Resend in {countdown}s
-            </span>
+            <span className="text-slate-500">Resend in {countdown}s</span>
           ) : (
             <button
               onClick={handleResend}
@@ -313,8 +413,7 @@ export default function VerifyOTPPage() {
       {/* Help Text */}
       <div className="bg-white/5 rounded-xl p-4 border border-white/5">
         <p className="text-xs text-slate-500 text-center">
-          💡 <strong className="text-slate-400">Tip:</strong> Check your spam folder if you don&apos;t see the email. 
-          The code expires in 10 minutes.
+          💡 <strong className="text-slate-400">Tip:</strong> Check your spam folder if you don&apos;t see the email. The code expires in 10 minutes.
         </p>
       </div>
     </motion.div>
