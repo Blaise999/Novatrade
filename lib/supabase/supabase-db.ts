@@ -1,6 +1,6 @@
 /**
  * Supabase Database Service
- * 
+ *
  * Handles ALL data operations - deposits, trades, balances, etc.
  * This replaces localStorage completely.
  */
@@ -98,69 +98,58 @@ export interface PaymentMethod {
 // ============================================
 
 export const balanceService = {
-  /**
-   * Get user's current balance
-   */
   async getBalance(userId: string): Promise<{ available: number; bonus: number } | null> {
     if (!isSupabaseConfigured()) return null;
-    
+
     const { data, error } = await supabase
       .from('users')
       .select('balance_available, balance_bonus')
       .eq('id', userId)
-      .single();
-    
+      .maybeSingle();
+
     if (error || !data) return null;
-    
+
     return {
       available: parseFloat(data.balance_available) || 0,
       bonus: parseFloat(data.balance_bonus) || 0,
     };
   },
 
-  /**
-   * Add to user's balance (admin only)
-   */
   async addBalance(userId: string, amount: number, adminId: string, reason?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { data, error } = await supabase.rpc('update_user_balance', {
+
+    const { error } = await supabase.rpc('update_user_balance', {
       p_user_id: userId,
       p_amount: amount,
       p_type: 'credit',
       p_description: reason || 'Admin credit',
+      p_admin_id: adminId,
     });
-    
+
     return !error;
   },
 
-  /**
-   * Deduct from user's balance
-   */
   async deductBalance(userId: string, amount: number, reason?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { data, error } = await supabase.rpc('update_user_balance', {
+
+    const { error } = await supabase.rpc('update_user_balance', {
       p_user_id: userId,
       p_amount: amount,
       p_type: 'debit',
       p_description: reason || 'Deduction',
     });
-    
+
     return !error;
   },
 
-  /**
-   * Update user's tier
-   */
   async updateTier(userId: string, tier: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('users')
       .update({ tier, updated_at: new Date().toISOString() })
       .eq('id', userId);
-    
+
     return !error;
   },
 };
@@ -170,9 +159,6 @@ export const balanceService = {
 // ============================================
 
 export const depositService = {
-  /**
-   * Create a new deposit request
-   */
   async create(deposit: {
     userId: string;
     userEmail: string;
@@ -184,7 +170,7 @@ export const depositService = {
     proofUrl?: string;
   }): Promise<Deposit | null> {
     if (!isSupabaseConfigured()) return null;
-    
+
     const { data, error } = await supabase
       .from('deposits')
       .insert({
@@ -200,9 +186,9 @@ export const depositService = {
       })
       .select()
       .single();
-    
+
     if (error || !data) return null;
-    
+
     return {
       id: data.id,
       userId: data.user_id,
@@ -218,21 +204,18 @@ export const depositService = {
     };
   },
 
-  /**
-   * Get deposits for a user
-   */
   async getByUser(userId: string): Promise<Deposit[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('deposits')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
-    
+
     if (error || !data) return [];
-    
-    return data.map(d => ({
+
+    return data.map((d: any) => ({
       id: d.id,
       userId: d.user_id,
       orderId: d.order_id,
@@ -250,21 +233,18 @@ export const depositService = {
     }));
   },
 
-  /**
-   * Get all pending deposits (admin)
-   */
   async getPending(): Promise<Deposit[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('deposits')
       .select('*, users!inner(email)')
       .eq('status', 'pending')
       .order('created_at', { ascending: false });
-    
+
     if (error || !data) return [];
-    
-    return data.map(d => ({
+
+    return data.map((d: any) => ({
       id: d.id,
       userId: d.user_id,
       userEmail: d.users?.email,
@@ -280,27 +260,21 @@ export const depositService = {
     }));
   },
 
-  /**
-   * Confirm a deposit (admin)
-   */
   async confirm(depositId: string, adminId: string, note?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { data, error } = await supabase.rpc('confirm_deposit', {
       p_deposit_id: depositId,
       p_admin_id: adminId,
       p_note: note,
     });
-    
-    return !error && data;
+
+    return !error && !!data;
   },
 
-  /**
-   * Reject a deposit (admin)
-   */
   async reject(depositId: string, adminId: string, note?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('deposits')
       .update({
@@ -310,25 +284,22 @@ export const depositService = {
         note,
       })
       .eq('id', depositId);
-    
+
     return !error;
   },
 
-  /**
-   * Get all deposits (admin)
-   */
   async getAll(limit = 100): Promise<Deposit[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('deposits')
       .select('*, users!inner(email)')
       .order('created_at', { ascending: false })
       .limit(limit);
-    
+
     if (error || !data) return [];
-    
-    return data.map(d => ({
+
+    return data.map((d: any) => ({
       id: d.id,
       userId: d.user_id,
       userEmail: d.users?.email,
@@ -353,9 +324,6 @@ export const depositService = {
 // ============================================
 
 export const withdrawalService = {
-  /**
-   * Create withdrawal request
-   */
   async create(withdrawal: {
     userId: string;
     amount: number;
@@ -367,25 +335,16 @@ export const withdrawalService = {
     accountNumber?: string;
   }): Promise<Withdrawal | null> {
     if (!isSupabaseConfigured()) return null;
-    
+
     const fee = withdrawal.fee || 0;
     const netAmount = withdrawal.amount - fee;
-    
-    // First check if user has enough balance
+
     const balance = await balanceService.getBalance(withdrawal.userId);
-    if (!balance || balance.available < withdrawal.amount) {
-      return null;
-    }
-    
-    // Deduct balance first
-    const deducted = await balanceService.deductBalance(
-      withdrawal.userId, 
-      withdrawal.amount, 
-      'Withdrawal request'
-    );
-    
+    if (!balance || balance.available < withdrawal.amount) return null;
+
+    const deducted = await balanceService.deductBalance(withdrawal.userId, withdrawal.amount, 'Withdrawal request');
     if (!deducted) return null;
-    
+
     const { data, error } = await supabase
       .from('withdrawals')
       .insert({
@@ -402,13 +361,12 @@ export const withdrawalService = {
       })
       .select()
       .single();
-    
+
     if (error || !data) {
-      // Refund the balance if withdrawal creation failed
       await balanceService.addBalance(withdrawal.userId, withdrawal.amount, 'system', 'Withdrawal failed refund');
       return null;
     }
-    
+
     return {
       id: data.id,
       userId: data.user_id,
@@ -425,21 +383,18 @@ export const withdrawalService = {
     };
   },
 
-  /**
-   * Get withdrawals for user
-   */
   async getByUser(userId: string): Promise<Withdrawal[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('withdrawals')
       .select('*')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
-    
+
     if (error || !data) return [];
-    
-    return data.map(w => ({
+
+    return data.map((w: any) => ({
       id: w.id,
       userId: w.user_id,
       amount: parseFloat(w.amount),
@@ -459,12 +414,9 @@ export const withdrawalService = {
     }));
   },
 
-  /**
-   * Process withdrawal (admin)
-   */
   async process(withdrawalId: string, adminId: string, txHash?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('withdrawals')
       .update({
@@ -474,34 +426,23 @@ export const withdrawalService = {
         tx_hash: txHash,
       })
       .eq('id', withdrawalId);
-    
+
     return !error;
   },
 
-  /**
-   * Reject withdrawal (admin) - refunds user
-   */
   async reject(withdrawalId: string, adminId: string, note?: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    // Get withdrawal details
+
     const { data: withdrawal } = await supabase
       .from('withdrawals')
       .select('*')
       .eq('id', withdrawalId)
-      .single();
-    
+      .maybeSingle();
+
     if (!withdrawal) return false;
-    
-    // Refund the user
-    await balanceService.addBalance(
-      withdrawal.user_id, 
-      parseFloat(withdrawal.amount), 
-      adminId, 
-      'Withdrawal rejected - refund'
-    );
-    
-    // Update withdrawal status
+
+    await balanceService.addBalance(withdrawal.user_id, parseFloat(withdrawal.amount), adminId, 'Withdrawal rejected - refund');
+
     const { error } = await supabase
       .from('withdrawals')
       .update({
@@ -511,7 +452,7 @@ export const withdrawalService = {
         note,
       })
       .eq('id', withdrawalId);
-    
+
     return !error;
   },
 };
@@ -521,9 +462,6 @@ export const withdrawalService = {
 // ============================================
 
 export const tradeService = {
-  /**
-   * Open a new trade
-   */
   async openTrade(trade: {
     userId: string;
     pair: string;
@@ -537,25 +475,16 @@ export const tradeService = {
     takeProfit?: number;
   }): Promise<Trade | null> {
     if (!isSupabaseConfigured()) return null;
-    
+
     const leverage = trade.leverage || 1;
     const marginUsed = trade.amount / leverage;
-    
-    // Check balance
+
     const balance = await balanceService.getBalance(trade.userId);
-    if (!balance || balance.available < marginUsed) {
-      return null;
-    }
-    
-    // Deduct margin
-    const deducted = await balanceService.deductBalance(
-      trade.userId, 
-      marginUsed, 
-      `Open trade: ${trade.pair}`
-    );
-    
+    if (!balance || balance.available < marginUsed) return null;
+
+    const deducted = await balanceService.deductBalance(trade.userId, marginUsed, `Open trade: ${trade.pair}`);
     if (!deducted) return null;
-    
+
     const { data, error } = await supabase
       .from('trades')
       .insert({
@@ -576,13 +505,12 @@ export const tradeService = {
       })
       .select()
       .single();
-    
+
     if (error || !data) {
-      // Refund margin
       await balanceService.addBalance(trade.userId, marginUsed, 'system', 'Trade failed refund');
       return null;
     }
-    
+
     return {
       id: data.id,
       userId: data.user_id,
@@ -603,33 +531,22 @@ export const tradeService = {
     };
   },
 
-  /**
-   * Close a trade
-   */
   async closeTrade(tradeId: string, exitPrice: number, pnl: number): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    // Get trade details
-    const { data: trade } = await supabase
-      .from('trades')
-      .select('*')
-      .eq('id', tradeId)
-      .single();
-    
+
+    const { data: trade } = await supabase.from('trades').select('*').eq('id', tradeId).maybeSingle();
     if (!trade || trade.status !== 'open') return false;
-    
-    // Return margin + P&L to user
+
     const returnAmount = parseFloat(trade.margin_used) + pnl;
     if (returnAmount > 0) {
       await balanceService.addBalance(
-        trade.user_id, 
-        returnAmount, 
-        'system', 
+        trade.user_id,
+        returnAmount,
+        'system',
         `Close trade: ${trade.pair} P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`
       );
     }
-    
-    // Update trade
+
     const { error } = await supabase
       .from('trades')
       .update({
@@ -640,26 +557,23 @@ export const tradeService = {
         closed_at: new Date().toISOString(),
       })
       .eq('id', tradeId);
-    
+
     return !error;
   },
 
-  /**
-   * Get user's open trades
-   */
   async getOpenTrades(userId: string): Promise<Trade[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('trades')
       .select('*')
       .eq('user_id', userId)
       .eq('status', 'open')
       .order('created_at', { ascending: false });
-    
+
     if (error || !data) return [];
-    
-    return data.map(t => ({
+
+    return data.map((t: any) => ({
       id: t.id,
       userId: t.user_id,
       pair: t.pair,
@@ -680,12 +594,9 @@ export const tradeService = {
     }));
   },
 
-  /**
-   * Get user's trade history
-   */
   async getTradeHistory(userId: string, limit = 50): Promise<Trade[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('trades')
       .select('*')
@@ -693,10 +604,10 @@ export const tradeService = {
       .in('status', ['closed', 'liquidated'])
       .order('closed_at', { ascending: false })
       .limit(limit);
-    
+
     if (error || !data) return [];
-    
-    return data.map(t => ({
+
+    return data.map((t: any) => ({
       id: t.id,
       userId: t.user_id,
       pair: t.pair,
@@ -715,21 +626,15 @@ export const tradeService = {
     }));
   },
 
-  /**
-   * Update trade's current price and P&L
-   */
   async updateTradePrice(tradeId: string, currentPrice: number, pnl: number): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('trades')
-      .update({
-        current_price: currentPrice,
-        pnl,
-      })
+      .update({ current_price: currentPrice, pnl })
       .eq('id', tradeId)
       .eq('status', 'open');
-    
+
     return !error;
   },
 };
@@ -739,21 +644,18 @@ export const tradeService = {
 // ============================================
 
 export const paymentMethodService = {
-  /**
-   * Get all enabled payment methods
-   */
   async getEnabled(): Promise<PaymentMethod[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('payment_methods')
       .select('*')
       .eq('enabled', true)
       .order('display_order');
-    
+
     if (error || !data) return [];
-    
-    return data.map(p => ({
+
+    return data.map((p: any) => ({
       id: p.id,
       type: p.type,
       name: p.name,
@@ -776,21 +678,18 @@ export const paymentMethodService = {
     }));
   },
 
-  /**
-   * Get all payment methods (admin)
-   */
   async getAll(): Promise<PaymentMethod[]> {
     if (!isSupabaseConfigured()) return [];
-    
+
     const { data, error } = await supabase
       .from('payment_methods')
       .select('*')
       .order('type', { ascending: true })
       .order('display_order');
-    
+
     if (error || !data) return [];
-    
-    return data.map(p => ({
+
+    return data.map((p: any) => ({
       id: p.id,
       type: p.type,
       name: p.name,
@@ -813,12 +712,9 @@ export const paymentMethodService = {
     }));
   },
 
-  /**
-   * Create payment method (admin)
-   */
   async create(method: Omit<PaymentMethod, 'id'>): Promise<PaymentMethod | null> {
     if (!isSupabaseConfigured()) return null;
-    
+
     const { data, error } = await supabase
       .from('payment_methods')
       .insert({
@@ -843,9 +739,9 @@ export const paymentMethodService = {
       })
       .select()
       .single();
-    
+
     if (error || !data) return null;
-    
+
     return {
       id: data.id,
       type: data.type,
@@ -869,12 +765,9 @@ export const paymentMethodService = {
     };
   },
 
-  /**
-   * Update payment method (admin)
-   */
   async update(id: string, updates: Partial<PaymentMethod>): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('payment_methods')
       .update({
@@ -898,43 +791,24 @@ export const paymentMethodService = {
         updated_at: new Date().toISOString(),
       })
       .eq('id', id);
-    
+
     return !error;
   },
 
-  /**
-   * Toggle payment method enabled status (admin)
-   */
   async toggle(id: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { data: current } = await supabase
-      .from('payment_methods')
-      .select('enabled')
-      .eq('id', id)
-      .single();
-    
+
+    const { data: current } = await supabase.from('payment_methods').select('enabled').eq('id', id).maybeSingle();
     if (!current) return false;
-    
-    const { error } = await supabase
-      .from('payment_methods')
-      .update({ enabled: !current.enabled })
-      .eq('id', id);
-    
+
+    const { error } = await supabase.from('payment_methods').update({ enabled: !current.enabled }).eq('id', id);
     return !error;
   },
 
-  /**
-   * Delete payment method (admin)
-   */
   async delete(id: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { error } = await supabase
-      .from('payment_methods')
-      .delete()
-      .eq('id', id);
-    
+
+    const { error } = await supabase.from('payment_methods').delete().eq('id', id);
     return !error;
   },
 };
@@ -944,77 +818,42 @@ export const paymentMethodService = {
 // ============================================
 
 export const userService = {
-  /**
-   * Get all users (admin)
-   */
   async getAll(): Promise<any[]> {
     if (!isSupabaseConfigured()) return [];
-    
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
+
+    const { data } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     return data || [];
   },
 
-  /**
-   * Get user by ID
-   */
   async getById(userId: string): Promise<any | null> {
     if (!isSupabaseConfigured()) return null;
-    
-    const { data } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .single();
-    
-    return data;
+
+    const { data } = await supabase.from('users').select('*').eq('id', userId).maybeSingle();
+    return data || null;
   },
 
-  /**
-   * Update user (admin)
-   */
   async update(userId: string, updates: any): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('users')
-      .update({
-        ...updates,
-        updated_at: new Date().toISOString(),
-      })
+      .update({ ...updates, updated_at: new Date().toISOString() })
       .eq('id', userId);
-    
+
     return !error;
   },
 
-  /**
-   * Disable user (admin)
-   */
   async disable(userId: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { error } = await supabase
-      .from('users')
-      .update({ is_active: false })
-      .eq('id', userId);
-    
+
+    const { error } = await supabase.from('users').update({ is_active: false }).eq('id', userId);
     return !error;
   },
 
-  /**
-   * Enable user (admin)
-   */
   async enable(userId: string): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
-    const { error } = await supabase
-      .from('users')
-      .update({ is_active: true })
-      .eq('id', userId);
-    
+
+    const { error } = await supabase.from('users').update({ is_active: true }).eq('id', userId);
     return !error;
   },
 };
@@ -1024,53 +863,32 @@ export const userService = {
 // ============================================
 
 export const settingsService = {
-  /**
-   * Get a setting
-   */
   async get(key: string): Promise<any> {
     if (!isSupabaseConfigured()) return null;
-    
-    const { data } = await supabase
-      .from('platform_settings')
-      .select('value')
-      .eq('key', key)
-      .single();
-    
-    return data?.value;
+
+    const { data } = await supabase.from('platform_settings').select('value').eq('key', key).maybeSingle();
+    return data?.value ?? null;
   },
 
-  /**
-   * Set a setting (admin)
-   */
   async set(key: string, value: any): Promise<boolean> {
     if (!isSupabaseConfigured()) return false;
-    
+
     const { error } = await supabase
       .from('platform_settings')
-      .upsert({
-        key,
-        value,
-        updated_at: new Date().toISOString(),
-      });
-    
+      .upsert({ key, value, updated_at: new Date().toISOString() });
+
     return !error;
   },
 
-  /**
-   * Get all settings
-   */
   async getAll(): Promise<Record<string, any>> {
     if (!isSupabaseConfigured()) return {};
-    
-    const { data } = await supabase
-      .from('platform_settings')
-      .select('key, value');
-    
+
+    const { data } = await supabase.from('platform_settings').select('key, value');
     if (!data) return {};
-    
-    return data.reduce((acc, item) => {
+
+    return data.reduce((acc: Record<string, any>, item: any) => {
       acc[item.key] = item.value;
       return acc;
-    }, {} as Record<string, any>);
+    }, {});
   },
 };

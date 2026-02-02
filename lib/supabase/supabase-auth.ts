@@ -1,6 +1,6 @@
 /**
  * Supabase Authentication Service
- * 
+ *
  * Handles ALL user authentication - replaces localStorage auth
  */
 
@@ -34,15 +34,15 @@ function rowToUser(row: any): User {
     lastName: row.last_name,
     phone: row.phone,
     avatarUrl: row.avatar_url,
-    role: row.role,
-    tier: row.tier,
+    role: row.role || 'user',
+    tier: row.tier || 'basic',
     balance: {
       available: parseFloat(row.balance_available) || 0,
       bonus: parseFloat(row.balance_bonus) || 0,
     },
     totalDeposited: parseFloat(row.total_deposited) || 0,
-    kycStatus: row.kyc_status,
-    isActive: row.is_active,
+    kycStatus: row.kyc_status || 'none',
+    isActive: row.is_active !== false,
     createdAt: row.created_at,
   };
 }
@@ -51,12 +51,23 @@ export const authService = {
   /**
    * Sign up a new user
    */
-  async signUp(email: string, password: string, firstName?: string, lastName?: string): Promise<{ user: User | null; error: string | null }> {
+  async signUp(
+    email: string,
+    password: string,
+    firstName?: string,
+    lastName?: string
+  ): Promise<{ user: User | null; error: string | null }> {
     try {
       // 1. Create auth user
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email,
         password,
+        options: {
+          data: {
+            first_name: firstName || '',
+            last_name: lastName || '',
+          },
+        },
       });
 
       if (authError) {
@@ -67,33 +78,39 @@ export const authService = {
         return { user: null, error: 'Failed to create user' };
       }
 
+      // If no session (email confirm required), stop here (login will create profile after confirmation)
+      if (!authData.session) {
+        return { user: null, error: null };
+      }
+
       // 2. Create user profile in our users table
       const { data: userData, error: userError } = await supabase
         .from('users')
         .insert({
           id: authData.user.id,
-          email: email.toLowerCase(),
-          first_name: firstName,
-          last_name: lastName,
+          email: (authData.user.email || email).toLowerCase(),
+          first_name: firstName || '',
+          last_name: lastName || '',
           role: 'user',
           tier: 'basic',
           balance_available: 0,
           balance_bonus: 0,
           total_deposited: 0,
           kyc_status: 'none',
+          registration_status: 'pending_kyc',
           is_active: true,
         })
         .select()
         .single();
 
-      if (userError) {
+      if (userError || !userData) {
         console.error('Error creating user profile:', userError);
-        return { user: null, error: 'Account created but profile failed. Please contact support.' };
+        return { user: null, error: 'Account created but profile failed. Please login again.' };
       }
 
       return { user: rowToUser(userData), error: null };
     } catch (err: any) {
-      return { user: null, error: err.message };
+      return { user: null, error: err?.message || 'Signup failed' };
     }
   },
 
@@ -116,27 +133,41 @@ export const authService = {
         return { user: null, error: 'Invalid credentials' };
       }
 
-      // 2. Get user profile
+      // 2. Get user profile (SAFE)
       const { data: userData, error: userError } = await supabase
         .from('users')
         .select('*')
         .eq('id', authData.user.id)
-        .single();
+        .maybeSingle();
 
-      if (userError || !userData) {
-        // Profile doesn't exist, create it
-        const { data: newUser } = await supabase
+      // If profile missing, create it and RETURN
+      if (!userData) {
+        const metadata = authData.user.user_metadata || {};
+
+        const { data: newUser, error: newUserError } = await supabase
           .from('users')
           .insert({
             id: authData.user.id,
-            email: email.toLowerCase(),
+            email: (authData.user.email || email).toLowerCase(),
+            first_name: metadata.first_name || '',
+            last_name: metadata.last_name || '',
             role: 'user',
             tier: 'basic',
+            balance_available: 0,
+            balance_bonus: 0,
+            total_deposited: 0,
+            kyc_status: 'none',
+            registration_status: 'pending_kyc',
+            is_active: true,
           })
           .select()
           .single();
-        
-        return { user: newUser ? rowToUser(newUser) : null, error: null };
+
+        if (newUserError || !newUser) {
+          return { user: null, error: newUserError?.message || userError?.message || 'Failed to create profile' };
+        }
+
+        return { user: rowToUser(newUser), error: null };
       }
 
       // Check if user is active
@@ -147,7 +178,7 @@ export const authService = {
 
       return { user: rowToUser(userData), error: null };
     } catch (err: any) {
-      return { user: null, error: err.message };
+      return { user: null, error: err?.message || 'Login failed' };
     }
   },
 
@@ -163,8 +194,9 @@ export const authService = {
    */
   async getCurrentUser(): Promise<User | null> {
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const session = sessionRes.session;
+
       if (!session?.user) {
         return null;
       }
@@ -173,7 +205,7 @@ export const authService = {
         .from('users')
         .select('*')
         .eq('id', session.user.id)
-        .single();
+        .maybeSingle();
 
       return userData ? rowToUser(userData) : null;
     } catch {
@@ -184,12 +216,15 @@ export const authService = {
   /**
    * Update user profile
    */
-  async updateProfile(userId: string, updates: {
-    firstName?: string;
-    lastName?: string;
-    phone?: string;
-    avatarUrl?: string;
-  }): Promise<{ success: boolean; error: string | null }> {
+  async updateProfile(
+    userId: string,
+    updates: {
+      firstName?: string;
+      lastName?: string;
+      phone?: string;
+      avatarUrl?: string;
+    }
+  ): Promise<{ success: boolean; error: string | null }> {
     try {
       const { error } = await supabase
         .from('users')
@@ -202,13 +237,10 @@ export const authService = {
         })
         .eq('id', userId);
 
-      if (error) {
-        return { success: false, error: error.message };
-      }
-
+      if (error) return { success: false, error: error.message };
       return { success: true, error: null };
     } catch (err: any) {
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || 'Update failed' };
     }
   },
 
@@ -217,17 +249,11 @@ export const authService = {
    */
   async changePassword(newPassword: string): Promise<{ success: boolean; error: string | null }> {
     try {
-      const { error } = await supabase.auth.updateUser({
-        password: newPassword,
-      });
-
-      if (error) {
-        return { success: false, error: error.message };
-      }
-
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) return { success: false, error: error.message };
       return { success: true, error: null };
     } catch (err: any) {
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || 'Password change failed' };
     }
   },
 
@@ -240,13 +266,10 @@ export const authService = {
         redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/auth/reset-password`,
       });
 
-      if (error) {
-        return { success: false, error: error.message };
-      }
-
+      if (error) return { success: false, error: error.message };
       return { success: true, error: null };
     } catch (err: any) {
-      return { success: false, error: err.message };
+      return { success: false, error: err?.message || 'Reset failed' };
     }
   },
 
@@ -254,16 +277,21 @@ export const authService = {
    * Listen for auth changes
    */
   onAuthChange(callback: (user: User | null) => void) {
-    return supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
+    return supabase.auth.onAuthStateChange(async (_event, session) => {
+      try {
+        if (!session?.user) {
+          callback(null);
+          return;
+        }
+
         const { data } = await supabase
           .from('users')
           .select('*')
           .eq('id', session.user.id)
-          .single();
-        
+          .maybeSingle();
+
         callback(data ? rowToUser(data) : null);
-      } else {
+      } catch {
         callback(null);
       }
     });
@@ -275,20 +303,14 @@ export const authService = {
 // ============================================
 
 export const adminAuthService = {
-  /**
-   * Check if current user is admin
-   */
   async isAdmin(): Promise<boolean> {
     const user = await authService.getCurrentUser();
     return user?.role === 'admin';
   },
 
-  /**
-   * Admin sign in (same as regular but checks role)
-   */
   async signIn(email: string, password: string): Promise<{ user: User | null; error: string | null }> {
     const result = await authService.signIn(email, password);
-    
+
     if (result.user && result.user.role !== 'admin') {
       await authService.signOut();
       return { user: null, error: 'Access denied. Admin privileges required.' };

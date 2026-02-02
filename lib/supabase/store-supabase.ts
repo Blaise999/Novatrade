@@ -1,11 +1,11 @@
 /**
  * UNIFIED SUPABASE STORE
- * 
+ *
  * This replaces ALL localStorage-based stores.
  * Everything is now saved to Supabase database.
- * 
+ *
  * Usage:
- *   import { useStore } from '@/lib/store-supabase';
+ *   import { useStore } from '@/lib/supabase/store-supabase';
  *   const { user, balance, login, logout, ... } = useStore();
  */
 
@@ -16,11 +16,11 @@ import { supabase, isSupabaseConfigured } from './supabase-client';
 // TYPES
 // ============================================
 
-export type RegistrationStatus = 
-  | 'pending_verification'  // Step 1: Email not yet verified
-  | 'pending_kyc'           // Step 2: Email verified, KYC not done
-  | 'pending_wallet'        // Step 3: KYC done, wallet not connected
-  | 'complete';             // Step 4: Fully registered
+export type RegistrationStatus =
+  | 'pending_verification' // Step 1: Email not yet verified
+  | 'pending_kyc' // Step 2: Email verified, KYC not done
+  | 'pending_wallet' // Step 3: KYC done, wallet not connected
+  | 'complete'; // Step 4: Fully registered
 
 export interface User {
   id: string;
@@ -145,7 +145,7 @@ interface StoreState {
 
   // Balance Actions
   getBalance: () => Promise<{ available: number; bonus: number }>;
-  
+
   // Deposit Actions
   loadDeposits: () => Promise<void>;
   submitDeposit: (deposit: {
@@ -223,36 +223,32 @@ export const useStore = create<StoreState>((set, get) => ({
 
   login: async (email: string, password: string) => {
     set({ isLoading: true, error: null });
-    
+
     try {
-      // Check if Supabase is properly configured
+      // DEMO MODE
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Use localStorage-based login
         console.log('📦 Demo mode: Using localStorage for login');
-        
+
         const existingUsers = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
-        const user = existingUsers.find((u: any) => 
-          u.email === email.toLowerCase() && u.password === password
+        const found = existingUsers.find(
+          (u: any) => u.email === email.toLowerCase() && u.password === password
         );
-        
-        if (!user) {
+
+        if (!found) {
           set({ isLoading: false, error: 'Invalid email or password' });
           return { success: false };
         }
-        
-        // Remove password before storing in state
-        const { password: _, ...userWithoutPassword } = user;
+
+        const { password: _pw, ...userWithoutPassword } = found;
         localStorage.setItem('novatrade_current_user', JSON.stringify(userWithoutPassword));
-        
+
         set({ user: userWithoutPassword, isAuthenticated: true, isLoading: false });
-        
-        // Get redirect based on registration status
+
         const redirect = getRegistrationRedirect(userWithoutPassword.registrationStatus || 'complete');
         return { success: true, redirect };
       }
-      
-      // PRODUCTION MODE: Use Supabase
-      // Sign in with Supabase Auth
+
+      // PRODUCTION MODE: Supabase Auth
       const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -268,42 +264,50 @@ export const useStore = create<StoreState>((set, get) => ({
         return { success: false };
       }
 
-      // Get user profile from our users table
+      // ✅ Safe profile fetch (never throws on 0 rows)
       const { data: userData, error: userError } = await supabase
         .from('users')
         .select('*')
         .eq('id', authData.user.id)
-        .single();
+        .maybeSingle();
 
-      if (userError || !userData) {
-        // User doesn't have a profile yet (email was confirmed but profile not created)
-        // Create profile and set registration to pending_kyc (since OTP was done via Supabase)
+      // ✅ If profile missing, create it and RETURN immediately (no fallthrough)
+      if (!userData) {
         const metadata = authData.user.user_metadata || {};
-        const { data: newUser } = await supabase
+
+        const { data: newUser, error: newUserError } = await supabase
           .from('users')
           .insert({
             id: authData.user.id,
-            email: email.toLowerCase(),
+            email: (authData.user.email || email).toLowerCase(),
             first_name: metadata.first_name || '',
             last_name: metadata.last_name || '',
             role: 'user',
             tier: 'basic',
             balance_available: 0,
             balance_bonus: 0,
+            total_deposited: 0,
+            kyc_status: 'none',
             registration_status: 'pending_kyc',
             is_active: true,
           })
           .select()
           .single();
 
-        if (newUser) {
-          const user = dbToUser(newUser);
-          set({ user, isAuthenticated: true, isLoading: false });
-          return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
+        if (newUserError || !newUser) {
+          set({
+            isLoading: false,
+            error: newUserError?.message || userError?.message || 'Failed to create profile',
+          });
+          return { success: false };
         }
+
+        const user = dbToUser(newUser);
+        set({ user, isAuthenticated: true, isLoading: false });
+        return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
       }
 
-      // Check if user is active
+      // Now it’s guaranteed userData exists
       if (!userData.is_active) {
         await supabase.auth.signOut();
         set({ isLoading: false, error: 'Account is disabled' });
@@ -312,32 +316,27 @@ export const useStore = create<StoreState>((set, get) => ({
 
       const user = dbToUser(userData);
       set({ user, isAuthenticated: true, isLoading: false });
-      
-      // Return redirect based on registration status
       return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
     } catch (err: any) {
-      set({ isLoading: false, error: err.message });
+      set({ isLoading: false, error: err?.message || 'Login failed' });
       return { success: false };
     }
   },
 
   signup: async (email: string, password: string, firstName?: string, lastName?: string) => {
     set({ isLoading: true, error: null });
-    
+
     try {
-      // Check if Supabase is properly configured
+      // DEMO MODE
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Use localStorage-based signup
         console.log('📦 Demo mode: Using localStorage for signup');
-        
-        // Check if email already exists in localStorage
+
         const existingUsers = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         if (existingUsers.find((u: any) => u.email === email.toLowerCase())) {
-          set({ isLoading: false, error: 'Email already registered. Please login.' });
+          set({ error: 'Email already registered. Please login.' });
           return false;
         }
-        
-        // Create demo user - OTP already verified, so start at pending_kyc
+
         const newUser: User = {
           id: `demo_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           email: email.toLowerCase(),
@@ -349,146 +348,170 @@ export const useStore = create<StoreState>((set, get) => ({
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'pending_kyc', // OTP verified, next is KYC
+          registrationStatus: 'pending_kyc',
           isActive: true,
           createdAt: new Date().toISOString(),
         };
-        
-        // Save to localStorage
-        existingUsers.push({ ...newUser, password }); // Store password for demo login
+
+        existingUsers.push({ ...newUser, password });
         localStorage.setItem('novatrade_users', JSON.stringify(existingUsers));
         localStorage.setItem('novatrade_current_user', JSON.stringify(newUser));
-        
-        set({ user: newUser, isAuthenticated: true, isLoading: false });
+
+        set({ user: newUser, isAuthenticated: true });
         return true;
       }
-      
-      // PRODUCTION MODE: Use Supabase
-      // Create auth user
+
+      // PRODUCTION MODE
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email,
         password,
         options: {
           data: {
-            first_name: firstName,
-            last_name: lastName,
-          }
-        }
+            first_name: firstName || '',
+            last_name: lastName || '',
+          },
+        },
       });
 
       if (authError) {
-        set({ isLoading: false, error: authError.message });
+        set({ error: authError.message });
         return false;
       }
 
       if (!authData.user) {
-        set({ isLoading: false, error: 'Signup failed' });
+        set({ error: 'Signup failed' });
         return false;
       }
 
-      // Check if we have a session (no email confirmation required)
-      // If session exists, we can create the profile now
-      // If not (email confirmation pending), profile will be created on first login
+      // If session exists, we can create profile immediately
       if (authData.session) {
-        console.log('Session exists, creating user profile...');
-        
-        // OTP already verified via our custom system, so set to pending_kyc
         const { data: userData, error: userError } = await supabase
           .from('users')
           .insert({
             id: authData.user.id,
-            email: email.toLowerCase(),
-            first_name: firstName,
-            last_name: lastName,
+            email: (authData.user.email || email).toLowerCase(),
+            first_name: firstName || '',
+            last_name: lastName || '',
             role: 'user',
             tier: 'basic',
             balance_available: 0,
             balance_bonus: 0,
             total_deposited: 0,
             kyc_status: 'none',
-            registration_status: 'pending_kyc', // OTP verified, next is KYC
+            registration_status: 'pending_kyc',
             is_active: true,
           })
           .select()
           .single();
 
-        if (userError) {
+        // If profile insert fails, don’t hang — just return true (auth user still created)
+        if (userError || !userData) {
           console.error('Profile creation error:', userError);
-          // Auth user created but profile failed - still consider it success
-          // Profile will be created on next login
+          return true;
         }
 
-        if (userData) {
-          set({ user: dbToUser(userData), isAuthenticated: true, isLoading: false });
-        } else {
-          set({ isLoading: false });
-        }
-      } else {
-        // No session = email confirmation required
-        // User profile will be created when they confirm email and log in
-        console.log('Email confirmation required - profile will be created on first login');
-        set({ isLoading: false });
+        set({ user: dbToUser(userData), isAuthenticated: true });
+        return true;
       }
-      
+
+      // No session = email confirmation required
+      // Don’t hang. Just finish and let login() handle profile creation after confirmation.
       return true;
     } catch (err: any) {
-      set({ isLoading: false, error: err.message });
+      set({ error: err?.message || 'Signup failed' });
       return false;
+    } finally {
+      // ✅ GUARANTEE: never stays loading
+      set({ isLoading: false });
     }
   },
 
   logout: async () => {
-    if (!isSupabaseConfigured()) {
-      // DEMO MODE: Clear localStorage
-      localStorage.removeItem('novatrade_current_user');
-    } else {
-      await supabase.auth.signOut();
+    try {
+      if (!isSupabaseConfigured()) {
+        localStorage.removeItem('novatrade_current_user');
+      } else {
+        await supabase.auth.signOut();
+      }
+    } finally {
+      set({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        deposits: [],
+        trades: [],
+        error: null,
+      });
     }
-    set({ 
-      user: null, 
-      isAuthenticated: false, 
-      deposits: [], 
-      trades: [],
-      error: null 
-    });
   },
 
   checkSession: async () => {
     set({ isLoading: true });
-    
+
     try {
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Check localStorage
         const storedUser = localStorage.getItem('novatrade_current_user');
         if (storedUser) {
-          const user = JSON.parse(storedUser);
-          set({ user, isAuthenticated: true, isLoading: false });
+          set({ user: JSON.parse(storedUser), isAuthenticated: true, isLoading: false });
         } else {
           set({ user: null, isAuthenticated: false, isLoading: false });
         }
         return;
       }
-      
-      // PRODUCTION MODE: Use Supabase
-      const { data: { session } } = await supabase.auth.getSession();
-      
+
+      const { data: sessionRes } = await supabase.auth.getSession();
+      const session = sessionRes.session;
+
       if (!session?.user) {
         set({ user: null, isAuthenticated: false, isLoading: false });
         return;
       }
 
-      // Get user profile
-      const { data: userData } = await supabase
+      // ✅ Safe fetch
+      const { data: userData, error } = await supabase
         .from('users')
         .select('*')
         .eq('id', session.user.id)
-        .single();
+        .maybeSingle();
 
-      if (userData) {
-        set({ user: dbToUser(userData), isAuthenticated: true, isLoading: false });
-      } else {
-        set({ user: null, isAuthenticated: false, isLoading: false });
+      if (error) {
+        set({ isAuthenticated: true, isLoading: false });
+        return;
       }
+
+      // If profile missing on refresh, create it safely (prevents weird “logged in but no profile”)
+      if (!userData) {
+        const metadata = session.user.user_metadata || {};
+
+        const { data: newUser, error: newUserError } = await supabase
+          .from('users')
+          .insert({
+            id: session.user.id,
+            email: (session.user.email || '').toLowerCase(),
+            first_name: metadata.first_name || '',
+            last_name: metadata.last_name || '',
+            role: 'user',
+            tier: 'basic',
+            balance_available: 0,
+            balance_bonus: 0,
+            total_deposited: 0,
+            kyc_status: 'none',
+            registration_status: 'pending_kyc',
+            is_active: true,
+          })
+          .select()
+          .single();
+
+        if (newUserError || !newUser) {
+          set({ isAuthenticated: true, isLoading: false });
+          return;
+        }
+
+        set({ user: dbToUser(newUser), isAuthenticated: true, isLoading: false });
+        return;
+      }
+
+      set({ user: dbToUser(userData), isAuthenticated: true, isLoading: false });
     } catch {
       set({ user: null, isAuthenticated: false, isLoading: false });
     }
@@ -500,23 +523,20 @@ export const useStore = create<StoreState>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Update localStorage
         const updatedUser = { ...user, ...updates };
         localStorage.setItem('novatrade_current_user', JSON.stringify(updatedUser));
-        
-        // Also update in users list
+
         const existingUsers = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
-        const userIndex = existingUsers.findIndex((u: any) => u.id === user.id);
-        if (userIndex >= 0) {
-          existingUsers[userIndex] = { ...existingUsers[userIndex], ...updates };
+        const idx = existingUsers.findIndex((u: any) => u.id === user.id);
+        if (idx >= 0) {
+          existingUsers[idx] = { ...existingUsers[idx], ...updates };
           localStorage.setItem('novatrade_users', JSON.stringify(existingUsers));
         }
-        
+
         set({ user: updatedUser });
         return true;
       }
-      
-      // PRODUCTION MODE: Use Supabase
+
       const { error } = await supabase
         .from('users')
         .update({
@@ -530,7 +550,6 @@ export const useStore = create<StoreState>((set, get) => ({
 
       if (error) return false;
 
-      // Refresh user data
       await get().refreshUser();
       return true;
     } catch {
@@ -544,34 +563,27 @@ export const useStore = create<StoreState>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Update localStorage
         const updatedUser = { ...user, kycStatus: status };
         localStorage.setItem('novatrade_current_user', JSON.stringify(updatedUser));
-        
-        // Also update in users list
+
         const existingUsers = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
-        const userIndex = existingUsers.findIndex((u: any) => u.id === user.id);
-        if (userIndex >= 0) {
-          existingUsers[userIndex].kycStatus = status;
+        const idx = existingUsers.findIndex((u: any) => u.id === user.id);
+        if (idx >= 0) {
+          existingUsers[idx].kycStatus = status;
           localStorage.setItem('novatrade_users', JSON.stringify(existingUsers));
         }
-        
+
         set({ user: updatedUser });
         return true;
       }
-      
-      // PRODUCTION MODE: Use Supabase
+
       const { error } = await supabase
         .from('users')
-        .update({
-          kyc_status: status,
-          updated_at: new Date().toISOString(),
-        })
+        .update({ kyc_status: status, updated_at: new Date().toISOString() })
         .eq('id', user.id);
 
       if (error) return false;
 
-      // Refresh user data
       await get().refreshUser();
       return true;
     } catch {
@@ -585,34 +597,27 @@ export const useStore = create<StoreState>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        // DEMO MODE: Update localStorage
         const updatedUser = { ...user, registrationStatus: status };
         localStorage.setItem('novatrade_current_user', JSON.stringify(updatedUser));
-        
-        // Also update in users list
+
         const existingUsers = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
-        const userIndex = existingUsers.findIndex((u: any) => u.id === user.id);
-        if (userIndex >= 0) {
-          existingUsers[userIndex].registrationStatus = status;
+        const idx = existingUsers.findIndex((u: any) => u.id === user.id);
+        if (idx >= 0) {
+          existingUsers[idx].registrationStatus = status;
           localStorage.setItem('novatrade_users', JSON.stringify(existingUsers));
         }
-        
+
         set({ user: updatedUser });
         return true;
       }
-      
-      // PRODUCTION MODE: Use Supabase
+
       const { error } = await supabase
         .from('users')
-        .update({
-          registration_status: status,
-          updated_at: new Date().toISOString(),
-        })
+        .update({ registration_status: status, updated_at: new Date().toISOString() })
         .eq('id', user.id);
 
       if (error) return false;
 
-      // Refresh user data
       await get().refreshUser();
       return true;
     } catch {
@@ -624,24 +629,17 @@ export const useStore = create<StoreState>((set, get) => ({
     const { user } = get();
     if (!user) return;
 
-    if (!isSupabaseConfigured()) {
-      // DEMO MODE: Already have latest data in localStorage
-      const storedUser = localStorage.getItem('novatrade_current_user');
-      if (storedUser) {
-        set({ user: JSON.parse(storedUser) });
+    try {
+      if (!isSupabaseConfigured()) {
+        const storedUser = localStorage.getItem('novatrade_current_user');
+        if (storedUser) set({ user: JSON.parse(storedUser) });
+        return;
       }
-      return;
-    }
 
-    // PRODUCTION MODE: Use Supabase
-    const { data } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-
-    if (data) {
-      set({ user: dbToUser(data) });
+      const { data } = await supabase.from('users').select('*').eq('id', user.id).maybeSingle();
+      if (data) set({ user: dbToUser(data) });
+    } catch {
+      // ignore
     }
   },
 
@@ -652,28 +650,26 @@ export const useStore = create<StoreState>((set, get) => ({
   getBalance: async () => {
     const { user } = get();
     if (!user) return { available: 0, bonus: 0 };
+    if (!isSupabaseConfigured()) return { available: user.balance || 0, bonus: user.bonusBalance || 0 };
 
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('users')
       .select('balance_available, balance_bonus')
       .eq('id', user.id)
-      .single();
+      .maybeSingle();
 
-    if (data) {
-      const balance = {
-        available: parseFloat(data.balance_available) || 0,
-        bonus: parseFloat(data.balance_bonus) || 0,
-      };
-      
-      // Update local user state
-      set(state => ({
-        user: state.user ? { ...state.user, balance: balance.available, bonusBalance: balance.bonus } : null
-      }));
-      
-      return balance;
-    }
+    if (error || !data) return { available: 0, bonus: 0 };
 
-    return { available: 0, bonus: 0 };
+    const balance = {
+      available: parseFloat(data.balance_available) || 0,
+      bonus: parseFloat(data.balance_bonus) || 0,
+    };
+
+    set((state) => ({
+      user: state.user ? { ...state.user, balance: balance.available, bonusBalance: balance.bonus } : null,
+    }));
+
+    return balance;
   },
 
   // ==========================================
@@ -691,7 +687,7 @@ export const useStore = create<StoreState>((set, get) => ({
       .order('created_at', { ascending: false });
 
     if (data) {
-      const deposits: Deposit[] = data.map(d => ({
+      const deposits: Deposit[] = data.map((d: any) => ({
         id: d.id,
         orderId: d.order_id,
         amount: parseFloat(d.amount),
@@ -712,31 +708,26 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!user) return false;
 
     try {
-      const { data, error } = await supabase
-        .from('deposits')
-        .insert({
-          user_id: user.id,
-          order_id: `DEP-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-          amount: deposit.amount,
-          method: deposit.method,
-          method_name: deposit.methodName,
-          transaction_ref: deposit.transactionRef,
-          proof_url: deposit.proofUrl,
-          status: 'pending',
-        })
-        .select()
-        .single();
+      const { error } = await supabase.from('deposits').insert({
+        user_id: user.id,
+        order_id: `DEP-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        amount: deposit.amount,
+        method: deposit.method,
+        method_name: deposit.methodName,
+        transaction_ref: deposit.transactionRef,
+        proof_url: deposit.proofUrl,
+        status: 'pending',
+      });
 
       if (error) {
         set({ error: error.message });
         return false;
       }
 
-      // Reload deposits
       await get().loadDeposits();
       return true;
     } catch (err: any) {
-      set({ error: err.message });
+      set({ error: err?.message || 'Deposit failed' });
       return false;
     }
   },
@@ -756,7 +747,7 @@ export const useStore = create<StoreState>((set, get) => ({
       .order('created_at', { ascending: false });
 
     if (data) {
-      const trades: Trade[] = data.map(t => ({
+      const trades: Trade[] = data.map((t: any) => ({
         id: t.id,
         pair: t.pair,
         type: t.type,
@@ -785,20 +776,15 @@ export const useStore = create<StoreState>((set, get) => ({
     const leverage = trade.leverage || 1;
     const marginUsed = trade.amount / leverage;
 
-    // Check balance
     if (user.balance < marginUsed) {
       set({ error: 'Insufficient balance' });
       return null;
     }
 
     try {
-      // Deduct margin from balance
       const { error: balanceError } = await supabase
         .from('users')
-        .update({ 
-          balance_available: user.balance - marginUsed,
-          updated_at: new Date().toISOString()
-        })
+        .update({ balance_available: user.balance - marginUsed, updated_at: new Date().toISOString() })
         .eq('id', user.id);
 
       if (balanceError) {
@@ -806,7 +792,6 @@ export const useStore = create<StoreState>((set, get) => ({
         return null;
       }
 
-      // Create trade
       const { data, error } = await supabase
         .from('trades')
         .insert({
@@ -827,17 +812,12 @@ export const useStore = create<StoreState>((set, get) => ({
         .select()
         .single();
 
-      if (error) {
-        // Refund margin
-        await supabase
-          .from('users')
-          .update({ balance_available: user.balance })
-          .eq('id', user.id);
-        set({ error: error.message });
+      if (error || !data) {
+        await supabase.from('users').update({ balance_available: user.balance }).eq('id', user.id);
+        set({ error: error?.message || 'Trade failed' });
         return null;
       }
 
-      // Update local state
       await get().refreshUser();
       await get().loadTrades();
 
@@ -856,7 +836,7 @@ export const useStore = create<StoreState>((set, get) => ({
         createdAt: data.created_at,
       };
     } catch (err: any) {
-      set({ error: err.message });
+      set({ error: err?.message || 'Trade failed' });
       return null;
     }
   },
@@ -865,11 +845,10 @@ export const useStore = create<StoreState>((set, get) => ({
     const { user, trades } = get();
     if (!user) return false;
 
-    const trade = trades.find(t => t.id === tradeId);
+    const trade = trades.find((t) => t.id === tradeId);
     if (!trade || trade.status !== 'open') return false;
 
     try {
-      // Calculate P&L
       let pnl: number;
       if (trade.side === 'long') {
         pnl = ((exitPrice - trade.entryPrice) / trade.entryPrice) * trade.amount;
@@ -877,20 +856,14 @@ export const useStore = create<StoreState>((set, get) => ({
         pnl = ((trade.entryPrice - exitPrice) / trade.entryPrice) * trade.amount;
       }
 
-      // Return margin + P&L to user
       const returnAmount = trade.marginUsed + pnl;
       const newBalance = Math.max(0, user.balance + returnAmount);
 
-      // Update user balance
       await supabase
         .from('users')
-        .update({ 
-          balance_available: newBalance,
-          updated_at: new Date().toISOString()
-        })
+        .update({ balance_available: newBalance, updated_at: new Date().toISOString() })
         .eq('id', user.id);
 
-      // Close trade
       const { error } = await supabase
         .from('trades')
         .update({
@@ -903,10 +876,8 @@ export const useStore = create<StoreState>((set, get) => ({
 
       if (error) return false;
 
-      // Refresh data
       await get().refreshUser();
       await get().loadTrades();
-
       return true;
     } catch {
       return false;
@@ -926,7 +897,7 @@ export const useStore = create<StoreState>((set, get) => ({
       .order('display_order');
 
     if (data) {
-      const methods: PaymentMethod[] = data.map(p => ({
+      const methods: PaymentMethod[] = data.map((p: any) => ({
         id: p.id,
         type: p.type,
         name: p.name,
@@ -952,67 +923,59 @@ export const useStore = create<StoreState>((set, get) => ({
 }));
 
 // ============================================
-// AUTH STATE LISTENER
+// AUTH STATE LISTENER (PATCHED: INITIAL_SESSION + NO HANG)
 // ============================================
 
-// Listen for auth changes and update store
 if (typeof window !== 'undefined') {
-  supabase.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_OUT') {
-      useStore.setState({ 
-        user: null, 
-        isAuthenticated: false,
-        deposits: [],
-        trades: [],
-      });
-    } else if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session?.user) {
-      // Fetch user profile
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', session.user.id)
-        .single();
+  const g = globalThis as any;
+  if (!g.__novatrade_auth_listener__) {
+    g.__novatrade_auth_listener__ = true;
 
-      if (data) {
-        useStore.setState({ 
-          user: dbToUser(data), 
-          isAuthenticated: true,
-          isLoading: false,
-        });
-      } else if (error && error.code === 'PGRST116') {
-        // Profile doesn't exist yet (user just confirmed email)
-        // Create it now
-        console.log('Creating profile for confirmed user...');
-        const metadata = session.user.user_metadata || {};
-        
-        const { data: newUser } = await supabase
+    supabase.auth.onAuthStateChange(async (_event, session) => {
+      try {
+        // Always end loading if there's no session
+        if (!session?.user) {
+          useStore.setState({
+            user: null,
+            isAuthenticated: false,
+            isLoading: false,
+            deposits: [],
+            trades: [],
+          });
+          return;
+        }
+
+        // Load profile for any session event (including INITIAL_SESSION)
+        useStore.setState({ isLoading: true });
+
+        const { data, error } = await supabase
           .from('users')
-          .insert({
-            id: session.user.id,
-            email: session.user.email?.toLowerCase(),
-            first_name: metadata.first_name || '',
-            last_name: metadata.last_name || '',
-            role: 'user',
-            tier: 'basic',
-            balance_available: 0,
-            balance_bonus: 0,
-            total_deposited: 0,
-            kyc_status: 'none',
-            is_active: true,
-          })
-          .select()
-          .single();
+          .select('*')
+          .eq('id', session.user.id)
+          .maybeSingle();
 
-        if (newUser) {
-          useStore.setState({ 
-            user: dbToUser(newUser), 
+        if (error) {
+          // Don’t hang forever on errors
+          useStore.setState({ isLoading: false });
+          return;
+        }
+
+        if (data) {
+          useStore.setState({
+            user: dbToUser(data),
             isAuthenticated: true,
             isLoading: false,
           });
+          return;
         }
+
+        // If profile doesn't exist, just stop loading (login() & checkSession() can create it)
+        useStore.setState({ isAuthenticated: true, isLoading: false });
+      } catch {
+        useStore.setState({ isLoading: false });
       }
-    }
-  });
+    });
+  }
 }
 
 // ============================================
@@ -1023,8 +986,7 @@ interface AdminState {
   isAdmin: boolean;
   pendingDeposits: any[];
   allUsers: any[];
-  
-  // Admin Actions
+
   checkAdminAccess: () => Promise<boolean>;
   loadPendingDeposits: () => Promise<void>;
   confirmDeposit: (depositId: string, note?: string) => Promise<boolean>;
@@ -1042,7 +1004,14 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   allUsers: [],
 
   checkAdminAccess: async () => {
-    const { data: { session } } = await supabase.auth.getSession();
+    if (!isSupabaseConfigured()) {
+      set({ isAdmin: false });
+      return false;
+    }
+
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const session = sessionRes.session;
+
     if (!session?.user) {
       set({ isAdmin: false });
       return false;
@@ -1052,7 +1021,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       .from('users')
       .select('role')
       .eq('id', session.user.id)
-      .single();
+      .maybeSingle();
 
     const isAdmin = data?.role === 'admin';
     set({ isAdmin });
@@ -1070,19 +1039,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   confirmDeposit: async (depositId: string, note?: string) => {
-    const { data: { session } } = await supabase.auth.getSession();
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const session = sessionRes.session;
     if (!session?.user) return false;
 
-    // Get deposit details
-    const { data: deposit } = await supabase
-      .from('deposits')
-      .select('*')
-      .eq('id', depositId)
-      .single();
-
+    const { data: deposit } = await supabase.from('deposits').select('*').eq('id', depositId).maybeSingle();
     if (!deposit) return false;
 
-    // Update deposit status
     const { error: depositError } = await supabase
       .from('deposits')
       .update({
@@ -1095,12 +1058,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     if (depositError) return false;
 
-    // Add balance to user
     const { data: userData } = await supabase
       .from('users')
       .select('balance_available, total_deposited')
       .eq('id', deposit.user_id)
-      .single();
+      .maybeSingle();
 
     if (userData) {
       await supabase
@@ -1113,13 +1075,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         .eq('id', deposit.user_id);
     }
 
-    // Refresh pending deposits
     await get().loadPendingDeposits();
     return true;
   },
 
   rejectDeposit: async (depositId: string, note?: string) => {
-    const { data: { session } } = await supabase.auth.getSession();
+    const { data: sessionRes } = await supabase.auth.getSession();
+    const session = sessionRes.session;
     if (!session?.user) return false;
 
     const { error } = await supabase
@@ -1132,87 +1094,46 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       })
       .eq('id', depositId);
 
-    if (!error) {
-      await get().loadPendingDeposits();
-    }
-
+    if (!error) await get().loadPendingDeposits();
     return !error;
   },
 
   loadAllUsers: async () => {
-    const { data } = await supabase
-      .from('users')
-      .select('*')
-      .order('created_at', { ascending: false });
-
+    const { data } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     set({ allUsers: data || [] });
   },
 
   updateUserBalance: async (userId: string, amount: number, type: 'add' | 'subtract') => {
-    const { data: user } = await supabase
-      .from('users')
-      .select('balance_available')
-      .eq('id', userId)
-      .single();
-
+    const { data: user } = await supabase.from('users').select('balance_available').eq('id', userId).maybeSingle();
     if (!user) return false;
 
     const currentBalance = parseFloat(user.balance_available);
-    const newBalance = type === 'add' 
-      ? currentBalance + amount 
-      : Math.max(0, currentBalance - amount);
+    const newBalance = type === 'add' ? currentBalance + amount : Math.max(0, currentBalance - amount);
 
     const { error } = await supabase
       .from('users')
-      .update({ 
-        balance_available: newBalance,
-        updated_at: new Date().toISOString()
-      })
+      .update({ balance_available: newBalance, updated_at: new Date().toISOString() })
       .eq('id', userId);
 
-    if (!error) {
-      await get().loadAllUsers();
-    }
-
+    if (!error) await get().loadAllUsers();
     return !error;
   },
 
   updateUserTier: async (userId: string, tier: string) => {
-    const { error } = await supabase
-      .from('users')
-      .update({ tier, updated_at: new Date().toISOString() })
-      .eq('id', userId);
-
-    if (!error) {
-      await get().loadAllUsers();
-    }
-
+    const { error } = await supabase.from('users').update({ tier, updated_at: new Date().toISOString() }).eq('id', userId);
+    if (!error) await get().loadAllUsers();
     return !error;
   },
 
   disableUser: async (userId: string) => {
-    const { error } = await supabase
-      .from('users')
-      .update({ is_active: false })
-      .eq('id', userId);
-
-    if (!error) {
-      await get().loadAllUsers();
-    }
-
+    const { error } = await supabase.from('users').update({ is_active: false }).eq('id', userId);
+    if (!error) await get().loadAllUsers();
     return !error;
   },
 
   enableUser: async (userId: string) => {
-    const { error } = await supabase
-      .from('users')
-      .update({ is_active: true })
-      .eq('id', userId);
-
-    if (!error) {
-      await get().loadAllUsers();
-    }
-
+    const { error } = await supabase.from('users').update({ is_active: true }).eq('id', userId);
+    if (!error) await get().loadAllUsers();
     return !error;
   },
 }));
