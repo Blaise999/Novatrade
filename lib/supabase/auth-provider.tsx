@@ -36,39 +36,40 @@ const AuthContext = createContext<AuthContextType>({
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  // ✅ Your store typings currently resolve to `unknown`, so TS won't allow `.user`
-  // We safely read fields via `any` and then cast to our own AuthUser type.
-  const store = useStore() as any;
+  // ✅ Use selectors so TS stays correct and we don’t rely on `any`
+  const user = useStore((s) => s.user) as any as AuthUser | null;
+  const isAuthenticated = useStore((s) => s.isAuthenticated);
+  const storeLoading = useStore((s) => s.isLoading);
+  const checkSession = useStore((s) => s.checkSession);
 
-  const user = (store?.user ?? null) as AuthUser | null;
-  const isAuthenticated = Boolean(store?.isAuthenticated);
-  const isLoading = Boolean(store?.isLoading);
-  const checkSession = (store?.checkSession ??
-    (async () => {})) as () => Promise<any>;
-
+  // ✅ Prevent redirects until we’ve at least tried checkSession once
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
-    checkSession().finally(() => setInitialized(true));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let alive = true;
 
-  if (!initialized) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-12 h-12 border-4 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-cream/60">Loading...</p>
-        </div>
-      </div>
-    );
-  }
+    // Run once on mount
+    Promise.resolve(checkSession())
+      .catch(() => {
+        // ignore; store handles error state
+      })
+      .finally(() => {
+        if (alive) setInitialized(true);
+      });
 
-  return (
-    <AuthContext.Provider value={{ isLoading, isAuthenticated, user }}>
-      {children}
-    </AuthContext.Provider>
-  );
+    return () => {
+      alive = false;
+    };
+  }, [checkSession]);
+
+  // ✅ During init we force "loading" so HOCs don’t redirect early
+  const ctxValue: AuthContextType = {
+    isLoading: !initialized || storeLoading,
+    isAuthenticated: initialized && isAuthenticated,
+    user: initialized ? user : null,
+  };
+
+  return <AuthContext.Provider value={ctxValue}>{children}</AuthContext.Provider>;
 }
 
 // Hook to use auth context
