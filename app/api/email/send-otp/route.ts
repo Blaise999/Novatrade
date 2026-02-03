@@ -1,59 +1,75 @@
-// API Route: Send OTP Email
-// POST /api/email/send-otp
+import { NextRequest, NextResponse } from "next/server";
+import { sendOTPEmail } from "@/lib/email";
 
-import { NextRequest, NextResponse } from 'next/server';
-import { sendOTPEmail } from '@/lib/email';
+const ALLOWED_OTP_TYPES = new Set([
+  "email_verification",
+  "password_reset",
+  "login",
+  "withdrawal",
+  "2fa",
+]);
+
+function coerceType(input: any) {
+  const t = typeof input === "string" ? input.trim() : "";
+  return t || "email_verification";
+}
+
+function normalizeEmail(input: any) {
+  return typeof input === "string" ? input.trim().toLowerCase() : "";
+}
 
 export async function POST(request: NextRequest) {
+  const requestId = `sendotp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
   try {
-    const body = await request.json();
-    const { email, name, type = 'email_verification' } = body;
-
-    // Validation
-    if (!email || !name) {
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
       return NextResponse.json(
-        { success: false, error: 'Email and name are required' },
+        { success: false, error: "Invalid JSON body" },
         { status: 400 }
       );
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    const email = normalizeEmail(body?.email);
+    const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : "User";
+    const type = coerceType(body?.type);
+
+    if (!email) {
       return NextResponse.json(
-        { success: false, error: 'Invalid email format' },
+        { success: false, error: "Email is required" },
         { status: 400 }
       );
     }
 
-    // Validate OTP type
-    const validTypes = ['email_verification', 'password_reset', 'login', 'withdrawal', '2fa'];
-    if (!validTypes.includes(type)) {
+    if (!ALLOWED_OTP_TYPES.has(type)) {
       return NextResponse.json(
-        { success: false, error: 'Invalid OTP type' },
+        { success: false, error: `Invalid OTP type: ${type}` },
         { status: 400 }
       );
     }
 
-    // Send OTP email
-    const result = await sendOTPEmail(email, name, type);
+    const result = await sendOTPEmail(email, name, type as any);
 
-    if (result.success) {
-      return NextResponse.json({
-        success: true,
-        message: 'Verification code sent successfully',
-        expiresAt: result.expiresAt,
-      });
-    } else {
+    if (!result.success) {
       return NextResponse.json(
-        { success: false, error: result.error },
+        { success: false, error: result.error || "Failed to send OTP", requestId },
         { status: 400 }
       );
     }
-  } catch (error: any) {
-    console.error('[API] Send OTP error:', error);
+
+    return NextResponse.json({
+      success: true,
+      message: "OTP sent",
+      messageId: result.messageId,
+      expiresAt: result.expiresAt?.toISOString?.() ?? result.expiresAt,
+      requestId,
+    });
+  } catch (err: any) {
+    console.error("[API] Send OTP error:", err);
     return NextResponse.json(
-      { success: false, error: 'Failed to send verification code' },
+      { success: false, error: "Failed to send OTP" },
       { status: 500 }
     );
   }

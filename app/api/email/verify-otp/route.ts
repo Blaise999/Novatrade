@@ -1,7 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyOTPCode } from "@/lib/email";
 
-function withTimeout<T>(p: Promise<T>, ms = 8000): Promise<T> {
+const ALLOWED_OTP_TYPES = new Set([
+  "email_verification",
+  "password_reset",
+  "login",
+  "withdrawal",
+  "2fa",
+]);
+
+function coerceType(input: any) {
+  const t = typeof input === "string" ? input.trim() : "";
+  return t || "email_verification";
+}
+
+function withTimeout<T>(p: Promise<T>, ms = 15000): Promise<T> {
   return Promise.race([
     p,
     new Promise<T>((_, reject) =>
@@ -12,10 +25,22 @@ function withTimeout<T>(p: Promise<T>, ms = 8000): Promise<T> {
 
 export async function POST(request: NextRequest) {
   const started = Date.now();
+  const requestId = `otp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
   try {
-    const body = await request.json();
-    const { email, otp, type } = body;
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, error: "Invalid JSON body" },
+        { status: 400 }
+      );
+    }
+
+    const email = typeof body?.email === "string" ? body.email.trim() : "";
+    const otp = typeof body?.otp === "string" ? body.otp.trim() : "";
+    const type = coerceType(body?.type);
 
     if (!email || !otp) {
       return NextResponse.json(
@@ -31,38 +56,39 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // optional: enforce type to avoid weird behavior inside verifyOTPCode
-    if (!type) {
+    if (!ALLOWED_OTP_TYPES.has(type)) {
       return NextResponse.json(
-        { success: false, error: "OTP type is required" },
+        { success: false, error: `Invalid OTP type: ${type}` },
         { status: 400 }
       );
     }
 
-    console.log("[verify-otp] start", { email, type });
+    console.log("[verify-otp] start", { requestId, email, type });
 
-    const result = await withTimeout(verifyOTPCode(email, otp, type), 8000);
+    const result = await withTimeout(verifyOTPCode(email, otp, type as any), 15000);
 
     console.log("[verify-otp] done", {
+      requestId,
       ms: Date.now() - started,
       success: result?.success,
+      err: result?.error,
     });
 
-    if (result.success) {
+    if (result?.success) {
       return NextResponse.json({
         success: true,
         message: "Verification successful",
+        requestId,
       });
     }
 
     return NextResponse.json(
-      { success: false, error: result.error || "Invalid code" },
+      { success: false, error: result?.error || "Invalid code", requestId },
       { status: 400 }
     );
   } catch (err: any) {
     const msg = err?.message || "Verification failed";
 
-    // timeout: return 504 instead of hanging forever
     if (msg === "OTP_VERIFY_TIMEOUT") {
       return NextResponse.json(
         { success: false, error: "Verification timed out. Try again." },
