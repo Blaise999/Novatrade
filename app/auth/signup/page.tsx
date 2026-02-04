@@ -155,11 +155,11 @@ function PasswordStrength({ password }: { password: string }) {
 // ============================================
 export default function SignupPage() {
   const router = useRouter();
-  const { signup, error: storeError, clearError, isLoading: storeLoading } = useStore();
+  const { signup, error: storeError, clearError } = useStore();
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
@@ -176,7 +176,7 @@ export default function SignupPage() {
   const password = watch('password', '');
 
   const onSubmit = async (data: SignupForm) => {
-    setIsSubmitting(true);
+    setIsLoading(true);
     setError(null);
     clearError();
 
@@ -199,11 +199,9 @@ export default function SignupPage() {
     } catch (err: any) {
       setError(err?.message || 'Something went wrong. Please try again.');
     } finally {
-      setIsSubmitting(false);
+      setIsLoading(false);
     }
   };
-
-  const isLoading = isSubmitting || storeLoading;
 
   return (
     <div className="relative min-h-[calc(100vh-200px)] flex items-center justify-center py-8">

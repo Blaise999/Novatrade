@@ -83,10 +83,10 @@ function AnimatedBackground() {
 // ============================================
 export default function LoginPage() {
   const router = useRouter();
-  const { login, error: storeError, clearError, isLoading: storeLoading } = useStore();
+  const { login, error: storeError, clearError } = useStore();
 
   const [showPassword, setShowPassword] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [redirectMessage, setRedirectMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -115,7 +115,7 @@ export default function LoginPage() {
 
   // Handle form submission
   const onSubmit = async (data: LoginForm) => {
-    setIsSubmitting(true);
+    setIsLoading(true);
     setError(null);
     setRedirectMessage(null);
     clearError();
@@ -149,12 +149,9 @@ export default function LoginPage() {
     } catch (err: any) {
       setError(err?.message || 'Something went wrong. Please try again.');
     } finally {
-      setIsSubmitting(false);
+      setIsLoading(false);
     }
   };
-
- const isLoading = isSubmitting; // only lock form when user submits
-
 
   return (
     <div className="relative min-h-[calc(100vh-200px)] flex items-center justify-center">
