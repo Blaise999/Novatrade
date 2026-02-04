@@ -1,16 +1,17 @@
+'use client';
+
 /**
- * AUTH STORE
+ * AUTH + ADMIN STORE (single source of truth)
  *
- * Handles authentication state and user data.
- * Uses the singleton Supabase client from @/lib/supabase/client
+ * - useStore(): user auth + user actions
+ * - useAdminStore(): admin actions
  */
 
 import { create } from 'zustand';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 // ============================================
-// TIMEOUT HELPER (FIXES TS + "SPINNER KEEPS ROLLING")
-// Accept PromiseLike so Postgrest builders work.
+// TIMEOUT HELPER (Accept PromiseLike so Postgrest builders work)
 // ============================================
 async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
   return await Promise.race([
@@ -22,6 +23,14 @@ async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
 // ============================================
 // TYPES
 // ============================================
+export type RegistrationStatus =
+  | 'pending_verification'
+  | 'pending_kyc'
+  | 'pending_wallet'
+  | 'complete';
+
+export type KycStatus = 'none' | 'pending' | 'verified' | 'rejected';
+
 export interface User {
   id: string;
   email: string;
@@ -34,8 +43,8 @@ export interface User {
   balance: number;
   bonusBalance: number;
   totalDeposited: number;
-  kycStatus: 'none' | 'pending' | 'verified' | 'rejected';
-  registrationStatus: 'pending_verification' | 'pending_kyc' | 'pending_wallet' | 'complete';
+  kycStatus: KycStatus;
+  registrationStatus: RegistrationStatus;
   walletAddress?: string;
   isActive: boolean;
   createdAt: string;
@@ -110,7 +119,7 @@ function dbRowToUser(row: any): User {
   };
 }
 
-export function getRegistrationRedirect(status: User['registrationStatus']): string {
+export function getRegistrationRedirect(status: RegistrationStatus): string {
   switch (status) {
     case 'pending_verification':
       return '/auth/verify-otp';
@@ -123,7 +132,7 @@ export function getRegistrationRedirect(status: User['registrationStatus']): str
   }
 }
 
-export function getRegistrationMessage(status: User['registrationStatus']): string {
+export function getRegistrationMessage(status: RegistrationStatus): string {
   switch (status) {
     case 'pending_verification':
       return 'Please verify your email to continue.';
@@ -137,7 +146,7 @@ export function getRegistrationMessage(status: User['registrationStatus']): stri
 }
 
 // ============================================
-// STORE INTERFACE
+// AUTH STORE INTERFACE
 // ============================================
 interface AuthStore {
   user: User | null;
@@ -149,26 +158,42 @@ interface AuthStore {
   trades: Trade[];
   paymentMethods: PaymentMethod[];
 
-  login: (email: string, password: string) => Promise<{ success: boolean; redirect?: string; error?: string }>;
-  signup: (email: string, password: string, firstName?: string, lastName?: string) => Promise<{ success: boolean; error?: string }>;
+  login: (
+    email: string,
+    password: string
+  ) => Promise<{ success: boolean; redirect?: string; error?: string }>;
+  signup: (
+    email: string,
+    password: string,
+    firstName?: string,
+    lastName?: string
+  ) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
 
   updateProfile: (updates: Partial<User>) => Promise<boolean>;
-  updateRegistrationStatus: (status: User['registrationStatus']) => Promise<boolean>;
+  updateRegistrationStatus: (status: RegistrationStatus) => Promise<boolean>;
+  updateKycStatus: (status: KycStatus) => Promise<boolean>;
+
   refreshUser: () => Promise<void>;
 
   loadDeposits: () => Promise<void>;
   loadTrades: () => Promise<void>;
   loadPaymentMethods: () => Promise<void>;
-  submitDeposit: (deposit: { amount: number; method: string; methodName: string; transactionRef?: string; proofUrl?: string }) => Promise<boolean>;
+  submitDeposit: (deposit: {
+    amount: number;
+    method: string;
+    methodName: string;
+    transactionRef?: string;
+    proofUrl?: string;
+  }) => Promise<boolean>;
 
   clearError: () => void;
   getBalance: () => { available: number; bonus: number };
 }
 
 // ============================================
-// CREATE STORE
+// AUTH STORE
 // ============================================
 export const useStore = create<AuthStore>((set, get) => ({
   user: null,
@@ -180,18 +205,15 @@ export const useStore = create<AuthStore>((set, get) => ({
   trades: [],
   paymentMethods: [],
 
-  // ==========================================
-  // LOGIN
-  // ==========================================
-  login: async (email: string, password: string) => {
+  login: async (email, password) => {
     set({ isLoading: true, error: null });
 
     try {
-      // Demo mode
       if (!isSupabaseConfigured()) {
         const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
-        const found = users.find((u: any) => u.email === email.toLowerCase() && u.password === password);
-
+        const found = users.find(
+          (u: any) => u.email === email.toLowerCase() && u.password === password
+        );
         if (!found) return { success: false, error: 'Invalid email or password' };
 
         const { password: _pw, ...userWithoutPw } = found;
@@ -201,8 +223,11 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: true, redirect: '/dashboard' };
       }
 
-      // Production mode (timeout so it never hangs)
-      const authRes = await withTimeout(supabase.auth.signInWithPassword({ email, password }), 8000);
+      const authRes = await withTimeout(
+        supabase.auth.signInWithPassword({ email, password }),
+        8000
+      );
+
       const authError = (authRes as any).error;
       const authData = (authRes as any).data;
 
@@ -220,7 +245,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: false, error: 'Login failed' };
       }
 
-      // Fetch profile (timeout)
       const profileRes = await withTimeout(
         supabase.from('users').select('*').eq('id', authData.user.id).maybeSingle(),
         8000
@@ -235,7 +259,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: false, error: msg };
       }
 
-      // If profile missing, create it
       if (!profile) {
         const insertRes = await withTimeout(
           supabase
@@ -271,7 +294,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         profile = newProfile;
       }
 
-      // Disabled account
       if (profile && profile.is_active === false) {
         await supabase.auth.signOut();
         set({ error: 'Your account has been disabled.' });
@@ -290,14 +312,10 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // SIGNUP
-  // ==========================================
-  signup: async (email: string, password: string, firstName?: string, lastName?: string) => {
+  signup: async (email, password, firstName, lastName) => {
     set({ isLoading: true, error: null });
 
     try {
-      // Demo mode
       if (!isSupabaseConfigured()) {
         const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         if (users.find((u: any) => u.email === email.toLowerCase())) {
@@ -351,27 +369,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: false, error: 'Signup failed' };
       }
 
-      // If session exists, try create profile (don’t block if RLS)
-      if (authData.session) {
-        await withTimeout(
-          supabase.from('users').insert({
-            id: authData.user.id,
-            email: (authData.user.email || email).toLowerCase(),
-            first_name: firstName || '',
-            last_name: lastName || '',
-            role: 'user',
-            tier: 'basic',
-            balance_available: 0,
-            balance_bonus: 0,
-            total_deposited: 0,
-            kyc_status: 'none',
-            registration_status: 'pending_kyc',
-            is_active: true,
-          }),
-          8000
-        ).catch(() => {});
-      }
-
       return { success: true };
     } catch (err: any) {
       const msg = err?.message || 'Signup failed';
@@ -382,16 +379,10 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // LOGOUT
-  // ==========================================
   logout: async () => {
     try {
-      if (!isSupabaseConfigured()) {
-        localStorage.removeItem('novatrade_session');
-      } else {
-        await supabase.auth.signOut();
-      }
+      if (!isSupabaseConfigured()) localStorage.removeItem('novatrade_session');
+      else await supabase.auth.signOut();
     } finally {
       set({
         user: null,
@@ -405,9 +396,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // CHECK SESSION
-  // ==========================================
   checkSession: async () => {
     set({ isLoading: true });
 
@@ -449,10 +437,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // UPDATE PROFILE
-  // ==========================================
-  updateProfile: async (updates: Partial<User>) => {
+  updateProfile: async (updates) => {
     const { user } = get();
     if (!user) return false;
 
@@ -489,9 +474,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // UPDATE REGISTRATION STATUS
-  // ==========================================
   updateRegistrationStatus: async (status) => {
     const { user } = get();
     if (!user) return false;
@@ -524,7 +506,6 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       if (data) set({ user: dbRowToUser(data) });
       else set({ user: { ...user, registrationStatus: status } });
-
       return true;
     } catch (e: any) {
       set({ error: e?.message || 'Failed to update registration status' });
@@ -532,29 +513,84 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // REFRESH USER
-  // ==========================================
+  // ✅ THIS IS THE ONE YOUR SCREENSHOT IS COMPLAINING ABOUT
+  updateKycStatus: async (status) => {
+    const { user } = get();
+    if (!user) return false;
+
+    try {
+      const nextRegistrationStatus: RegistrationStatus =
+        status === 'verified' && user.registrationStatus === 'pending_kyc'
+          ? 'pending_wallet'
+          : user.registrationStatus;
+
+      if (!isSupabaseConfigured()) {
+        const updatedUser: User = {
+          ...user,
+          kycStatus: status,
+          registrationStatus: nextRegistrationStatus,
+        };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        set({ user: updatedUser });
+        return true;
+      }
+
+      const res = await withTimeout(
+        supabase
+          .from('users')
+          .update({
+            kyc_status: status,
+            registration_status: nextRegistrationStatus,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', user.id)
+          .select()
+          .maybeSingle(),
+        8000
+      );
+
+      const error = (res as any).error;
+      const data = (res as any).data;
+
+      if (error) {
+        set({ error: error.message || 'Failed to update KYC status' });
+        return false;
+      }
+
+      if (data) set({ user: dbRowToUser(data) });
+      else set({ user: { ...user, kycStatus: status, registrationStatus: nextRegistrationStatus } });
+
+      return true;
+    } catch (e: any) {
+      set({ error: e?.message || 'Failed to update KYC status' });
+      return false;
+    }
+  },
+
   refreshUser: async () => {
     const { user } = get();
     if (!user || !isSupabaseConfigured()) return;
 
     try {
-      const res = await withTimeout(supabase.from('users').select('*').eq('id', user.id).maybeSingle(), 8000);
+      const res = await withTimeout(
+        supabase.from('users').select('*').eq('id', user.id).maybeSingle(),
+        8000
+      );
       const data = (res as any).data;
       if (data) set({ user: dbRowToUser(data) });
     } catch {}
   },
 
-  // ==========================================
-  // LOAD DEPOSITS
-  // ==========================================
   loadDeposits: async () => {
     const { user } = get();
     if (!user || !isSupabaseConfigured()) return;
 
     const res = await withTimeout(
-      supabase.from('deposits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      supabase
+        .from('deposits')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false }),
       8000
     );
 
@@ -576,15 +612,16 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // LOAD TRADES
-  // ==========================================
   loadTrades: async () => {
     const { user } = get();
     if (!user || !isSupabaseConfigured()) return;
 
     const res = await withTimeout(
-      supabase.from('trades').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      supabase
+        .from('trades')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false }),
       8000
     );
 
@@ -612,9 +649,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // LOAD PAYMENT METHODS
-  // ==========================================
   loadPaymentMethods: async () => {
     if (!isSupabaseConfigured()) return;
 
@@ -641,9 +675,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // SUBMIT DEPOSIT
-  // ==========================================
   submitDeposit: async (deposit) => {
     const { user } = get();
     if (!user || !isSupabaseConfigured()) return false;
@@ -676,27 +707,22 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ==========================================
-  // GET BALANCE
-  // ==========================================
   getBalance: () => {
     const { user } = get();
     return { available: user?.balance || 0, bonus: user?.bonusBalance || 0 };
   },
 
-  // ==========================================
-  // CLEAR ERROR
-  // ==========================================
   clearError: () => set({ error: null }),
 }));
 
 // ============================================
-// ✅ ADMIN STORE (THIS IS WHAT YOU’RE MISSING)
+// ADMIN STORE
 // ============================================
 interface AdminStore {
   isAdmin: boolean;
   pendingDeposits: any[];
   allUsers: any[];
+
   checkAdminAccess: () => Promise<boolean>;
   loadPendingDeposits: () => Promise<void>;
   loadAllUsers: () => Promise<void>;
@@ -754,7 +780,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
     set({ allUsers: (res as any).data || [] });
   },
 
-  confirmDeposit: async (depositId: string, note?: string) => {
+  confirmDeposit: async (depositId, note) => {
     if (!isSupabaseConfigured()) return false;
 
     const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
@@ -813,7 +839,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
     return true;
   },
 
-  rejectDeposit: async (depositId: string, note?: string) => {
+  rejectDeposit: async (depositId, note) => {
     if (!isSupabaseConfigured()) return false;
 
     const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
@@ -837,7 +863,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
     return true;
   },
 
-  updateUserBalance: async (userId: string, amount: number, type: 'add' | 'subtract') => {
+  updateUserBalance: async (userId, amount, type) => {
     if (!isSupabaseConfigured()) return false;
 
     const res = await withTimeout(
@@ -862,7 +888,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 }));
 
 // ============================================
-// AUTH STATE LISTENER (set up once globally)
+// AUTH STATE LISTENER (only once)
 // ============================================
 if (typeof window !== 'undefined' && isSupabaseConfigured()) {
   const g = globalThis as any;
@@ -885,5 +911,5 @@ if (typeof window !== 'undefined' && isSupabaseConfigured()) {
   }
 }
 
-// Re-export supabase client and helper for backwards compatibility
+// Back-compat exports
 export { supabase, isSupabaseConfigured };
