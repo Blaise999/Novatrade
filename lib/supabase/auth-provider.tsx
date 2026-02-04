@@ -30,7 +30,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType>({
-  isLoading: true,
+  isLoading: false,
   isAuthenticated: false,
   user: null,
 });

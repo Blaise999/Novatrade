@@ -153,7 +153,8 @@ export default function LoginPage() {
     }
   };
 
-  const isLoading = isSubmitting || storeLoading;
+ const isLoading = isSubmitting; // only lock form when user submits
+
 
   return (
     <div className="relative min-h-[calc(100vh-200px)] flex items-center justify-center">
