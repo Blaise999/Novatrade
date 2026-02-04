@@ -1,12 +1,9 @@
-import { createClient } from "@supabase/supabase-js";
+/**
+ * Server-side Supabase client with service role key
+ * Use this ONLY in API routes, never in client components
+ */
 
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+import { createServerClient } from './client';
 
-if (!url || !serviceKey) {
-  throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
-
-export const supabaseAdmin = createClient(url, serviceKey, {
-  auth: { persistSession: false },
-});
+// Re-export the server client
+export const supabaseAdmin = createServerClient();

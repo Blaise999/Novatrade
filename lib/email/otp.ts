@@ -2,7 +2,7 @@
 // Handles generation, storage, and verification of OTPs reliably on Vercel/serverless
 
 import crypto from "crypto";
-import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@/lib/supabase/client";
 
 // ============================================
 // CONFIG
@@ -28,19 +28,7 @@ export type OTPType =
 // ============================================
 // IMPORTANT: This file must only run server-side.
 // Do NOT import it into client components.
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!supabaseUrl || !supabaseServiceKey) {
-  throw new Error(
-    "Missing Supabase env vars: NEXT_PUBLIC_SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY"
-  );
-}
-
-const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: { persistSession: false },
-});
+const supabaseAdmin = createServerClient();
 
 // ============================================
 // HELPERS

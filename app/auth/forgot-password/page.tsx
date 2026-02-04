@@ -14,7 +14,7 @@ import {
   Loader2,
   CheckCircle
 } from 'lucide-react';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/supabase-client';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 const forgotPasswordSchema = z.object({
   email: z.string().email('Please enter a valid email address'),

@@ -15,15 +15,15 @@ import {
   Check,
   Copy,
   ExternalLink,
-  AlertCircle,
   Zap,
   Lock,
   Globe,
-  Sparkles
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useStore } from '@/lib/supabase/store-supabase';
+
+// ✅ IMPORTANT: make sure this path is the store that contains updateRegistrationStatus + updateProfile
+import { useStore } from '@/lib/supabase/store-supabase'; // or '@/lib/auth/store'
 
 // Truncate address
 function truncateAddress(address: string): string {
@@ -32,44 +32,66 @@ function truncateAddress(address: string): string {
 
 export default function ConnectWalletPage() {
   const router = useRouter();
-  const { updateRegistrationStatus, user } = useStore();
+
+  // ✅ include updateProfile so we can save wallet address
+  const { updateRegistrationStatus, updateProfile, isAuthenticated } = useStore();
+
   const { address, isConnected, isConnecting, chain } = useAccount();
   const { disconnect } = useDisconnect();
   const { data: ensName } = useEnsName({ address, chainId: mainnet.id });
   const { data: balance } = useBalance({ address });
+
   const [copied, setCopied] = useState(false);
   const [hasRedirected, setHasRedirected] = useState(false);
 
-  // Handle wallet connection - mark registration as complete
   useEffect(() => {
-    const completeRegistration = async () => {
-      if (isConnected && address && !hasRedirected) {
-        // Mark registration as complete
-        await updateRegistrationStatus('complete');
-        
-        // Small delay to show success state before redirect
-        setTimeout(() => {
-          setHasRedirected(true);
-          router.push('/dashboard');
-        }, 1500);
-      }
-    };
-    
-    completeRegistration();
-  }, [isConnected, address, hasRedirected, router, updateRegistrationStatus]);
+    let t: ReturnType<typeof setTimeout> | null = null;
 
-  // Handle "Skip for now" - also marks registration complete
+    const completeRegistration = async () => {
+      // guard
+      if (!isConnected || !address || hasRedirected) return;
+
+      // Optional safety: don’t let people “complete” without being logged in
+      if (!isAuthenticated) {
+        router.replace('/auth/login');
+        return;
+      }
+
+      // ✅ save wallet address to DB + complete registration
+      await updateProfile({ walletAddress: address });
+      await updateRegistrationStatus('complete');
+
+      t = setTimeout(() => {
+        setHasRedirected(true);
+        router.replace('/dashboard');
+      }, 800);
+    };
+
+    completeRegistration();
+
+    return () => {
+      if (t) clearTimeout(t);
+    };
+  }, [
+    isConnected,
+    address,
+    hasRedirected,
+    router,
+    updateRegistrationStatus,
+    updateProfile,
+    isAuthenticated,
+  ]);
+
   const handleSkip = async () => {
     await updateRegistrationStatus('complete');
-    router.push('/dashboard');
+    router.replace('/dashboard');
   };
 
   const copyAddress = async () => {
-    if (address) {
-      await navigator.clipboard.writeText(address);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+    if (!address) return;
+    await navigator.clipboard.writeText(address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const features = [
@@ -85,7 +107,6 @@ export default function ConnectWalletPage() {
 
       <main className="pt-24 sm:pt-32 pb-20">
         <div className="max-w-lg mx-auto px-4">
-          {/* Back Button */}
           <Link
             href="/"
             className="inline-flex items-center gap-2 text-cream/60 hover:text-cream mb-6 sm:mb-8 transition-colors"
@@ -94,13 +115,11 @@ export default function ConnectWalletPage() {
             <span className="text-sm">Back to Home</span>
           </Link>
 
-          {/* Main Card */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             className="bg-obsidian/50 backdrop-blur-xl rounded-2xl sm:rounded-3xl border border-white/10 overflow-hidden"
           >
-            {/* Header */}
             <div className="p-6 sm:p-8 border-b border-white/10 text-center">
               <div className="w-16 h-16 sm:w-20 sm:h-20 bg-gradient-to-br from-gold/20 to-electric/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
                 <Wallet className="w-8 h-8 sm:w-10 sm:h-10 text-gold" />
@@ -109,23 +128,19 @@ export default function ConnectWalletPage() {
                 {isConnected ? 'Wallet Connected' : 'Connect Your Wallet'}
               </h1>
               <p className="text-sm text-cream/60 mt-2">
-                {isConnected 
+                {isConnected
                   ? 'Your wallet is connected and ready to use'
-                  : 'Connect your wallet to access Web3 features'
-                }
+                  : 'Connect your wallet to access Web3 features'}
               </p>
             </div>
 
-            {/* Content */}
             <div className="p-6 sm:p-8">
               {isConnecting ? (
-                // Loading State
                 <div className="text-center py-8">
                   <div className="w-12 h-12 border-4 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-4" />
                   <p className="text-cream/60">Connecting...</p>
                 </div>
               ) : isConnected && address ? (
-                // Connected State - Redirecting
                 <div className="space-y-6">
                   {hasRedirected ? (
                     <div className="text-center py-8">
@@ -137,19 +152,24 @@ export default function ConnectWalletPage() {
                     </div>
                   ) : (
                     <>
-                      {/* Wallet Info */}
                       <div className="p-4 bg-white/5 rounded-xl">
                         <div className="flex items-center justify-between mb-3">
                           <span className="text-xs text-cream/50">Connected Address</span>
                           <div className="flex items-center gap-1.5">
-                            <div className={`w-2 h-2 rounded-full ${chain?.id === 1 ? 'bg-profit' : 'bg-yellow-500'}`} />
+                            <div
+                              className={`w-2 h-2 rounded-full ${
+                                chain?.id === mainnet.id ? 'bg-profit' : 'bg-yellow-500'
+                              }`}
+                            />
                             <span className="text-xs text-cream/50">{chain?.name || 'Unknown'}</span>
                           </div>
                         </div>
+
                         <div className="flex items-center gap-2">
                           <p className="text-lg font-mono text-cream flex-1">
                             {ensName || truncateAddress(address)}
                           </p>
+
                           <button
                             onClick={copyAddress}
                             className="p-2 hover:bg-white/10 rounded-lg transition-colors"
@@ -160,8 +180,9 @@ export default function ConnectWalletPage() {
                               <Copy className="w-4 h-4 text-cream/50" />
                             )}
                           </button>
+
                           <a
-                            href={`https://${chain?.id === 1 ? '' : 'sepolia.'}etherscan.io/address/${address}`}
+                            href={`https://${chain?.id === mainnet.id ? '' : 'sepolia.'}etherscan.io/address/${address}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="p-2 hover:bg-white/10 rounded-lg transition-colors"
@@ -169,6 +190,7 @@ export default function ConnectWalletPage() {
                             <ExternalLink className="w-4 h-4 text-cream/50" />
                           </a>
                         </div>
+
                         {balance && (
                           <p className="text-2xl font-bold text-cream mt-3">
                             {parseFloat(formatEther(balance.value)).toFixed(4)} {balance.symbol}
@@ -176,18 +198,15 @@ export default function ConnectWalletPage() {
                         )}
                       </div>
 
-                      {/* Redirecting indicator */}
                       <div className="text-center">
                         <div className="w-6 h-6 border-2 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-2" />
-                        <p className="text-sm text-cream/60">Redirecting to dashboard...</p>
+                        <p className="text-sm text-cream/60">Finalizing setup...</p>
                       </div>
                     </>
                   )}
                 </div>
               ) : (
-                // Disconnected State
                 <div className="space-y-6">
-                  {/* Connect Button */}
                   <div className="flex justify-center">
                     <ConnectButton.Custom>
                       {({ openConnectModal }) => (
@@ -202,22 +221,6 @@ export default function ConnectWalletPage() {
                     </ConnectButton.Custom>
                   </div>
 
-                  {/* Supported Wallets */}
-                  <div className="text-center">
-                    <p className="text-xs text-cream/40 mb-3">Supported Wallets</p>
-                    <div className="flex items-center justify-center gap-3 flex-wrap">
-                      {['MetaMask', 'WalletConnect', 'Coinbase', 'Rainbow'].map((wallet) => (
-                        <span
-                          key={wallet}
-                          className="px-3 py-1.5 bg-white/5 rounded-lg text-xs text-cream/60"
-                        >
-                          {wallet}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Features */}
                   <div className="grid grid-cols-2 gap-3 pt-4 border-t border-white/10">
                     {features.map((feature) => (
                       <div key={feature.title} className="flex items-start gap-2 p-2">
@@ -230,7 +233,6 @@ export default function ConnectWalletPage() {
                     ))}
                   </div>
 
-                  {/* Skip Option */}
                   <div className="pt-4 border-t border-white/10">
                     <button
                       onClick={handleSkip}
@@ -247,7 +249,6 @@ export default function ConnectWalletPage() {
             </div>
           </motion.div>
 
-          {/* Help Text */}
           <p className="text-center text-xs text-cream/40 mt-6">
             New to crypto wallets?{' '}
             <Link href="/academy" className="text-gold hover:underline">

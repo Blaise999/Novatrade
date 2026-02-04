@@ -10,8 +10,8 @@
  *   import { depositService, tradeService } from '@/lib/supabase';
  */
 
-// Core client
-export { supabase, isSupabaseConfigured, createServerSupabaseClient } from './supabase-client';
+// Core client - SINGLE SOURCE OF TRUTH
+export { supabase, isSupabaseConfigured, createServerClient } from './client';
 
 // Main stores (use these in components)
 export { useStore, useAdminStore } from './store-supabase';

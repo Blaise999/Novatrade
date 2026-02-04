@@ -1,35 +1,23 @@
 /**
- * SIMPLIFIED SUPABASE AUTH STORE
- * 
- * A clean, easy-to-understand auth store that works with Supabase.
- * Handles login, signup, logout, and session management.
+ * AUTH STORE
+ *
+ * Handles authentication state and user data.
+ * Uses the singleton Supabase client from @/lib/supabase/client
  */
 
 import { create } from 'zustand';
-import { createClient, SupabaseClient, User as SupabaseUser } from '@supabase/supabase-js';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 // ============================================
-// SUPABASE CLIENT
+// TIMEOUT HELPER (FIXES TS + "SPINNER KEEPS ROLLING")
+// Accept PromiseLike so Postgrest builders work.
 // ============================================
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-
-const isConfigured = 
-  supabaseUrl.includes('supabase.co') && 
-  supabaseAnonKey.length > 20 &&
-  !supabaseUrl.includes('your-project');
-
-export const supabase: SupabaseClient = isConfigured
-  ? createClient(supabaseUrl, supabaseAnonKey, {
-      auth: {
-        autoRefreshToken: true,
-        persistSession: true,
-        detectSessionInUrl: true,
-      },
-    })
-  : createClient('https://placeholder.supabase.co', 'placeholder-key');
-
-export const isSupabaseConfigured = () => isConfigured;
+async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
+  return await Promise.race([
+    Promise.resolve(p),
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout_${ms}ms`)), ms)),
+  ]);
+}
 
 // ============================================
 // TYPES
@@ -99,7 +87,7 @@ export interface PaymentMethod {
 }
 
 // ============================================
-// HELPER: Convert database row to User type
+// HELPERS
 // ============================================
 function dbRowToUser(row: any): User {
   return {
@@ -107,39 +95,44 @@ function dbRowToUser(row: any): User {
     email: row.email || '',
     firstName: row.first_name || '',
     lastName: row.last_name || '',
-    phone: row.phone,
-    avatarUrl: row.avatar_url,
+    phone: row.phone || undefined,
+    avatarUrl: row.avatar_url || undefined,
     role: row.role || 'user',
     tier: row.tier || 'basic',
-    balance: parseFloat(row.balance_available) || 0,
-    bonusBalance: parseFloat(row.balance_bonus) || 0,
-    totalDeposited: parseFloat(row.total_deposited) || 0,
+    balance: Number(row.balance_available ?? 0) || 0,
+    bonusBalance: Number(row.balance_bonus ?? 0) || 0,
+    totalDeposited: Number(row.total_deposited ?? 0) || 0,
     kycStatus: row.kyc_status || 'none',
     registrationStatus: row.registration_status || 'complete',
-    walletAddress: row.wallet_address,
+    walletAddress: row.wallet_address || undefined,
     isActive: row.is_active !== false,
-    createdAt: row.created_at,
+    createdAt: row.created_at || new Date().toISOString(),
   };
 }
 
-// ============================================
-// REGISTRATION STATUS HELPERS
-// ============================================
 export function getRegistrationRedirect(status: User['registrationStatus']): string {
   switch (status) {
-    case 'pending_verification': return '/auth/verify-otp';
-    case 'pending_kyc': return '/kyc';
-    case 'pending_wallet': return '/connect-wallet';
-    default: return '/dashboard';
+    case 'pending_verification':
+      return '/auth/verify-otp';
+    case 'pending_kyc':
+      return '/kyc';
+    case 'pending_wallet':
+      return '/connect-wallet';
+    default:
+      return '/dashboard';
   }
 }
 
 export function getRegistrationMessage(status: User['registrationStatus']): string {
   switch (status) {
-    case 'pending_verification': return 'Please verify your email to continue.';
-    case 'pending_kyc': return 'Please complete identity verification.';
-    case 'pending_wallet': return 'Connect your wallet to finish setup.';
-    default: return '';
+    case 'pending_verification':
+      return 'Please verify your email to continue.';
+    case 'pending_kyc':
+      return 'Please complete identity verification.';
+    case 'pending_wallet':
+      return 'Connect your wallet to finish setup.';
+    default:
+      return '';
   }
 }
 
@@ -147,32 +140,29 @@ export function getRegistrationMessage(status: User['registrationStatus']): stri
 // STORE INTERFACE
 // ============================================
 interface AuthStore {
-  // State
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
+
   deposits: Deposit[];
   trades: Trade[];
   paymentMethods: PaymentMethod[];
 
-  // Auth Actions
   login: (email: string, password: string) => Promise<{ success: boolean; redirect?: string; error?: string }>;
   signup: (email: string, password: string, firstName?: string, lastName?: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
-  
-  // Profile Actions
+
   updateProfile: (updates: Partial<User>) => Promise<boolean>;
+  updateRegistrationStatus: (status: User['registrationStatus']) => Promise<boolean>;
   refreshUser: () => Promise<void>;
-  
-  // Data Actions
+
   loadDeposits: () => Promise<void>;
   loadTrades: () => Promise<void>;
   loadPaymentMethods: () => Promise<void>;
   submitDeposit: (deposit: { amount: number; method: string; methodName: string; transactionRef?: string; proofUrl?: string }) => Promise<boolean>;
-  
-  // Utility
+
   clearError: () => void;
   getBalance: () => { available: number; bonus: number };
 }
@@ -181,11 +171,11 @@ interface AuthStore {
 // CREATE STORE
 // ============================================
 export const useStore = create<AuthStore>((set, get) => ({
-  // Initial State
   user: null,
   isAuthenticated: false,
-  isLoading: true,
+  isLoading: false,
   error: null,
+
   deposits: [],
   trades: [],
   paymentMethods: [],
@@ -196,93 +186,107 @@ export const useStore = create<AuthStore>((set, get) => ({
   login: async (email: string, password: string) => {
     set({ isLoading: true, error: null });
 
-    // Demo mode - use localStorage
-    if (!isConfigured) {
-      try {
+    try {
+      // Demo mode
+      if (!isSupabaseConfigured()) {
         const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         const found = users.find((u: any) => u.email === email.toLowerCase() && u.password === password);
-        
-        if (!found) {
-          set({ isLoading: false, error: 'Invalid email or password' });
-          return { success: false, error: 'Invalid email or password' };
-        }
 
-        const { password: _, ...userWithoutPw } = found;
+        if (!found) return { success: false, error: 'Invalid email or password' };
+
+        const { password: _pw, ...userWithoutPw } = found;
         localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
-        set({ user: userWithoutPw, isAuthenticated: true, isLoading: false });
-        return { success: true, redirect: '/dashboard' };
-      } catch (err) {
-        set({ isLoading: false, error: 'Login failed' });
-        return { success: false, error: 'Login failed' };
-      }
-    }
 
-    // Production mode - use Supabase
-    try {
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+        set({ user: userWithoutPw, isAuthenticated: true });
+        return { success: true, redirect: '/dashboard' };
+      }
+
+      // Production mode (timeout so it never hangs)
+      const authRes = await withTimeout(supabase.auth.signInWithPassword({ email, password }), 8000);
+      const authError = (authRes as any).error;
+      const authData = (authRes as any).data;
 
       if (authError) {
-        const errorMsg = authError.message === 'Invalid login credentials' 
-          ? 'Invalid email or password. Please try again.'
-          : authError.message;
-        set({ isLoading: false, error: errorMsg });
-        return { success: false, error: errorMsg };
+        const msg =
+          authError.message === 'Invalid login credentials'
+            ? 'Invalid email or password. Please try again.'
+            : authError.message;
+        set({ error: msg });
+        return { success: false, error: msg };
       }
 
-      if (!authData.user) {
-        set({ isLoading: false, error: 'Login failed. Please try again.' });
+      if (!authData?.user) {
+        set({ error: 'Login failed. Please try again.' });
         return { success: false, error: 'Login failed' };
       }
 
-      // Fetch user profile
-      const { data: profile, error: profileError } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', authData.user.id)
-        .maybeSingle();
+      // Fetch profile (timeout)
+      const profileRes = await withTimeout(
+        supabase.from('users').select('*').eq('id', authData.user.id).maybeSingle(),
+        8000
+      );
+
+      const profileError = (profileRes as any).error;
+      let profile = (profileRes as any).data;
 
       if (profileError) {
-        console.error('Profile fetch error:', profileError);
+        const msg = profileError.message || 'Failed to load profile (check RLS policies).';
+        set({ error: msg });
+        return { success: false, error: msg };
       }
 
-      // If no profile exists (edge case), create one
+      // If profile missing, create it
       if (!profile) {
-        const { data: newProfile } = await supabase
-          .from('users')
-          .insert({
-            id: authData.user.id,
-            email: authData.user.email?.toLowerCase() || email.toLowerCase(),
-            first_name: authData.user.user_metadata?.first_name || '',
-            last_name: authData.user.user_metadata?.last_name || '',
-          })
-          .select()
-          .single();
+        const insertRes = await withTimeout(
+          supabase
+            .from('users')
+            .insert({
+              id: authData.user.id,
+              email: (authData.user.email || email).toLowerCase(),
+              first_name: authData.user.user_metadata?.first_name || '',
+              last_name: authData.user.user_metadata?.last_name || '',
+              role: 'user',
+              tier: 'basic',
+              balance_available: 0,
+              balance_bonus: 0,
+              total_deposited: 0,
+              kyc_status: 'none',
+              registration_status: 'pending_kyc',
+              is_active: true,
+            })
+            .select()
+            .single(),
+          8000
+        );
 
-        if (newProfile) {
-          const user = dbRowToUser(newProfile);
-          set({ user, isAuthenticated: true, isLoading: false });
-          return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
+        const insertError = (insertRes as any).error;
+        const newProfile = (insertRes as any).data;
+
+        if (insertError || !newProfile) {
+          const msg = insertError?.message || 'Failed to create profile (check RLS policies).';
+          set({ error: msg });
+          return { success: false, error: msg };
         }
+
+        profile = newProfile;
       }
 
-      // Check if account is disabled
-      if (profile && !profile.is_active) {
+      // Disabled account
+      if (profile && profile.is_active === false) {
         await supabase.auth.signOut();
-        set({ isLoading: false, error: 'Your account has been disabled.' });
+        set({ error: 'Your account has been disabled.' });
         return { success: false, error: 'Account disabled' };
       }
 
-      const user = dbRowToUser(profile || { id: authData.user.id, email: authData.user.email });
-      set({ user, isAuthenticated: true, isLoading: false });
+      const user = dbRowToUser(profile);
+      set({ user, isAuthenticated: true });
       return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
-
     } catch (err: any) {
-      const errorMsg = err?.message || 'Login failed. Please try again.';
-      set({ isLoading: false, error: errorMsg });
-      return { success: false, error: errorMsg };
+      const msg = err?.message || 'Login failed. Please try again.';
+      set({ error: msg });
+      return { success: false, error: msg };
+    } finally {
+      set({ isLoading: false });
     }
   },
 
@@ -292,12 +296,12 @@ export const useStore = create<AuthStore>((set, get) => ({
   signup: async (email: string, password: string, firstName?: string, lastName?: string) => {
     set({ isLoading: true, error: null });
 
-    // Demo mode
-    if (!isConfigured) {
-      try {
+    try {
+      // Demo mode
+      if (!isSupabaseConfigured()) {
         const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         if (users.find((u: any) => u.email === email.toLowerCase())) {
-          set({ isLoading: false, error: 'Email already registered' });
+          set({ error: 'Email already registered' });
           return { success: false, error: 'Email already registered' };
         }
 
@@ -320,59 +324,61 @@ export const useStore = create<AuthStore>((set, get) => ({
         users.push({ ...newUser, password });
         localStorage.setItem('novatrade_users', JSON.stringify(users));
         localStorage.setItem('novatrade_session', JSON.stringify(newUser));
-        set({ user: newUser, isAuthenticated: true, isLoading: false });
-        return { success: true };
-      } catch (err) {
-        set({ isLoading: false, error: 'Signup failed' });
-        return { success: false, error: 'Signup failed' };
-      }
-    }
 
-    // Production mode
-    try {
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            first_name: firstName || '',
-            last_name: lastName || '',
-          },
-        },
-      });
+        set({ user: newUser, isAuthenticated: true });
+        return { success: true };
+      }
+
+      const res = await withTimeout(
+        supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { first_name: firstName || '', last_name: lastName || '' } },
+        }),
+        8000
+      );
+
+      const authError = (res as any).error;
+      const authData = (res as any).data;
 
       if (authError) {
-        set({ isLoading: false, error: authError.message });
+        set({ error: authError.message });
         return { success: false, error: authError.message };
       }
 
-      if (!authData.user) {
-        set({ isLoading: false, error: 'Signup failed' });
+      if (!authData?.user) {
+        set({ error: 'Signup failed' });
         return { success: false, error: 'Signup failed' };
       }
 
-      // If we have a session, we're logged in immediately (no email confirmation required)
+      // If session exists, try create profile (don’t block if RLS)
       if (authData.session) {
-        const { data: profile } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', authData.user.id)
-          .maybeSingle();
-
-        if (profile) {
-          set({ user: dbRowToUser(profile), isAuthenticated: true, isLoading: false });
-        } else {
-          set({ isAuthenticated: true, isLoading: false });
-        }
+        await withTimeout(
+          supabase.from('users').insert({
+            id: authData.user.id,
+            email: (authData.user.email || email).toLowerCase(),
+            first_name: firstName || '',
+            last_name: lastName || '',
+            role: 'user',
+            tier: 'basic',
+            balance_available: 0,
+            balance_bonus: 0,
+            total_deposited: 0,
+            kyc_status: 'none',
+            registration_status: 'pending_kyc',
+            is_active: true,
+          }),
+          8000
+        ).catch(() => {});
       }
 
-      set({ isLoading: false });
       return { success: true };
-
     } catch (err: any) {
-      const errorMsg = err?.message || 'Signup failed';
-      set({ isLoading: false, error: errorMsg });
-      return { success: false, error: errorMsg };
+      const msg = err?.message || 'Signup failed';
+      set({ error: msg });
+      return { success: false, error: msg };
+    } finally {
+      set({ isLoading: false });
     }
   },
 
@@ -380,19 +386,23 @@ export const useStore = create<AuthStore>((set, get) => ({
   // LOGOUT
   // ==========================================
   logout: async () => {
-    if (!isConfigured) {
-      localStorage.removeItem('novatrade_session');
-    } else {
-      await supabase.auth.signOut();
+    try {
+      if (!isSupabaseConfigured()) {
+        localStorage.removeItem('novatrade_session');
+      } else {
+        await supabase.auth.signOut();
+      }
+    } finally {
+      set({
+        user: null,
+        isAuthenticated: false,
+        isLoading: false,
+        deposits: [],
+        trades: [],
+        paymentMethods: [],
+        error: null,
+      });
     }
-    set({
-      user: null,
-      isAuthenticated: false,
-      isLoading: false,
-      deposits: [],
-      trades: [],
-      error: null,
-    });
   },
 
   // ==========================================
@@ -401,43 +411,41 @@ export const useStore = create<AuthStore>((set, get) => ({
   checkSession: async () => {
     set({ isLoading: true });
 
-    // Demo mode
-    if (!isConfigured) {
-      try {
-        const session = localStorage.getItem('novatrade_session');
-        if (session) {
-          set({ user: JSON.parse(session), isAuthenticated: true, isLoading: false });
-        } else {
-          set({ user: null, isAuthenticated: false, isLoading: false });
-        }
-      } catch {
-        set({ user: null, isAuthenticated: false, isLoading: false });
-      }
-      return;
-    }
-
-    // Production mode
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session?.user) {
-        set({ user: null, isAuthenticated: false, isLoading: false });
+      if (!isSupabaseConfigured()) {
+        const session = localStorage.getItem('novatrade_session');
+        if (session) set({ user: JSON.parse(session), isAuthenticated: true });
+        else set({ user: null, isAuthenticated: false });
         return;
       }
 
-      const { data: profile } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', session.user.id)
-        .maybeSingle();
+      const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+      const session = (sessRes as any).data?.session;
 
-      if (profile) {
-        set({ user: dbRowToUser(profile), isAuthenticated: true, isLoading: false });
-      } else {
-        set({ isAuthenticated: true, isLoading: false });
+      if (!session?.user) {
+        set({ user: null, isAuthenticated: false });
+        return;
       }
+
+      const profileRes = await withTimeout(
+        supabase.from('users').select('*').eq('id', session.user.id).maybeSingle(),
+        8000
+      );
+
+      const error = (profileRes as any).error;
+      const profile = (profileRes as any).data;
+
+      if (error) {
+        set({ isAuthenticated: true });
+        return;
+      }
+
+      if (profile) set({ user: dbRowToUser(profile), isAuthenticated: true });
+      else set({ isAuthenticated: true });
     } catch {
-      set({ user: null, isAuthenticated: false, isLoading: false });
+      set({ user: null, isAuthenticated: false });
+    } finally {
+      set({ isLoading: false });
     }
   },
 
@@ -448,29 +456,31 @@ export const useStore = create<AuthStore>((set, get) => ({
     const { user } = get();
     if (!user) return false;
 
-    if (!isConfigured) {
-      const updatedUser = { ...user, ...updates };
-      localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
-      set({ user: updatedUser });
-      return true;
-    }
-
     try {
+      if (!isSupabaseConfigured()) {
+        const updatedUser = { ...user, ...updates };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        set({ user: updatedUser });
+        return true;
+      }
+
       const dbUpdates: any = {};
       if (updates.firstName !== undefined) dbUpdates.first_name = updates.firstName;
       if (updates.lastName !== undefined) dbUpdates.last_name = updates.lastName;
       if (updates.phone !== undefined) dbUpdates.phone = updates.phone;
       if (updates.avatarUrl !== undefined) dbUpdates.avatar_url = updates.avatarUrl;
-      if (updates.kycStatus !== undefined) dbUpdates.kyc_status = updates.kycStatus;
-      if (updates.registrationStatus !== undefined) dbUpdates.registration_status = updates.registrationStatus;
       if (updates.walletAddress !== undefined) dbUpdates.wallet_address = updates.walletAddress;
 
-      const { error } = await supabase
-        .from('users')
-        .update(dbUpdates)
-        .eq('id', user.id);
+      const res = await withTimeout(
+        supabase.from('users').update(dbUpdates).eq('id', user.id).select().maybeSingle(),
+        8000
+      );
 
-      if (error) return false;
+      const error = (res as any).error;
+      if (error) {
+        set({ error: error.message || 'Failed to update profile' });
+        return false;
+      }
 
       set({ user: { ...user, ...updates } });
       return true;
@@ -480,21 +490,60 @@ export const useStore = create<AuthStore>((set, get) => ({
   },
 
   // ==========================================
+  // UPDATE REGISTRATION STATUS
+  // ==========================================
+  updateRegistrationStatus: async (status) => {
+    const { user } = get();
+    if (!user) return false;
+
+    try {
+      if (!isSupabaseConfigured()) {
+        const updatedUser = { ...user, registrationStatus: status };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        set({ user: updatedUser });
+        return true;
+      }
+
+      const res = await withTimeout(
+        supabase
+          .from('users')
+          .update({ registration_status: status, updated_at: new Date().toISOString() })
+          .eq('id', user.id)
+          .select()
+          .maybeSingle(),
+        8000
+      );
+
+      const error = (res as any).error;
+      const data = (res as any).data;
+
+      if (error) {
+        set({ error: error.message || 'Failed to update registration status' });
+        return false;
+      }
+
+      if (data) set({ user: dbRowToUser(data) });
+      else set({ user: { ...user, registrationStatus: status } });
+
+      return true;
+    } catch (e: any) {
+      set({ error: e?.message || 'Failed to update registration status' });
+      return false;
+    }
+  },
+
+  // ==========================================
   // REFRESH USER
   // ==========================================
   refreshUser: async () => {
     const { user } = get();
-    if (!user || !isConfigured) return;
+    if (!user || !isSupabaseConfigured()) return;
 
-    const { data: profile } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    if (profile) {
-      set({ user: dbRowToUser(profile) });
-    }
+    try {
+      const res = await withTimeout(supabase.from('users').select('*').eq('id', user.id).maybeSingle(), 8000);
+      const data = (res as any).data;
+      if (data) set({ user: dbRowToUser(data) });
+    } catch {}
   },
 
   // ==========================================
@@ -502,25 +551,25 @@ export const useStore = create<AuthStore>((set, get) => ({
   // ==========================================
   loadDeposits: async () => {
     const { user } = get();
-    if (!user || !isConfigured) return;
+    if (!user || !isSupabaseConfigured()) return;
 
-    const { data } = await supabase
-      .from('deposits')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
+    const res = await withTimeout(
+      supabase.from('deposits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      8000
+    );
 
+    const data = (res as any).data;
     if (data) {
       const deposits: Deposit[] = data.map((d: any) => ({
         id: d.id,
         orderId: d.order_id,
-        amount: parseFloat(d.amount),
+        amount: Number(d.amount) || 0,
         method: d.method,
         methodName: d.method_name,
-        transactionRef: d.transaction_ref,
-        proofUrl: d.proof_url,
+        transactionRef: d.transaction_ref || undefined,
+        proofUrl: d.proof_url || undefined,
         status: d.status,
-        note: d.note,
+        note: d.note || undefined,
         createdAt: d.created_at,
       }));
       set({ deposits });
@@ -532,32 +581,32 @@ export const useStore = create<AuthStore>((set, get) => ({
   // ==========================================
   loadTrades: async () => {
     const { user } = get();
-    if (!user || !isConfigured) return;
+    if (!user || !isSupabaseConfigured()) return;
 
-    const { data } = await supabase
-      .from('trades')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
+    const res = await withTimeout(
+      supabase.from('trades').select('*').eq('user_id', user.id).order('created_at', { ascending: false }),
+      8000
+    );
 
+    const data = (res as any).data;
     if (data) {
       const trades: Trade[] = data.map((t: any) => ({
         id: t.id,
         pair: t.pair,
         type: t.type,
         side: t.side,
-        amount: parseFloat(t.amount),
-        entryPrice: parseFloat(t.entry_price),
-        currentPrice: parseFloat(t.current_price) || parseFloat(t.entry_price),
-        exitPrice: t.exit_price ? parseFloat(t.exit_price) : undefined,
+        amount: Number(t.amount) || 0,
+        entryPrice: Number(t.entry_price) || 0,
+        currentPrice: Number(t.current_price ?? t.entry_price) || 0,
+        exitPrice: t.exit_price ? Number(t.exit_price) : undefined,
         leverage: t.leverage || 1,
-        marginUsed: parseFloat(t.margin_used) || 0,
+        marginUsed: Number(t.margin_used) || 0,
         status: t.status,
-        pnl: parseFloat(t.pnl) || 0,
-        stopLoss: t.stop_loss ? parseFloat(t.stop_loss) : undefined,
-        takeProfit: t.take_profit ? parseFloat(t.take_profit) : undefined,
+        pnl: Number(t.pnl) || 0,
+        stopLoss: t.stop_loss ? Number(t.stop_loss) : undefined,
+        takeProfit: t.take_profit ? Number(t.take_profit) : undefined,
         createdAt: t.created_at,
-        closedAt: t.closed_at,
+        closedAt: t.closed_at || undefined,
       }));
       set({ trades });
     }
@@ -567,26 +616,26 @@ export const useStore = create<AuthStore>((set, get) => ({
   // LOAD PAYMENT METHODS
   // ==========================================
   loadPaymentMethods: async () => {
-    if (!isConfigured) return;
+    if (!isSupabaseConfigured()) return;
 
-    const { data } = await supabase
-      .from('payment_methods')
-      .select('*')
-      .eq('enabled', true)
-      .order('display_order');
+    const res = await withTimeout(
+      supabase.from('payment_methods').select('*').eq('enabled', true).order('display_order'),
+      8000
+    );
 
+    const data = (res as any).data;
     if (data) {
       const methods: PaymentMethod[] = data.map((p: any) => ({
         id: p.id,
         type: p.type,
         name: p.name,
-        symbol: p.symbol,
-        network: p.network,
-        address: p.address,
-        icon: p.icon,
-        minDeposit: parseFloat(p.min_deposit),
-        fee: p.fee,
-        enabled: p.enabled,
+        symbol: p.symbol || undefined,
+        network: p.network || undefined,
+        address: p.address || undefined,
+        icon: p.icon || undefined,
+        minDeposit: Number(p.min_deposit) || 0,
+        fee: p.fee || undefined,
+        enabled: !!p.enabled,
       }));
       set({ paymentMethods: methods });
     }
@@ -597,21 +646,28 @@ export const useStore = create<AuthStore>((set, get) => ({
   // ==========================================
   submitDeposit: async (deposit) => {
     const { user } = get();
-    if (!user || !isConfigured) return false;
+    if (!user || !isSupabaseConfigured()) return false;
 
     try {
-      const { error } = await supabase.from('deposits').insert({
-        user_id: user.id,
-        order_id: `DEP-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        amount: deposit.amount,
-        method: deposit.method,
-        method_name: deposit.methodName,
-        transaction_ref: deposit.transactionRef,
-        proof_url: deposit.proofUrl,
-        status: 'pending',
-      });
+      const res = await withTimeout(
+        supabase.from('deposits').insert({
+          user_id: user.id,
+          order_id: `DEP-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          amount: deposit.amount,
+          method: deposit.method,
+          method_name: deposit.methodName,
+          transaction_ref: deposit.transactionRef,
+          proof_url: deposit.proofUrl,
+          status: 'pending',
+        }),
+        8000
+      );
 
-      if (error) return false;
+      const error = (res as any).error;
+      if (error) {
+        set({ error: error.message || 'Deposit failed' });
+        return false;
+      }
 
       await get().loadDeposits();
       return true;
@@ -625,10 +681,7 @@ export const useStore = create<AuthStore>((set, get) => ({
   // ==========================================
   getBalance: () => {
     const { user } = get();
-    return {
-      available: user?.balance || 0,
-      bonus: user?.bonusBalance || 0,
-    };
+    return { available: user?.balance || 0, bonus: user?.bonusBalance || 0 };
   },
 
   // ==========================================
@@ -638,50 +691,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 }));
 
 // ============================================
-// AUTH STATE LISTENER (Supabase)
-// ============================================
-if (typeof window !== 'undefined' && isConfigured) {
-  supabase.auth.onAuthStateChange(async (event, session) => {
-    if (event === 'SIGNED_OUT' || !session?.user) {
-      useStore.setState({
-        user: null,
-        isAuthenticated: false,
-        isLoading: false,
-        deposits: [],
-        trades: [],
-      });
-      return;
-    }
-
-    // Don't set loading on token refresh
-    if (event === 'TOKEN_REFRESHED') return;
-
-    // For sign in and initial session, load user data
-    if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
-      const { data: profile } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', session.user.id)
-        .maybeSingle();
-
-      if (profile) {
-        useStore.setState({
-          user: dbRowToUser(profile),
-          isAuthenticated: true,
-          isLoading: false,
-        });
-      } else {
-        useStore.setState({
-          isAuthenticated: true,
-          isLoading: false,
-        });
-      }
-    }
-  });
-}
-
-// ============================================
-// ADMIN STORE (Simplified)
+// ✅ ADMIN STORE (THIS IS WHAT YOU’RE MISSING)
 // ============================================
 interface AdminStore {
   isAdmin: boolean;
@@ -701,86 +711,102 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
   allUsers: [],
 
   checkAdminAccess: async () => {
-    if (!isConfigured) return false;
+    if (!isSupabaseConfigured()) return false;
 
-    const { data: { session } } = await supabase.auth.getSession();
+    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
-    const { data } = await supabase
-      .from('users')
-      .select('role')
-      .eq('id', session.user.id)
-      .maybeSingle();
+    const res = await withTimeout(
+      supabase.from('users').select('role').eq('id', session.user.id).maybeSingle(),
+      8000
+    );
 
+    const data = (res as any).data;
     const isAdmin = data?.role === 'admin';
     set({ isAdmin });
     return isAdmin;
   },
 
   loadPendingDeposits: async () => {
-    if (!isConfigured) return;
+    if (!isSupabaseConfigured()) return;
 
-    const { data } = await supabase
-      .from('deposits')
-      .select('*, users(email, first_name, last_name)')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false });
+    const res = await withTimeout(
+      supabase
+        .from('deposits')
+        .select('*, users(email, first_name, last_name)')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false }),
+      8000
+    );
 
-    set({ pendingDeposits: data || [] });
+    set({ pendingDeposits: (res as any).data || [] });
   },
 
   loadAllUsers: async () => {
-    if (!isConfigured) return;
+    if (!isSupabaseConfigured()) return;
 
-    const { data } = await supabase
-      .from('users')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const res = await withTimeout(
+      supabase.from('users').select('*').order('created_at', { ascending: false }),
+      8000
+    );
 
-    set({ allUsers: data || [] });
+    set({ allUsers: (res as any).data || [] });
   },
 
   confirmDeposit: async (depositId: string, note?: string) => {
-    if (!isConfigured) return false;
+    if (!isSupabaseConfigured()) return false;
 
-    const { data: { session } } = await supabase.auth.getSession();
+    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
-    // Get deposit details
-    const { data: deposit } = await supabase
-      .from('deposits')
-      .select('*')
-      .eq('id', depositId)
-      .single();
+    const depRes = await withTimeout(
+      supabase.from('deposits').select('*').eq('id', depositId).maybeSingle(),
+      8000
+    );
 
+    const deposit = (depRes as any).data;
     if (!deposit) return false;
 
-    // Update deposit status
-    await supabase
-      .from('deposits')
-      .update({
-        status: 'confirmed',
-        processed_by: session.user.id,
-        processed_at: new Date().toISOString(),
-        note,
-      })
-      .eq('id', depositId);
-
-    // Update user balance
-    const { data: user } = await supabase
-      .from('users')
-      .select('balance_available, total_deposited')
-      .eq('id', deposit.user_id)
-      .single();
-
-    if (user) {
-      await supabase
-        .from('users')
+    await withTimeout(
+      supabase
+        .from('deposits')
         .update({
-          balance_available: parseFloat(user.balance_available) + parseFloat(deposit.amount),
-          total_deposited: parseFloat(user.total_deposited) + parseFloat(deposit.amount),
+          status: 'confirmed',
+          processed_by: session.user.id,
+          processed_at: new Date().toISOString(),
+          note,
         })
-        .eq('id', deposit.user_id);
+        .eq('id', depositId),
+      8000
+    );
+
+    const userRes = await withTimeout(
+      supabase
+        .from('users')
+        .select('balance_available, total_deposited')
+        .eq('id', deposit.user_id)
+        .maybeSingle(),
+      8000
+    );
+
+    const u = (userRes as any).data;
+    if (u) {
+      const currentBal = Number(u.balance_available ?? 0);
+      const currentDep = Number(u.total_deposited ?? 0);
+      const amt = Number(deposit.amount ?? 0);
+
+      await withTimeout(
+        supabase
+          .from('users')
+          .update({
+            balance_available: currentBal + amt,
+            total_deposited: currentDep + amt,
+          })
+          .eq('id', deposit.user_id),
+        8000
+      );
     }
 
     await get().loadPendingDeposits();
@@ -788,47 +814,76 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
   },
 
   rejectDeposit: async (depositId: string, note?: string) => {
-    if (!isConfigured) return false;
+    if (!isSupabaseConfigured()) return false;
 
-    const { data: { session } } = await supabase.auth.getSession();
+    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
-    await supabase
-      .from('deposits')
-      .update({
-        status: 'rejected',
-        processed_by: session.user.id,
-        processed_at: new Date().toISOString(),
-        note,
-      })
-      .eq('id', depositId);
+    await withTimeout(
+      supabase
+        .from('deposits')
+        .update({
+          status: 'rejected',
+          processed_by: session.user.id,
+          processed_at: new Date().toISOString(),
+          note,
+        })
+        .eq('id', depositId),
+      8000
+    );
 
     await get().loadPendingDeposits();
     return true;
   },
 
   updateUserBalance: async (userId: string, amount: number, type: 'add' | 'subtract') => {
-    if (!isConfigured) return false;
+    if (!isSupabaseConfigured()) return false;
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('balance_available')
-      .eq('id', userId)
-      .single();
+    const res = await withTimeout(
+      supabase.from('users').select('balance_available').eq('id', userId).maybeSingle(),
+      8000
+    );
 
-    if (!user) return false;
+    const u = (res as any).data;
+    if (!u) return false;
 
-    const currentBalance = parseFloat(user.balance_available);
-    const newBalance = type === 'add' 
-      ? currentBalance + amount 
-      : Math.max(0, currentBalance - amount);
+    const current = Number(u.balance_available ?? 0);
+    const next = type === 'add' ? current + amount : Math.max(0, current - amount);
 
-    await supabase
-      .from('users')
-      .update({ balance_available: newBalance })
-      .eq('id', userId);
+    await withTimeout(
+      supabase.from('users').update({ balance_available: next }).eq('id', userId),
+      8000
+    );
 
     await get().loadAllUsers();
     return true;
   },
 }));
+
+// ============================================
+// AUTH STATE LISTENER (set up once globally)
+// ============================================
+if (typeof window !== 'undefined' && isSupabaseConfigured()) {
+  const g = globalThis as any;
+  if (!g.__novatrade_auth_listener__) {
+    g.__novatrade_auth_listener__ = true;
+
+    supabase.auth.onAuthStateChange(async (event) => {
+      if (event === 'SIGNED_OUT') {
+        useStore.setState({
+          user: null,
+          isAuthenticated: false,
+          isLoading: false,
+          deposits: [],
+          trades: [],
+          paymentMethods: [],
+          error: null,
+        });
+      }
+    });
+  }
+}
+
+// Re-export supabase client and helper for backwards compatibility
+export { supabase, isSupabaseConfigured };
