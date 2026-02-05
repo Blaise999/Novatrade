@@ -81,27 +81,46 @@ export default function AdminBalancesPage() {
     return true;
   });
 
+  // Add sync deposit option
+  const [syncDeposit, setSyncDeposit] = useState(true);
+  const [adjustMode, setAdjustMode] = useState<'adjust' | 'set'>('adjust');
+  const [setAmount, setSetAmount] = useState('');
+
   const handleAdjustBalance = async () => {
-    if (!selectedUser || !adjustAmount || !adjustReason) return;
+    if (!selectedUser || !adjustReason) return;
     
     setAdjusting(true);
     try {
-      const amount = parseFloat(adjustAmount);
-      if (isNaN(amount) || amount <= 0) {
-        throw new Error('Invalid amount');
-      }
-
-      if (adjustAction === 'credit') {
-        await adminService.creditBalance(selectedUser.id, amount, adjustReason);
+      if (adjustMode === 'set') {
+        // Set exact balance (both balance_available and total_deposited)
+        const amount = parseFloat(setAmount);
+        if (isNaN(amount) || amount < 0) {
+          throw new Error('Invalid amount');
+        }
+        await adminService.setBalance(selectedUser.id, amount, adjustReason);
+        setNotification({ type: 'success', message: `Successfully set balance to $${amount.toFixed(2)}` });
       } else {
-        await adminService.debitBalance(selectedUser.id, amount, adjustReason);
-      }
+        // Credit or debit with optional deposit sync
+        const amount = parseFloat(adjustAmount);
+        if (isNaN(amount) || amount <= 0) {
+          throw new Error('Invalid amount');
+        }
 
-      setNotification({ type: 'success', message: `Successfully ${adjustAction}ed $${amount.toFixed(2)} ${adjustAction === 'credit' ? 'to' : 'from'} user` });
+        if (adjustAction === 'credit') {
+          await adminService.creditBalance(selectedUser.id, amount, adjustReason, syncDeposit);
+        } else {
+          await adminService.debitBalance(selectedUser.id, amount, adjustReason, syncDeposit);
+        }
+        setNotification({ type: 'success', message: `Successfully ${adjustAction}ed $${amount.toFixed(2)} ${adjustAction === 'credit' ? 'to' : 'from'} user${syncDeposit ? ' (deposit synced)' : ''}` });
+      }
+      
       setShowAdjustModal(false);
       setSelectedUser(null);
       setAdjustAmount('');
+      setSetAmount('');
       setAdjustReason('');
+      setSyncDeposit(true);
+      setAdjustMode('adjust');
       loadData();
     } catch (error) {
       setNotification({ type: 'error', message: (error as Error).message || 'Failed to adjust balance' });
@@ -112,6 +131,15 @@ export default function AdminBalancesPage() {
   const openAdjustModal = (user: UserType, action: 'credit' | 'debit') => {
     setSelectedUser(user);
     setAdjustAction(action);
+    setAdjustMode('adjust');
+    setSyncDeposit(true);
+    setShowAdjustModal(true);
+  };
+
+  const openSetBalanceModal = (user: UserType) => {
+    setSelectedUser(user);
+    setAdjustMode('set');
+    setSetAmount(user.balance_available.toString());
     setShowAdjustModal(true);
   };
 
@@ -352,6 +380,13 @@ export default function AdminBalancesPage() {
                           >
                             <Minus className="w-4 h-4" />
                           </button>
+                          <button
+                            onClick={() => openSetBalanceModal(user)}
+                            className="p-2 bg-electric/10 text-electric rounded-lg hover:bg-electric/20 transition-all"
+                            title="Set Exact Balance"
+                          >
+                            <DollarSign className="w-4 h-4" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -458,7 +493,7 @@ export default function AdminBalancesPage() {
             >
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-xl font-semibold text-cream">
-                  {adjustAction === 'credit' ? 'Credit' : 'Debit'} Balance
+                  {adjustMode === 'set' ? 'Set Balance' : (adjustAction === 'credit' ? 'Credit' : 'Debit') + ' Balance'}
                 </h3>
                 <button
                   onClick={() => setShowAdjustModal(false)}
@@ -473,27 +508,92 @@ export default function AdminBalancesPage() {
                 <div className="p-3 bg-white/5 rounded-xl">
                   <p className="text-sm text-slate-400">User</p>
                   <p className="text-cream font-medium">{selectedUser.email}</p>
-                  <p className="text-sm text-gold mt-1">
-                    Current Balance: ${selectedUser.balance_available.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </p>
-                </div>
-
-                {/* Amount */}
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Amount *</label>
-                  <div className="relative">
-                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                    <input
-                      type="number"
-                      value={adjustAmount}
-                      onChange={(e) => setAdjustAmount(e.target.value)}
-                      placeholder="0.00"
-                      step="0.01"
-                      min="0"
-                      className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
-                    />
+                  <div className="flex justify-between mt-2">
+                    <div>
+                      <p className="text-xs text-slate-500">Available Balance</p>
+                      <p className="text-sm text-gold">${selectedUser.balance_available.toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500">Total Deposited</p>
+                      <p className="text-sm text-cream">${(selectedUser.total_deposited || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+                    </div>
                   </div>
                 </div>
+
+                {/* Mode Selector */}
+                <div className="flex gap-2 p-1 bg-white/5 rounded-xl">
+                  <button
+                    onClick={() => setAdjustMode('adjust')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                      adjustMode === 'adjust' ? 'bg-gold text-void' : 'text-cream/60 hover:text-cream'
+                    }`}
+                  >
+                    Credit / Debit
+                  </button>
+                  <button
+                    onClick={() => setAdjustMode('set')}
+                    className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
+                      adjustMode === 'set' ? 'bg-gold text-void' : 'text-cream/60 hover:text-cream'
+                    }`}
+                  >
+                    Set Exact Balance
+                  </button>
+                </div>
+
+                {adjustMode === 'adjust' ? (
+                  <>
+                    {/* Amount */}
+                    <div>
+                      <label className="block text-sm text-slate-400 mb-2">Amount to {adjustAction} *</label>
+                      <div className="relative">
+                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                        <input
+                          type="number"
+                          value={adjustAmount}
+                          onChange={(e) => setAdjustAmount(e.target.value)}
+                          placeholder="0.00"
+                          step="0.01"
+                          min="0"
+                          className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Sync Deposit Toggle */}
+                    <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
+                      <div>
+                        <p className="text-sm text-cream">Sync Total Deposited</p>
+                        <p className="text-xs text-slate-500">Also update total_deposited field</p>
+                      </div>
+                      <button
+                        onClick={() => setSyncDeposit(!syncDeposit)}
+                        className={`w-12 h-6 rounded-full transition-colors relative ${syncDeposit ? 'bg-gold' : 'bg-white/20'}`}
+                      >
+                        <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${syncDeposit ? 'left-7' : 'left-1'}`} />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  /* Set Exact Amount */
+                  <div>
+                    <label className="block text-sm text-slate-400 mb-2">New Balance Amount *</label>
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                      <input
+                        type="number"
+                        value={setAmount}
+                        onChange={(e) => setSetAmount(e.target.value)}
+                        placeholder="0.00"
+                        step="0.01"
+                        min="0"
+                        className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                      />
+                    </div>
+                    <p className="text-xs text-slate-500 mt-2">
+                      This will set both balance_available AND total_deposited to this value
+                    </p>
+                  </div>
+                )}
 
                 {/* Reason (Required) */}
                 <div>
@@ -508,19 +608,51 @@ export default function AdminBalancesPage() {
                 </div>
 
                 {/* Preview */}
-                {adjustAmount && (
-                  <div className={`p-3 rounded-xl ${adjustAction === 'credit' ? 'bg-profit/10 border border-profit/20' : 'bg-loss/10 border border-loss/20'}`}>
+                {(adjustMode === 'adjust' ? adjustAmount : setAmount) && (
+                  <div className={`p-3 rounded-xl ${
+                    adjustMode === 'set' ? 'bg-electric/10 border border-electric/20' :
+                    adjustAction === 'credit' ? 'bg-profit/10 border border-profit/20' : 'bg-loss/10 border border-loss/20'
+                  }`}>
                     <p className="text-xs text-slate-400 mb-1">Preview</p>
-                    <p className="text-sm text-cream">
-                      ${selectedUser.balance_available.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      <span className="mx-2">→</span>
-                      <span className={adjustAction === 'credit' ? 'text-profit' : 'text-loss'}>
-                        ${(adjustAction === 'credit'
-                          ? selectedUser.balance_available + parseFloat(adjustAmount || '0')
-                          : Math.max(0, selectedUser.balance_available - parseFloat(adjustAmount || '0'))
-                        ).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </span>
-                    </p>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-slate-500">Balance: </span>
+                        <span className="text-cream">
+                          ${selectedUser.balance_available.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                        <span className="mx-2 text-slate-500">→</span>
+                        <span className={
+                          adjustMode === 'set' ? 'text-electric' :
+                          adjustAction === 'credit' ? 'text-profit' : 'text-loss'
+                        }>
+                          ${(adjustMode === 'set'
+                            ? parseFloat(setAmount || '0')
+                            : adjustAction === 'credit'
+                            ? selectedUser.balance_available + parseFloat(adjustAmount || '0')
+                            : Math.max(0, selectedUser.balance_available - parseFloat(adjustAmount || '0'))
+                          ).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    </div>
+                    {(adjustMode === 'set' || syncDeposit) && (
+                      <div className="flex justify-between text-sm mt-1">
+                        <div>
+                          <span className="text-slate-500">Deposited: </span>
+                          <span className="text-cream">
+                            ${(selectedUser.total_deposited || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                          </span>
+                          <span className="mx-2 text-slate-500">→</span>
+                          <span className={adjustMode === 'set' ? 'text-electric' : adjustAction === 'credit' ? 'text-profit' : 'text-loss'}>
+                            ${(adjustMode === 'set'
+                              ? parseFloat(setAmount || '0')
+                              : adjustAction === 'credit'
+                              ? (selectedUser.total_deposited || 0) + parseFloat(adjustAmount || '0')
+                              : Math.max(0, (selectedUser.total_deposited || 0) - parseFloat(adjustAmount || '0'))
+                            ).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -534,14 +666,17 @@ export default function AdminBalancesPage() {
                   </button>
                   <button
                     onClick={handleAdjustBalance}
-                    disabled={!adjustAmount || !adjustReason || adjusting}
+                    disabled={(adjustMode === 'adjust' ? !adjustAmount : !setAmount) || !adjustReason || adjusting}
                     className={`flex-1 py-3 font-semibold rounded-xl transition-all disabled:opacity-50 ${
+                      adjustMode === 'set' ? 'bg-electric text-void hover:bg-electric/90' :
                       adjustAction === 'credit'
                         ? 'bg-profit text-void hover:bg-profit/90'
                         : 'bg-loss text-white hover:bg-loss/90'
                     }`}
                   >
-                    {adjusting ? 'Processing...' : adjustAction === 'credit' ? 'Credit Balance' : 'Debit Balance'}
+                    {adjusting ? 'Processing...' : 
+                      adjustMode === 'set' ? 'Set Balance' :
+                      adjustAction === 'credit' ? 'Credit Balance' : 'Debit Balance'}
                   </button>
                 </div>
               </div>

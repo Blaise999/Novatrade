@@ -20,7 +20,8 @@ import {
   TrendingUp,
   Calendar,
   Database,
-  CreditCard
+  CreditCard,
+  MessageCircle
 } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 
@@ -31,6 +32,7 @@ const navigation = [
   { name: 'Trades', href: '/admin/trades', icon: TrendingUp },
   { name: 'Deposits', href: '/admin/deposits', icon: CreditCard },
   { name: 'Withdrawals', href: '/admin/withdrawals', icon: Database },
+  { name: 'Support', href: '/admin/support', icon: MessageCircle },
   { name: 'Markets', href: '/admin/markets', icon: Activity },
   { name: 'Education', href: '/admin/education', icon: Calendar },
   { name: 'Sessions', href: '/admin/sessions', icon: Signal },

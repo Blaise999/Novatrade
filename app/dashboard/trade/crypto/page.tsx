@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -17,9 +17,20 @@ import {
   ArrowDownRight,
   RefreshCw,
   Info,
-  Plus,
-  Minus
+  Shield,
+  ShieldOff,
+  ShieldCheck,
+  Lock,
+  Unlock,
+  Pause,
+  Play,
+  Eye,
+  EyeOff
 } from 'lucide-react';
+import { useStore } from '@/lib/supabase/store-supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { useSpotTradingStore, useSpotEquity, useShieldedPositions } from '@/lib/spot-trading-store';
+import type { SpotPosition } from '@/lib/spot-trading-types';
 
 // ============================================
 // TYPES
@@ -34,18 +45,6 @@ interface CryptoAsset {
   marketCap?: string;
   volume24h?: string;
   icon: string;
-}
-
-interface CryptoHolding {
-  id: string;
-  symbol: string;
-  name: string;
-  quantity: number;
-  avgBuyPrice: number;
-  currentPrice: number;
-  value: number;
-  pnl: number;
-  pnlPercent: number;
 }
 
 // ============================================
@@ -161,10 +160,188 @@ const PriceChart = ({ asset, priceHistory }: { asset: CryptoAsset; priceHistory:
 };
 
 // ============================================
+// SHIELD BADGE COMPONENT
+// ============================================
+
+const ShieldBadge = ({ position, onToggle }: { position: SpotPosition; onToggle: () => void }) => {
+  const priceChange = position.shieldEnabled && position.shieldSnapPrice 
+    ? position.currentPrice - position.shieldSnapPrice 
+    : 0;
+  const priceChangePercent = position.shieldSnapPrice 
+    ? (priceChange / position.shieldSnapPrice) * 100 
+    : 0;
+
+  return (
+    <motion.button
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+        position.shieldEnabled
+          ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+          : 'bg-white/5 text-slate-400 hover:bg-white/10 border border-white/10'
+      }`}
+      whileHover={{ scale: 1.02 }}
+      whileTap={{ scale: 0.98 }}
+    >
+      {position.shieldEnabled ? (
+        <>
+          <ShieldCheck className="w-3.5 h-3.5" />
+          <span>Protected</span>
+          {priceChange !== 0 && (
+            <span className={priceChange < 0 ? 'text-profit' : 'text-loss'}>
+              {priceChange < 0 ? '↓' : '↑'}{Math.abs(priceChangePercent).toFixed(1)}%
+            </span>
+          )}
+        </>
+      ) : (
+        <>
+          <Shield className="w-3.5 h-3.5" />
+          <span>Shield</span>
+        </>
+      )}
+    </motion.button>
+  );
+};
+
+// ============================================
+// PORTFOLIO CARD WITH SHIELD
+// ============================================
+
+const PortfolioCard = ({ 
+  position, 
+  prices, 
+  onToggleShield,
+  onSelect 
+}: { 
+  position: SpotPosition; 
+  prices: Record<string, number>;
+  onToggleShield: () => void;
+  onSelect: () => void;
+}) => {
+  const asset = cryptoAssets.find(a => a.symbol === position.symbol);
+  const livePrice = prices[position.symbol] || position.currentPrice;
+  
+  // Calculate what the value WOULD be if shield was off
+  const liveValue = position.quantity * livePrice;
+  const livePnL = liveValue - position.totalCostBasis;
+  const livePnLPercent = (livePnL / position.totalCostBasis) * 100;
+  
+  // Use display values (respects shield)
+  const displayValue = position.displayValue;
+  const displayPnL = position.displayPnL;
+  const displayPnLPercent = position.displayPnLPercent;
+  
+  // Calculate protection amount if shielded
+  const protectionAmount = position.shieldEnabled ? displayValue - liveValue : 0;
+
+  return (
+    <motion.div 
+      layout 
+      className={`p-4 rounded-xl border transition-all cursor-pointer ${
+        position.shieldEnabled 
+          ? 'bg-blue-500/5 border-blue-500/20' 
+          : 'bg-white/5 border-white/5 hover:border-white/10'
+      }`}
+      onClick={onSelect}
+    >
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold">
+            {asset?.icon || position.symbol[0]}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="font-medium text-cream">{position.symbol}</p>
+              {position.shieldEnabled && (
+                <span className="flex items-center gap-1 text-xs text-blue-400">
+                  <Lock className="w-3 h-3" />
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500">{position.quantity.toFixed(6)} coins</p>
+          </div>
+        </div>
+        <ShieldBadge position={position} onToggle={onToggleShield} />
+      </div>
+
+      {/* Value Display */}
+      <div className="space-y-2">
+        {/* Display Value (what user sees) */}
+        <div className="flex justify-between items-baseline">
+          <span className="text-sm text-slate-400">
+            {position.shieldEnabled ? 'Shielded Value' : 'Value'}
+          </span>
+          <span className="text-lg font-semibold text-cream">
+            ${displayValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
+        </div>
+
+        {/* P&L */}
+        <div className="flex justify-between items-center">
+          <span className="text-xs text-slate-500">P&L</span>
+          <span className={`text-sm font-medium ${displayPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {displayPnL >= 0 ? '+' : ''}{displayPnL.toFixed(2)} ({displayPnLPercent.toFixed(2)}%)
+          </span>
+        </div>
+
+        {/* Shield Info - Show live price vs snap price when shielded */}
+        {position.shieldEnabled && position.shieldSnapPrice && (
+          <div className="mt-3 pt-3 border-t border-white/5 space-y-1.5">
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-blue-400 flex items-center gap-1">
+                <Lock className="w-3 h-3" />
+                Locked Price
+              </span>
+              <span className="text-blue-400 font-mono">
+                ${position.shieldSnapPrice.toLocaleString()}
+              </span>
+            </div>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-slate-500 flex items-center gap-1">
+                <TrendingUp className="w-3 h-3" />
+                Live Price
+              </span>
+              <span className={`font-mono ${livePrice >= position.shieldSnapPrice ? 'text-profit' : 'text-loss'}`}>
+                ${livePrice.toLocaleString()}
+              </span>
+            </div>
+            {protectionAmount !== 0 && (
+              <div className="flex justify-between items-center text-xs mt-2 pt-2 border-t border-white/5">
+                <span className="text-slate-400">
+                  {protectionAmount > 0 ? '💪 Protected from loss' : '📈 Missed gain'}
+                </span>
+                <span className={protectionAmount > 0 ? 'text-profit' : 'text-loss'}>
+                  {protectionAmount > 0 ? '+' : ''}{protectionAmount.toFixed(2)}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
+// ============================================
 // MAIN COMPONENT
 // ============================================
 
 export default function CryptoTradingPage() {
+  // Get real user data from store
+  const { user, refreshUser, loadTrades } = useStore();
+  
+  // Spot Trading Store
+  const { 
+    account,
+    positions,
+    initializeAccount,
+    syncCashFromUser,
+    executeBuy,
+    executeSell,
+    updatePrices,
+    toggleShield,
+    getShieldSummary,
+  } = useSpotTradingStore();
+
   // State
   const [selectedAsset, setSelectedAsset] = useState<CryptoAsset>(cryptoAssets[0]);
   const [showAssetSelector, setShowAssetSelector] = useState(false);
@@ -183,29 +360,46 @@ export default function CryptoTradingPage() {
   const [amount, setAmount] = useState<number>(100);
   const [quantity, setQuantity] = useState<number>(0);
   
-  // Holdings (in real app this comes from Supabase)
-  const [holdings, setHoldings] = useState<CryptoHolding[]>([]);
-  const [balance, setBalance] = useState<number>(1000); // Demo balance
+  // Use real balance from user
+  const balance = user?.balance || 0;
   
   // UI state
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [mobileTab, setMobileTab] = useState<'chart' | 'trade' | 'portfolio'>('chart');
+  const [isExecuting, setIsExecuting] = useState(false);
+
+  // Current price
+  const currentPrice = prices[selectedAsset.symbol] || selectedAsset.price;
+
+  // Initialize account and sync balance
+  useEffect(() => {
+    refreshUser();
+    loadTrades();
+  }, []);
+
+  useEffect(() => {
+    if (user?.id && !account) {
+      initializeAccount(user.id, user.balance);
+    } else if (user?.balance !== undefined) {
+      syncCashFromUser(user.balance);
+    }
+  }, [user, account]);
 
   // Calculate quantity from amount
   useEffect(() => {
     if (orderMode === 'amount' && amount > 0) {
-      setQuantity(amount / prices[selectedAsset.symbol]);
+      setQuantity(amount / currentPrice);
     }
-  }, [amount, prices, selectedAsset, orderMode]);
+  }, [amount, currentPrice, orderMode]);
 
   // Calculate amount from quantity
   useEffect(() => {
     if (orderMode === 'quantity' && quantity > 0) {
-      setAmount(quantity * prices[selectedAsset.symbol]);
+      setAmount(quantity * currentPrice);
     }
-  }, [quantity, prices, selectedAsset, orderMode]);
+  }, [quantity, currentPrice, orderMode]);
 
-  // Simulate real-time price updates
+  // Simulate real-time price updates (WebSocket simulation)
   useEffect(() => {
     // Initialize price history
     const initialHistory: number[] = [];
@@ -216,7 +410,7 @@ export default function CryptoTradingPage() {
     }
     setPriceHistory(initialHistory);
 
-    // Update prices every second
+    // Update prices every second (simulates WebSocket)
     const interval = setInterval(() => {
       setPrices(prev => {
         const newPrices = { ...prev };
@@ -224,6 +418,10 @@ export default function CryptoTradingPage() {
           const change = (Math.random() - 0.5) * 0.001;
           newPrices[asset.symbol] = newPrices[asset.symbol] * (1 + change);
         });
+        
+        // Update spot trading store with new prices
+        updatePrices(newPrices);
+        
         return newPrices;
       });
 
@@ -236,18 +434,6 @@ export default function CryptoTradingPage() {
     return () => clearInterval(interval);
   }, [selectedAsset]);
 
-  // Update holdings P&L
-  useEffect(() => {
-    setHoldings(prev => prev.map(h => {
-      const currentPrice = prices[h.symbol] || h.currentPrice;
-      const value = h.quantity * currentPrice;
-      const cost = h.quantity * h.avgBuyPrice;
-      const pnl = value - cost;
-      const pnlPercent = (pnl / cost) * 100;
-      return { ...h, currentPrice, value, pnl, pnlPercent };
-    }));
-  }, [prices]);
-
   // Filter assets
   const filteredAssets = cryptoAssets.filter(a =>
     a.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -259,8 +445,8 @@ export default function CryptoTradingPage() {
     setFavorites(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
   };
 
-  // Execute buy
-  const executeBuy = () => {
+  // Execute buy - Spot Model
+  const handleBuy = async () => {
     if (amount > balance) {
       setNotification({ type: 'error', message: 'Insufficient balance' });
       return;
@@ -269,104 +455,138 @@ export default function CryptoTradingPage() {
       setNotification({ type: 'error', message: 'Minimum order is $1' });
       return;
     }
-
-    const currentPrice = prices[selectedAsset.symbol];
-    const qty = amount / currentPrice;
-
-    // Check if already holding
-    const existingIdx = holdings.findIndex(h => h.symbol === selectedAsset.symbol);
-    
-    if (existingIdx >= 0) {
-      // Add to existing position
-      setHoldings(prev => {
-        const updated = [...prev];
-        const existing = updated[existingIdx];
-        const totalQty = existing.quantity + qty;
-        const totalCost = (existing.quantity * existing.avgBuyPrice) + (qty * currentPrice);
-        updated[existingIdx] = {
-          ...existing,
-          quantity: totalQty,
-          avgBuyPrice: totalCost / totalQty,
-          currentPrice,
-          value: totalQty * currentPrice,
-          pnl: 0,
-          pnlPercent: 0,
-        };
-        return updated;
-      });
-    } else {
-      // New position
-      const newHolding: CryptoHolding = {
-        id: `${selectedAsset.symbol}-${Date.now()}`,
-        symbol: selectedAsset.symbol,
-        name: selectedAsset.name,
-        quantity: qty,
-        avgBuyPrice: currentPrice,
-        currentPrice,
-        value: amount,
-        pnl: 0,
-        pnlPercent: 0,
-      };
-      setHoldings(prev => [...prev, newHolding]);
+    if (!user) {
+      setNotification({ type: 'error', message: 'Please log in to trade' });
+      return;
     }
 
-    setBalance(prev => prev - amount);
-    setNotification({ type: 'success', message: `Bought ${qty.toFixed(6)} ${selectedAsset.symbol}` });
+    setIsExecuting(true);
+    const qty = amount / currentPrice;
+    const asset = cryptoAssets.find(a => a.symbol === selectedAsset.symbol);
+
+    try {
+      // Execute in spot trading store (this handles Supabase sync internally)
+      const result = executeBuy(
+        selectedAsset.symbol,
+        selectedAsset.name,
+        qty,
+        currentPrice,
+        0, // fee
+        asset?.icon
+      );
+
+      if (!result.success) {
+        throw new Error(result.error || 'Trade failed');
+      }
+
+      // Record trade in Supabase (for history only, balance already synced)
+      if (isSupabaseConfigured()) {
+        await supabase
+          .from('trades')
+          .insert({
+            user_id: user.id,
+            pair: `${selectedAsset.symbol}/USD`,
+            market_type: 'crypto',
+            type: 'buy',
+            side: 'long',
+            amount: amount,
+            quantity: qty,
+            entry_price: currentPrice,
+            current_price: currentPrice,
+            leverage: 1,
+            margin_used: amount,
+            pnl: 0,
+            pnl_percentage: 0,
+            fees: 0,
+            status: 'open',
+            source: 'live',
+            opened_at: new Date().toISOString(),
+          });
+
+        // Refresh user state to get updated balance from Supabase
+        await refreshUser();
+        await loadTrades();
+      }
+      
+      setNotification({ 
+        type: 'success', 
+        message: `Bought ${qty.toFixed(6)} ${selectedAsset.symbol} @ $${currentPrice.toLocaleString()}` 
+      });
+    } catch (error: any) {
+      console.error('Trade error:', error);
+      setNotification({ type: 'error', message: error.message || 'Trade failed' });
+    }
     
+    setIsExecuting(false);
     setTimeout(() => setNotification(null), 3000);
   };
 
-  // Execute sell
-  const executeSell = () => {
-    const holding = holdings.find(h => h.symbol === selectedAsset.symbol);
-    if (!holding) {
+  // Execute sell - Spot Model
+  const handleSell = async () => {
+    const position = positions.find(p => p.symbol === selectedAsset.symbol);
+    if (!position) {
       setNotification({ type: 'error', message: `You don't own any ${selectedAsset.symbol}` });
       return;
     }
-
-    const maxSellValue = holding.quantity * prices[selectedAsset.symbol];
-    if (amount > maxSellValue) {
-      setNotification({ type: 'error', message: `Max sell value: $${maxSellValue.toFixed(2)}` });
+    if (!user) {
+      setNotification({ type: 'error', message: 'Please log in to trade' });
       return;
     }
 
-    const sellQty = amount / prices[selectedAsset.symbol];
-    const remainingQty = holding.quantity - sellQty;
-
-    if (remainingQty <= 0.000001) {
-      // Sell all
-      setHoldings(prev => prev.filter(h => h.symbol !== selectedAsset.symbol));
-    } else {
-      // Partial sell
-      setHoldings(prev => prev.map(h => 
-        h.symbol === selectedAsset.symbol 
-          ? { ...h, quantity: remainingQty, value: remainingQty * prices[selectedAsset.symbol] }
-          : h
-      ));
+    const sellQty = Math.min(quantity, position.quantity);
+    if (sellQty <= 0) {
+      setNotification({ type: 'error', message: 'Invalid quantity' });
+      return;
     }
 
-    setBalance(prev => prev + amount);
-    setNotification({ type: 'success', message: `Sold ${sellQty.toFixed(6)} ${selectedAsset.symbol}` });
-    
+    setIsExecuting(true);
+
+    try {
+      // Execute in spot trading store (this handles Supabase sync internally)
+      const result = executeSell(position.id, sellQty, currentPrice, 0);
+
+      if (!result.success) {
+        throw new Error(result.error || 'Sell failed');
+      }
+
+      // Refresh user state to get updated balance from Supabase
+      if (isSupabaseConfigured()) {
+        await refreshUser();
+        await loadTrades();
+      }
+
+      setNotification({ 
+        type: 'success', 
+        message: `Sold ${sellQty.toFixed(6)} ${selectedAsset.symbol} @ $${currentPrice.toLocaleString()}` +
+          (result.realizedPnL !== undefined ? ` (P&L: ${result.realizedPnL >= 0 ? '+' : ''}$${result.realizedPnL.toFixed(2)})` : '')
+      });
+    } catch (error: any) {
+      console.error('Sell error:', error);
+      setNotification({ type: 'error', message: error.message || 'Sell failed' });
+    }
+
+    setIsExecuting(false);
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const currentPrice = prices[selectedAsset.symbol];
-  const priceChange = ((currentPrice - selectedAsset.price) / selectedAsset.price) * 100;
-  const currentHolding = holdings.find(h => h.symbol === selectedAsset.symbol);
-  const totalPortfolioValue = holdings.reduce((sum, h) => sum + h.value, 0);
-  const totalPnL = holdings.reduce((sum, h) => sum + h.pnl, 0);
+  // Calculate totals
+  const totalPortfolioValue = positions.reduce((sum, p) => sum + p.displayValue, 0);
+  const totalPnL = positions.reduce((sum, p) => sum + p.displayPnL, 0);
+  const shieldSummary = getShieldSummary();
+
+  // Get current position for selected asset
+  const currentPosition = positions.find(p => p.symbol === selectedAsset.symbol);
 
   return (
-    <div className="min-h-screen bg-void pb-20 lg:pb-0">
+    <div className="min-h-screen bg-void">
       {/* Notification */}
       <AnimatePresence>
         {notification && (
           <motion.div
-            initial={{ opacity: 0, y: -20 }}
+            initial={{ opacity: 0, y: -50 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl flex items-center gap-2 ${
+            exit={{ opacity: 0, y: -50 }}
+            className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl flex items-center gap-2 shadow-xl ${
               notification.type === 'success' ? 'bg-profit/20 border border-profit/30' : 'bg-loss/20 border border-loss/30'
             }`}
           >
@@ -382,180 +602,178 @@ export default function CryptoTradingPage() {
         )}
       </AnimatePresence>
 
-      {/* Header */}
-      <div className="sticky top-0 z-30 bg-void/95 backdrop-blur-sm border-b border-white/5">
-        <div className="flex items-center justify-between p-3 sm:p-4">
-          {/* Asset Selector */}
+      {/* Mobile Tabs */}
+      <div className="lg:hidden flex border-b border-white/10">
+        {(['chart', 'trade', 'portfolio'] as const).map(tab => (
           <button
-            onClick={() => setShowAssetSelector(true)}
-            className="flex items-center gap-2 sm:gap-3 hover:bg-white/5 rounded-xl p-2 transition-all"
+            key={tab}
+            onClick={() => setMobileTab(tab)}
+            className={`flex-1 py-3 text-sm font-medium transition-all ${
+              mobileTab === tab 
+                ? 'text-gold border-b-2 border-gold' 
+                : 'text-slate-400 hover:text-cream'
+            }`}
           >
-            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold text-sm sm:text-base">
-              {selectedAsset.icon}
-            </div>
-            <div>
-              <div className="flex items-center gap-1">
-                <span className="font-bold text-cream text-sm sm:text-base">{selectedAsset.symbol}</span>
-                <span className="text-slate-500 text-xs sm:text-sm hidden sm:inline">/ USD</span>
-                <ChevronDown className="w-4 h-4 text-slate-400" />
-              </div>
-              <span className="text-xs text-slate-500">{selectedAsset.name}</span>
-            </div>
+            {tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
-
-          {/* Price Display */}
-          <div className="text-right">
-            <p className="text-lg sm:text-2xl font-bold font-mono text-cream">
-              ${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: currentPrice < 1 ? 6 : 2 })}
-            </p>
-            <div className={`flex items-center justify-end gap-1 text-xs sm:text-sm ${priceChange >= 0 ? 'text-profit' : 'text-loss'}`}>
-              {priceChange >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-              {priceChange >= 0 ? '+' : ''}{priceChange.toFixed(2)}%
-            </div>
-          </div>
-        </div>
-
-        {/* Mobile Tabs */}
-        <div className="flex lg:hidden border-t border-white/5">
-          {(['chart', 'trade', 'portfolio'] as const).map(tab => (
-            <button
-              key={tab}
-              onClick={() => setMobileTab(tab)}
-              className={`flex-1 py-2.5 text-xs font-medium capitalize transition-all ${
-                mobileTab === tab ? 'text-gold border-b-2 border-gold' : 'text-slate-500'
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
+        ))}
       </div>
 
-      {/* Main Content */}
-      <div className="lg:grid lg:grid-cols-3 lg:gap-4 lg:p-4">
-        {/* Chart Section */}
-        <div className={`lg:col-span-2 ${mobileTab !== 'chart' ? 'hidden lg:block' : ''}`}>
-          <div className="bg-charcoal/50 lg:rounded-2xl border-b lg:border border-white/5">
-            <div className="p-3 sm:p-4 border-b border-white/5">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-medium text-cream">{selectedAsset.symbol}/USD</h2>
-                <div className="flex items-center gap-1">
-                  {['1H', '24H', '7D', '1M'].map(tf => (
-                    <button key={tf} className="px-2 py-1 text-xs text-slate-400 hover:text-cream hover:bg-white/5 rounded transition-all">
-                      {tf}
-                    </button>
-                  ))}
+      {/* Main Grid */}
+      <div className="lg:grid lg:grid-cols-12 lg:gap-4 p-4 max-w-7xl mx-auto">
+        {/* Left Column - Chart */}
+        <div className={`lg:col-span-8 space-y-4 ${mobileTab !== 'chart' ? 'hidden lg:block' : ''}`}>
+          {/* Asset Header */}
+          <div className="bg-charcoal rounded-2xl p-4 border border-white/5">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={() => setShowAssetSelector(true)}
+                className="flex items-center gap-3 hover:bg-white/5 rounded-xl p-2 -ml-2 transition-all"
+              >
+                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold text-xl">
+                  {selectedAsset.icon}
                 </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xl font-bold text-cream">{selectedAsset.symbol}</h2>
+                    <ChevronDown className="w-4 h-4 text-slate-400" />
+                  </div>
+                  <p className="text-sm text-slate-400">{selectedAsset.name}</p>
+                </div>
+              </button>
+              <div className="text-right">
+                <p className="text-2xl font-bold text-cream font-mono">
+                  ${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+                <p className={`text-sm ${selectedAsset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {selectedAsset.change24h >= 0 ? '+' : ''}{selectedAsset.change24h}%
+                </p>
               </div>
             </div>
-            <div className="h-48 sm:h-64 lg:h-80 p-2">
+            
+            {/* Price Chart */}
+            <div className="h-64 mt-4">
               <PriceChart asset={selectedAsset} priceHistory={priceHistory} />
-            </div>
-            {/* Market Info */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3 sm:p-4 border-t border-white/5">
-              <div>
-                <p className="text-[10px] sm:text-xs text-slate-500">Market Cap</p>
-                <p className="text-xs sm:text-sm font-medium text-cream">{selectedAsset.marketCap}</p>
-              </div>
-              <div>
-                <p className="text-[10px] sm:text-xs text-slate-500">24h Volume</p>
-                <p className="text-xs sm:text-sm font-medium text-cream">{selectedAsset.volume24h}</p>
-              </div>
-              <div>
-                <p className="text-[10px] sm:text-xs text-slate-500">24h High</p>
-                <p className="text-xs sm:text-sm font-medium text-profit">${(currentPrice * 1.02).toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-[10px] sm:text-xs text-slate-500">24h Low</p>
-                <p className="text-xs sm:text-sm font-medium text-loss">${(currentPrice * 0.98).toLocaleString()}</p>
-              </div>
             </div>
           </div>
 
-          {/* Holdings - Desktop */}
-          <div className="hidden lg:block mt-4 bg-charcoal/50 rounded-2xl border border-white/5 p-4">
+          {/* Portfolio Summary with Shield Info */}
+          <div className="bg-charcoal rounded-2xl p-4 border border-white/5">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-medium text-cream">Your Holdings</h3>
-              <div className="text-right">
-                <p className="text-xs text-slate-500">Total Value</p>
-                <p className="text-sm font-bold text-cream">${totalPortfolioValue.toFixed(2)}</p>
+              <h3 className="text-lg font-semibold text-cream">Your Portfolio</h3>
+              {shieldSummary.activeShields > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-500/10 rounded-lg border border-blue-500/20">
+                  <ShieldCheck className="w-4 h-4 text-blue-400" />
+                  <span className="text-sm text-blue-400">
+                    {shieldSummary.activeShields} Shield{shieldSummary.activeShields > 1 ? 's' : ''} Active
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Stats Row */}
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div className="p-3 bg-white/5 rounded-xl">
+                <p className="text-xs text-slate-500 mb-1">Total Value</p>
+                <p className="text-lg font-semibold text-cream">
+                  ${totalPortfolioValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div className="p-3 bg-white/5 rounded-xl">
+                <p className="text-xs text-slate-500 mb-1">Unrealized P&L</p>
+                <p className={`text-lg font-semibold ${totalPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}
+                </p>
+              </div>
+              <div className="p-3 bg-white/5 rounded-xl">
+                <p className="text-xs text-slate-500 mb-1">Cash Balance</p>
+                <p className="text-lg font-semibold text-cream">
+                  ${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </p>
               </div>
             </div>
-            {holdings.length === 0 ? (
-              <div className="text-center py-6 text-slate-500">
-                <Wallet className="w-10 h-10 mx-auto mb-2 opacity-30" />
+
+            {/* Holdings Grid */}
+            {positions.length === 0 ? (
+              <div className="text-center py-12 text-slate-500">
+                <Wallet className="w-12 h-12 mx-auto mb-3 opacity-30" />
                 <p className="text-sm">No holdings yet</p>
-                <p className="text-xs">Buy some crypto to get started</p>
+                <p className="text-xs">Buy your first crypto to start</p>
               </div>
             ) : (
-              <div className="space-y-2">
-                {holdings.map(h => (
-                  <div key={h.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-xl">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white text-xs font-bold">
-                      {cryptoAssets.find(a => a.symbol === h.symbol)?.icon || h.symbol[0]}
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-cream">{h.symbol}</p>
-                      <p className="text-xs text-slate-500">{h.quantity.toFixed(6)} coins</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-cream">${h.value.toFixed(2)}</p>
-                      <p className={`text-xs ${h.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {h.pnl >= 0 ? '+' : ''}{h.pnlPercent.toFixed(2)}%
-                      </p>
-                    </div>
-                  </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                {positions.map(position => (
+                  <PortfolioCard
+                    key={position.id}
+                    position={position}
+                    prices={prices}
+                    onToggleShield={() => toggleShield(position.id)}
+                    onSelect={() => {
+                      const asset = cryptoAssets.find(a => a.symbol === position.symbol);
+                      if (asset) {
+                        setSelectedAsset(asset);
+                        setMobileTab('trade');
+                      }
+                    }}
+                  />
                 ))}
               </div>
             )}
           </div>
         </div>
 
-        {/* Trade Panel */}
-        <div className={`lg:col-span-1 ${mobileTab !== 'trade' ? 'hidden lg:block' : ''}`}>
-          <div className="bg-charcoal/50 lg:rounded-2xl border-b lg:border border-white/5 p-4">
-            {/* Balance */}
+        {/* Right Column - Trade Panel */}
+        <div className={`lg:col-span-4 ${mobileTab !== 'trade' ? 'hidden lg:block' : ''}`}>
+          <div className="bg-charcoal rounded-2xl p-4 border border-white/5 sticky top-4">
+            {/* Balance Display */}
             <div className="flex items-center justify-between mb-4 p-3 bg-white/5 rounded-xl">
-              <div>
-                <p className="text-xs text-slate-500">Available Balance</p>
-                <p className="text-lg font-bold text-cream">${balance.toFixed(2)}</p>
+              <div className="flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-gold" />
+                <span className="text-sm text-slate-400">Available</span>
               </div>
-              <Link href="/dashboard/wallet" className="px-3 py-1.5 bg-gold/10 text-gold text-xs font-medium rounded-lg hover:bg-gold/20">
-                + Deposit
-              </Link>
+              <span className="text-lg font-semibold text-cream">
+                ${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </span>
             </div>
 
             {/* Buy/Sell Toggle */}
-            <div className="flex bg-white/5 rounded-xl p-1 mb-4">
+            <div className="flex gap-2 mb-4">
               <button
                 onClick={() => setOrderType('buy')}
-                className={`flex-1 py-2.5 text-sm font-medium rounded-lg transition-all ${
-                  orderType === 'buy' ? 'bg-profit text-void' : 'text-slate-400 hover:text-cream'
+                className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${
+                  orderType === 'buy' 
+                    ? 'bg-profit text-void' 
+                    : 'bg-white/5 text-slate-400 hover:bg-white/10'
                 }`}
               >
                 Buy
               </button>
               <button
                 onClick={() => setOrderType('sell')}
-                className={`flex-1 py-2.5 text-sm font-medium rounded-lg transition-all ${
-                  orderType === 'sell' ? 'bg-loss text-white' : 'text-slate-400 hover:text-cream'
+                className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${
+                  orderType === 'sell' 
+                    ? 'bg-loss text-white' 
+                    : 'bg-white/5 text-slate-400 hover:bg-white/10'
                 }`}
               >
                 Sell
               </button>
             </div>
 
-            {/* Current Holding */}
-            {currentHolding && (
-              <div className="mb-4 p-3 bg-white/5 rounded-xl">
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-slate-500">You own</span>
-                  <span className="text-cream">{currentHolding.quantity.toFixed(6)} {selectedAsset.symbol}</span>
+            {/* Current Position Info */}
+            {currentPosition && (
+              <div className="mb-4 p-3 bg-white/5 rounded-xl border border-white/10">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-slate-500">Your {selectedAsset.symbol}</span>
+                  <ShieldBadge 
+                    position={currentPosition} 
+                    onToggle={() => toggleShield(currentPosition.id)} 
+                  />
                 </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-500">Value</span>
-                  <span className={currentHolding.pnl >= 0 ? 'text-profit' : 'text-loss'}>
-                    ${currentHolding.value.toFixed(2)} ({currentHolding.pnl >= 0 ? '+' : ''}{currentHolding.pnlPercent.toFixed(2)}%)
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-cream">{currentPosition.quantity.toFixed(6)}</span>
+                  <span className={`text-sm ${currentPosition.displayPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                    ${currentPosition.displayValue.toFixed(2)}
                   </span>
                 </div>
               </div>
@@ -563,14 +781,16 @@ export default function CryptoTradingPage() {
 
             {/* Amount Input */}
             <div className="mb-4">
-              <label className="text-xs text-slate-500 mb-1.5 block">Amount (USD)</label>
+              <label className="text-xs text-slate-500 mb-1 block">
+                Amount (USD)
+              </label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">$</span>
                 <input
                   type="number"
                   value={amount}
-                  onChange={(e) => { setOrderMode('amount'); setAmount(parseFloat(e.target.value) || 0); }}
-                  className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-4 py-3 text-cream text-lg font-mono focus:outline-none focus:border-gold/50"
+                  onChange={(e) => { setOrderMode('amount'); setAmount(Number(e.target.value)); }}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-4 py-3 text-cream text-right font-mono focus:outline-none focus:border-gold/50"
                   placeholder="0.00"
                 />
               </div>
@@ -606,25 +826,36 @@ export default function CryptoTradingPage() {
 
             {/* Execute Button */}
             <button
-              onClick={orderType === 'buy' ? executeBuy : executeSell}
-              disabled={amount <= 0}
-              className={`w-full py-3.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+              onClick={orderType === 'buy' ? handleBuy : handleSell}
+              disabled={amount <= 0 || isExecuting}
+              className={`w-full py-3.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${
                 orderType === 'buy' 
                   ? 'bg-profit hover:bg-profit/90 text-void' 
                   : 'bg-loss hover:bg-loss/90 text-white'
               }`}
             >
-              {orderType === 'buy' ? `Buy ${selectedAsset.symbol}` : `Sell ${selectedAsset.symbol}`}
+              {isExecuting ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  Processing...
+                </>
+              ) : (
+                orderType === 'buy' ? `Buy ${selectedAsset.symbol}` : `Sell ${selectedAsset.symbol}`
+              )}
             </button>
 
-            {/* Info */}
-            <div className="mt-4 p-3 bg-blue-500/10 rounded-xl flex gap-2">
-              <Info className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-blue-400">
-                {orderType === 'buy' 
-                  ? 'Crypto is bought at market price. Your coins will be added to your portfolio.' 
-                  : 'Sell your holdings at current market price.'}
-              </p>
+            {/* Shield Mode Info */}
+            <div className="mt-4 p-3 bg-blue-500/10 rounded-xl border border-blue-500/20">
+              <div className="flex items-start gap-2">
+                <Shield className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs text-blue-400 font-medium mb-1">Shield Mode</p>
+                  <p className="text-xs text-blue-400/70">
+                    Activate Shield on any holding to lock your portfolio value at the current price. 
+                    The live price continues to move, but your displayed value stays frozen until you deactivate.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -641,7 +872,7 @@ export default function CryptoTradingPage() {
                 </p>
               </div>
             </div>
-            {holdings.length === 0 ? (
+            {positions.length === 0 ? (
               <div className="text-center py-12 text-slate-500">
                 <Wallet className="w-12 h-12 mx-auto mb-3 opacity-30" />
                 <p className="text-sm">No holdings yet</p>
@@ -651,25 +882,21 @@ export default function CryptoTradingPage() {
                 </button>
               </div>
             ) : (
-              <div className="space-y-2">
-                {holdings.map(h => (
-                  <motion.div key={h.id} layout className="p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold">
-                        {cryptoAssets.find(a => a.symbol === h.symbol)?.icon || h.symbol[0]}
-                      </div>
-                      <div className="flex-1">
-                        <p className="font-medium text-cream">{h.symbol}</p>
-                        <p className="text-xs text-slate-500">{h.quantity.toFixed(6)} coins</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-medium text-cream">${h.value.toFixed(2)}</p>
-                        <p className={`text-xs ${h.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                          {h.pnl >= 0 ? '+' : ''}{h.pnlPercent.toFixed(2)}%
-                        </p>
-                      </div>
-                    </div>
-                  </motion.div>
+              <div className="space-y-3">
+                {positions.map(position => (
+                  <PortfolioCard
+                    key={position.id}
+                    position={position}
+                    prices={prices}
+                    onToggleShield={() => toggleShield(position.id)}
+                    onSelect={() => {
+                      const asset = cryptoAssets.find(a => a.symbol === position.symbol);
+                      if (asset) {
+                        setSelectedAsset(asset);
+                        setMobileTab('trade');
+                      }
+                    }}
+                  />
                 ))}
               </div>
             )}

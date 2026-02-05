@@ -26,6 +26,7 @@ import {
 
 import { useTradingAccountStore } from '@/lib/trading-store';
 import { useAdminSessionStore } from '@/lib/admin-store';
+import { useStore } from '@/lib/supabase/store-supabase';
 import {
   useAdminMarketStore,
   isAdminControlledPair,
@@ -99,6 +100,9 @@ export default function FXTradingPage() {
     closeMarginPosition,
     updateMarginPositionPrice,
   } = useTradingAccountStore();
+
+  // User store for balance refresh
+  const { refreshUser } = useStore();
 
   // Admin session store (typed mismatch fix)
   const adminSession = useAdminSessionStore() as any;
@@ -277,7 +281,7 @@ export default function FXTradingPage() {
   };
 
   // Handle trade execution
-  const handleTrade = () => {
+  const handleTrade = async () => {
     if (!canTrade) {
       setNotification({ type: 'error', message: 'Upgrade to Starter tier ($500 deposit) to trade' });
       setTimeout(() => setNotification(null), 3000);
@@ -311,6 +315,8 @@ export default function FXTradingPage() {
     );
 
     if ((result as any)?.success) {
+      // Refresh user balance after trade
+      await refreshUser?.();
       setNotification({
         type: 'success',
         message: `${tradeDirection.toUpperCase()} ${lotSize} lots ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
@@ -323,7 +329,7 @@ export default function FXTradingPage() {
   };
 
   // Handle close position
-  const handleClosePosition = (position: MarginPosition) => {
+  const handleClosePosition = async (position: MarginPosition) => {
     const side = (position as any).side;
     const exitPrice = side === 'long' ? bidPrice : askPrice;
     const fee = ((position as any).qty * exitPrice) * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
@@ -332,6 +338,8 @@ export default function FXTradingPage() {
 
     if ((result as any)?.success) {
       const pnl = Number((result as any).realizedPnL ?? 0);
+      // Refresh user balance after close
+      await refreshUser?.();
       setNotification({
         type: 'success',
         message: `Closed ${(position as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,

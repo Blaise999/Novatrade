@@ -377,13 +377,15 @@ export function calculateLiquidationPrice(
 }
 
 // Calculate stock position average entry on add
+// Formula: new_avg = (q_old*avg_old + q_buy*buy_price + fee) / new_q
 export function calculateNewAvgEntry(
   oldQty: number,
   oldAvg: number,
   newQty: number,
-  newPrice: number
+  newPrice: number,
+  fee: number = 0
 ): number {
-  return (oldQty * oldAvg + newQty * newPrice) / (oldQty + newQty);
+  return (oldQty * oldAvg + newQty * newPrice + fee) / (oldQty + newQty);
 }
 
 // Calculate margin required for new position

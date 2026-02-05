@@ -45,16 +45,29 @@ const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
 type MobileTab = 'chart' | 'trade' | 'portfolio';
 
 export default function StockTradingPage() {
-  // If you don’t use user in this file, don’t destructure it (avoids lint fail)
-  useStore();
+  // Get user data for balance initialization and refresh
+  const { user, refreshUser } = useStore();
 
   const {
     spotAccount,
     stockPositions,
     executeStockBuy,
     executeStockSell,
-    updateStockPositionPrice
+    updateStockPositionPrice,
+    initializeAccounts,
   } = useTradingAccountStore();
+
+  // Initialize trading account with user's balance
+  useEffect(() => {
+    if (user?.id && user?.balance !== undefined) {
+      // Initialize or sync accounts with user's actual balance
+      if (!spotAccount) {
+        initializeAccounts(user.id, user.balance);
+      } else if (spotAccount.userId !== user.id) {
+        initializeAccounts(user.id, user.balance);
+      }
+    }
+  }, [user?.id, user?.balance, spotAccount, initializeAccounts]);
 
   // Stocks are FREE for all users - no tier restrictions
   const canTrade = true;
@@ -199,7 +212,7 @@ export default function StockTradingPage() {
   const marketStatus = getMarketStatus();
 
   // Handle buy
-  const handleBuy = () => {
+  const handleBuy = async () => {
     if (!canTrade) {
       setNotification({ type: 'error', message: 'Upgrade your membership to trade' });
       setTimeout(() => setNotification(null), 3000);
@@ -221,6 +234,8 @@ export default function StockTradingPage() {
     );
 
     if (result.success) {
+      // Refresh user balance after trade
+      await refreshUser?.();
       setNotification({
         type: 'success',
         message: `Bought ${effectiveShares} ${selectedAsset.symbol} @ $${askPrice.toFixed(2)}`
@@ -233,7 +248,7 @@ export default function StockTradingPage() {
   };
 
   // Handle sell
-  const handleSell = () => {
+  const handleSell = async () => {
     if (!positionToSell || sellQty <= 0) return;
 
     const sellCommission = Math.max(0.99, sellQty * bidPrice * 0.001);
@@ -241,6 +256,8 @@ export default function StockTradingPage() {
 
     if (result.success) {
       const pnl = result.realizedPnL || 0;
+      // Refresh user balance after trade
+      await refreshUser?.();
       setNotification({
         type: 'success',
         message: `Sold ${sellQty} ${positionToSell.symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`

@@ -254,17 +254,28 @@ class AdminService {
   // ============================================================================
   // BALANCE MANAGEMENT
   // ============================================================================
-  async creditBalance(userId: string, amount: number, reason: string) {
+  
+  /**
+   * Credit balance - also updates total_deposited to keep all balances in sync
+   */
+  async creditBalance(userId: string, amount: number, reason: string, updateDeposited: boolean = true) {
     const { data: user } = await this.getUser(userId);
     if (!user) throw new Error('User not found');
 
     const balanceBefore = user.balance_available;
     const balanceAfter = balanceBefore + amount;
+    const depositedBefore = user.total_deposited || 0;
+    const depositedAfter = updateDeposited ? depositedBefore + amount : depositedBefore;
 
-    // Update user balance
+    // Update user balance AND total_deposited to keep them in sync
+    const updateData: any = { balance_available: balanceAfter };
+    if (updateDeposited) {
+      updateData.total_deposited = depositedAfter;
+    }
+
     const { error: updateError } = await supabase
       .from('users')
-      .update({ balance_available: balanceAfter })
+      .update(updateData)
       .eq('id', userId);
 
     if (updateError) throw updateError;
@@ -292,26 +303,36 @@ class AdminService {
         action: 'balance_credit',
         target_type: 'user',
         target_id: userId,
-        previous_value: { balance: balanceBefore },
-        new_value: { balance: balanceAfter },
-        details: { amount, reason },
+        previous_value: { balance: balanceBefore, total_deposited: depositedBefore },
+        new_value: { balance: balanceAfter, total_deposited: depositedAfter },
+        details: { amount, reason, updateDeposited },
       });
     }
 
-    return { balanceBefore, balanceAfter };
+    return { balanceBefore, balanceAfter, depositedBefore, depositedAfter };
   }
 
-  async debitBalance(userId: string, amount: number, reason: string) {
+  /**
+   * Debit balance - also updates total_deposited if requested to keep balances in sync
+   */
+  async debitBalance(userId: string, amount: number, reason: string, updateDeposited: boolean = false) {
     const { data: user } = await this.getUser(userId);
     if (!user) throw new Error('User not found');
 
     const balanceBefore = user.balance_available;
     const balanceAfter = Math.max(0, balanceBefore - amount);
+    const depositedBefore = user.total_deposited || 0;
+    const depositedAfter = updateDeposited ? Math.max(0, depositedBefore - amount) : depositedBefore;
 
-    // Update user balance
+    // Update user balance AND optionally total_deposited
+    const updateData: any = { balance_available: balanceAfter };
+    if (updateDeposited) {
+      updateData.total_deposited = depositedAfter;
+    }
+
     const { error: updateError } = await supabase
       .from('users')
-      .update({ balance_available: balanceAfter })
+      .update(updateData)
       .eq('id', userId);
 
     if (updateError) throw updateError;
@@ -339,13 +360,67 @@ class AdminService {
         action: 'balance_debit',
         target_type: 'user',
         target_id: userId,
-        previous_value: { balance: balanceBefore },
-        new_value: { balance: balanceAfter },
+        previous_value: { balance: balanceBefore, total_deposited: depositedBefore },
+        new_value: { balance: balanceAfter, total_deposited: depositedAfter },
+        details: { amount, reason, updateDeposited },
+      });
+    }
+
+    return { balanceBefore, balanceAfter, depositedBefore, depositedAfter };
+  }
+
+  /**
+   * Set exact balance - sets balance_available and total_deposited to the same value
+   * This ensures all balance displays show the same amount
+   */
+  async setBalance(userId: string, amount: number, reason: string) {
+    const { data: user } = await this.getUser(userId);
+    if (!user) throw new Error('User not found');
+
+    const balanceBefore = user.balance_available;
+    const depositedBefore = user.total_deposited || 0;
+
+    // Update both balance_available and total_deposited to keep them in sync
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({
+        balance_available: amount,
+        total_deposited: amount,
+      })
+      .eq('id', userId);
+
+    if (updateError) throw updateError;
+
+    // Create transaction record
+    const { error: txError } = await supabase
+      .from('transactions')
+      .insert({
+        user_id: userId,
+        type: 'admin_set_balance',
+        amount: amount - balanceBefore,
+        fee: 0,
+        balance_before: balanceBefore,
+        balance_after: amount,
+        description: reason,
+        created_by: this.adminId,
+      });
+
+    if (txError) throw txError;
+
+    // Log admin action
+    if (this.adminId) {
+      await this.logAction({
+        admin_id: this.adminId,
+        action: 'balance_set',
+        target_type: 'user',
+        target_id: userId,
+        previous_value: { balance: balanceBefore, total_deposited: depositedBefore },
+        new_value: { balance: amount, total_deposited: amount },
         details: { amount, reason },
       });
     }
 
-    return { balanceBefore, balanceAfter };
+    return { balanceBefore, balanceAfter: amount, depositedBefore, depositedAfter: amount };
   }
 
   async getAllTransactions(filters?: {

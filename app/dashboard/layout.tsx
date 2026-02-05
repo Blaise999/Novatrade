@@ -29,6 +29,8 @@ import {
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore, useNotificationStore } from '@/lib/store';
+import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
+import SupportWidget from '@/components/SupportWidget';
 
 const navigation = [
   { 
@@ -82,6 +84,9 @@ export default function DashboardLayout({
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
   const { unreadCount } = useNotificationStore();
+  
+  // 🔥 Initialize all trading accounts with user's balance
+  const { balance, isInitialized } = useUnifiedBalance();
   
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -378,9 +383,9 @@ export default function DashboardLayout({
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${(user?.balance || 0).toLocaleString()}
-                {(user?.bonusBalance || 0) > 0 && (
-                  <span className="text-profit text-xs ml-1">+${user?.bonusBalance || 0}</span>
+                ${balance.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {balance.bonus > 0 && (
+                  <span className="text-profit text-xs ml-1">+${balance.bonus.toLocaleString()}</span>
                 )}
               </p>
             </div>
@@ -482,6 +487,9 @@ export default function DashboardLayout({
           {children}
         </main>
       </div>
+
+      {/* Support Widget */}
+      <SupportWidget />
     </div>
   );
 }
