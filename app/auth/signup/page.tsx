@@ -21,7 +21,8 @@ import {
   Check,
   CheckCircle2,
 } from 'lucide-react';
-import { useStore } from '@/lib/auth/store';
+import { useAuthStore } from '@/lib/store';
+import { useEmail } from '@/hooks/useEmail';
 
 // ============================================
 // VALIDATION SCHEMA
@@ -99,16 +100,16 @@ function PasswordStrength({ password }: { password: string }) {
     { label: 'Uppercase', met: /[A-Z]/.test(password) },
     { label: 'Lowercase', met: /[a-z]/.test(password) },
     { label: 'Number', met: /[0-9]/.test(password) },
-    { label: 'Special char', met: /[^A-Za-z0-9]/.test(password) },
+    { label: 'Special', met: /[^A-Za-z0-9]/.test(password) },
   ];
 
-  const metCount = requirements.filter(r => r.met).length;
-  const strengthPercent = (metCount / requirements.length) * 100;
+  const strength = requirements.filter(r => r.met).length;
+  const strengthPercent = (strength / requirements.length) * 100;
   
-  const strengthColor = metCount <= 2 ? 'bg-red-500' 
-    : metCount <= 3 ? 'bg-amber-500' 
-    : metCount <= 4 ? 'bg-yellow-500'
-    : 'bg-emerald-500';
+  const strengthColor = 
+    strength <= 2 ? 'bg-red-500' :
+    strength <= 3 ? 'bg-yellow-500' :
+    strength <= 4 ? 'bg-emerald-400' : 'bg-emerald-500';
 
   if (!password) return null;
 
@@ -117,14 +118,15 @@ function PasswordStrength({ password }: { password: string }) {
       initial={{ opacity: 0, height: 0 }}
       animate={{ opacity: 1, height: 'auto' }}
       exit={{ opacity: 0, height: 0 }}
-      className="space-y-3 pt-3"
+      className="mt-3 space-y-2"
     >
-      {/* Strength bar */}
+      {/* Progress bar */}
       <div className="h-1 bg-white/10 rounded-full overflow-hidden">
         <motion.div
+          className={`h-full ${strengthColor}`}
           initial={{ width: 0 }}
           animate={{ width: `${strengthPercent}%` }}
-          className={`h-full ${strengthColor} transition-all duration-300`}
+          transition={{ duration: 0.3 }}
         />
       </div>
       
@@ -155,13 +157,13 @@ function PasswordStrength({ password }: { password: string }) {
 // ============================================
 export default function SignupPage() {
   const router = useRouter();
-  const { signup, error: storeError, clearError } = useStore();
+  const { setUser } = useAuthStore();
+  const { sendOTP } = useEmail();
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
 
   const {
     register,
@@ -178,27 +180,32 @@ export default function SignupPage() {
   const onSubmit = async (data: SignupForm) => {
     setIsLoading(true);
     setError(null);
-    clearError();
 
     try {
-      const result = await signup(
-        data.email,
-        data.password,
-        data.firstName,
-        data.lastName
-      );
+      // Store user data in auth store for verify-otp page
+      setUser({
+        email: data.email.toLowerCase(),
+        name: `${data.firstName} ${data.lastName}`,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        password: data.password,
+        redirectUrl: '/dashboard',
+      });
 
-      if (result.success) {
-        setSuccess(true);
-        setTimeout(() => {
-          router.push('/dashboard');
-        }, 1500);
-      } else {
-        setError(result.error || 'Failed to create account. Please try again.');
+      // Send OTP email
+      const otpResult = await sendOTP(data.email.toLowerCase(), `${data.firstName} ${data.lastName}`);
+      
+      if (!otpResult.success) {
+        setError(otpResult.error || 'Failed to send verification code. Please try again.');
+        setIsLoading(false);
+        return;
       }
+
+      // Redirect to OTP verification page
+      router.push('/auth/verify-otp');
     } catch (err: any) {
+      console.error('Signup error:', err);
       setError(err?.message || 'Something went wrong. Please try again.');
-    } finally {
       setIsLoading(false);
     }
   };
@@ -250,153 +257,105 @@ export default function SignupPage() {
               </motion.p>
             </div>
 
-            {/* Success Message */}
-            <AnimatePresence>
-              {success && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="mb-6 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20"
-                >
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                    <div>
-                      <p className="text-sm font-medium text-emerald-400">Account created!</p>
-                      <p className="text-xs text-slate-400">Redirecting to dashboard...</p>
-                    </div>
-                    <Loader2 className="w-4 h-4 text-emerald-400 animate-spin ml-auto" />
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
             {/* Error Message */}
-            <AnimatePresence>
-              {error && !success && (
+            <AnimatePresence mode="wait">
+              {error && (
                 <motion.div
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20"
+                  exit={{ opacity: 0, y: -10 }}
+                  className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3"
                 >
-                  <div className="flex items-start gap-3">
-                    <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
-                    <p className="text-sm text-red-400">{error}</p>
-                  </div>
+                  <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+                  <p className="text-sm text-red-400">{error}</p>
                 </motion.div>
               )}
             </AnimatePresence>
 
             {/* Form */}
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
               {/* Name Fields */}
-              <motion.div
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.25 }}
-                className="grid grid-cols-2 gap-3"
-              >
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-300">First name</label>
-                  <div className="relative group">
-                    <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-gold transition-colors" />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    First Name
+                  </label>
+                  <div className="relative">
+                    <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                     <input
                       {...register('firstName')}
                       type="text"
                       placeholder="John"
-                      disabled={isLoading || success}
-                      className={`w-full pl-10 pr-3 py-3 bg-white/[0.03] border rounded-xl text-white placeholder:text-slate-600 focus:outline-none transition-all text-sm disabled:opacity-50 ${
-                        errors.firstName
-                          ? 'border-red-500/50 focus:border-red-500'
-                          : 'border-white/[0.08] focus:border-gold/50 focus:bg-white/[0.05]'
-                      }`}
+                      className={`w-full pl-12 pr-4 py-3.5 bg-white/[0.03] border ${
+                        errors.firstName ? 'border-red-500/50' : 'border-white/[0.08]'
+                      } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
                     />
                   </div>
                   {errors.firstName && (
-                    <p className="text-xs text-red-400">{errors.firstName.message}</p>
+                    <p className="mt-1.5 text-xs text-red-400">{errors.firstName.message}</p>
                   )}
                 </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-slate-300">Last name</label>
-                  <div className="relative group">
-                    <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 group-focus-within:text-gold transition-colors" />
+                
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Last Name
+                  </label>
+                  <div className="relative">
+                    <User className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                     <input
                       {...register('lastName')}
                       type="text"
                       placeholder="Doe"
-                      disabled={isLoading || success}
-                      className={`w-full pl-10 pr-3 py-3 bg-white/[0.03] border rounded-xl text-white placeholder:text-slate-600 focus:outline-none transition-all text-sm disabled:opacity-50 ${
-                        errors.lastName
-                          ? 'border-red-500/50 focus:border-red-500'
-                          : 'border-white/[0.08] focus:border-gold/50 focus:bg-white/[0.05]'
-                      }`}
+                      className={`w-full pl-12 pr-4 py-3.5 bg-white/[0.03] border ${
+                        errors.lastName ? 'border-red-500/50' : 'border-white/[0.08]'
+                      } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
                     />
                   </div>
                   {errors.lastName && (
-                    <p className="text-xs text-red-400">{errors.lastName.message}</p>
+                    <p className="mt-1.5 text-xs text-red-400">{errors.lastName.message}</p>
                   )}
                 </div>
-              </motion.div>
+              </div>
 
-              {/* Email Field */}
-              <motion.div
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.3 }}
-                className="space-y-2"
-              >
-                <label className="text-sm font-medium text-slate-300">Email</label>
-                <div className="relative group">
-                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500 group-focus-within:text-gold transition-colors" />
+              {/* Email */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Email Address
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                   <input
                     {...register('email')}
                     type="email"
                     placeholder="you@example.com"
-                    autoComplete="email"
-                    disabled={isLoading || success}
-                    className={`w-full pl-12 pr-4 py-3 bg-white/[0.03] border rounded-xl text-white placeholder:text-slate-600 focus:outline-none transition-all disabled:opacity-50 ${
-                      errors.email
-                        ? 'border-red-500/50 focus:border-red-500'
-                        : 'border-white/[0.08] focus:border-gold/50 focus:bg-white/[0.05]'
-                    }`}
+                    className={`w-full pl-12 pr-4 py-3.5 bg-white/[0.03] border ${
+                      errors.email ? 'border-red-500/50' : 'border-white/[0.08]'
+                    } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
                   />
                 </div>
                 {errors.email && (
-                  <p className="text-xs text-red-400 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" />
-                    {errors.email.message}
-                  </p>
+                  <p className="mt-1.5 text-xs text-red-400">{errors.email.message}</p>
                 )}
-              </motion.div>
+              </div>
 
-              {/* Password Field */}
-              <motion.div
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.35 }}
-                className="space-y-2"
-              >
-                <label className="text-sm font-medium text-slate-300">Password</label>
-                <div className="relative group">
-                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500 group-focus-within:text-gold transition-colors" />
+              {/* Password */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Password
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                   <input
                     {...register('password')}
                     type={showPassword ? 'text' : 'password'}
                     placeholder="Create a strong password"
-                    autoComplete="new-password"
-                    disabled={isLoading || success}
-                    className={`w-full pl-12 pr-12 py-3 bg-white/[0.03] border rounded-xl text-white placeholder:text-slate-600 focus:outline-none transition-all disabled:opacity-50 ${
-                      errors.password
-                        ? 'border-red-500/50 focus:border-red-500'
-                        : 'border-white/[0.08] focus:border-gold/50 focus:bg-white/[0.05]'
-                    }`}
+                    className={`w-full pl-12 pr-12 py-3.5 bg-white/[0.03] border ${
+                      errors.password ? 'border-red-500/50' : 'border-white/[0.08]'
+                    } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    disabled={isLoading || success}
                     className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
                   >
                     {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
@@ -405,162 +364,104 @@ export default function SignupPage() {
                 <AnimatePresence>
                   <PasswordStrength password={password} />
                 </AnimatePresence>
-              </motion.div>
+              </div>
 
-              {/* Confirm Password Field */}
-              <motion.div
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.4 }}
-                className="space-y-2"
-              >
-                <label className="text-sm font-medium text-slate-300">Confirm password</label>
-                <div className="relative group">
-                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500 group-focus-within:text-gold transition-colors" />
+              {/* Confirm Password */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Confirm Password
+                </label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
                   <input
                     {...register('confirmPassword')}
                     type={showConfirmPassword ? 'text' : 'password'}
                     placeholder="Confirm your password"
-                    autoComplete="new-password"
-                    disabled={isLoading || success}
-                    className={`w-full pl-12 pr-12 py-3 bg-white/[0.03] border rounded-xl text-white placeholder:text-slate-600 focus:outline-none transition-all disabled:opacity-50 ${
-                      errors.confirmPassword
-                        ? 'border-red-500/50 focus:border-red-500'
-                        : 'border-white/[0.08] focus:border-gold/50 focus:bg-white/[0.05]'
-                    }`}
+                    className={`w-full pl-12 pr-12 py-3.5 bg-white/[0.03] border ${
+                      errors.confirmPassword ? 'border-red-500/50' : 'border-white/[0.08]'
+                    } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
                   />
                   <button
                     type="button"
                     onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                    disabled={isLoading || success}
                     className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
                   >
                     {showConfirmPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                   </button>
                 </div>
                 {errors.confirmPassword && (
-                  <p className="text-xs text-red-400 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" />
-                    {errors.confirmPassword.message}
-                  </p>
+                  <p className="mt-1.5 text-xs text-red-400">{errors.confirmPassword.message}</p>
                 )}
-              </motion.div>
+              </div>
 
               {/* Terms */}
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.45 }}
-              >
-                <label className="flex items-start gap-3 cursor-pointer group">
-                  <div className="relative mt-0.5">
-                    <input
-                      {...register('acceptTerms')}
-                      type="checkbox"
-                      disabled={isLoading || success}
-                      className="sr-only peer"
-                    />
-                    <div className="w-5 h-5 border border-white/20 rounded-md bg-white/[0.03] peer-checked:bg-gold peer-checked:border-gold transition-all flex items-center justify-center">
-                      <svg
-                        className="w-3 h-3 text-black opacity-0 peer-checked:opacity-100"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={3}
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                  </div>
-                  <span className="text-sm text-slate-400 group-hover:text-slate-300 transition-colors">
-                    I agree to the{' '}
-                    <Link href="/legal/terms" className="text-gold hover:underline">Terms of Service</Link>
-                    {' '}and{' '}
-                    <Link href="/legal/privacy" className="text-gold hover:underline">Privacy Policy</Link>
-                  </span>
+              <div className="flex items-start gap-3">
+                <input
+                  {...register('acceptTerms')}
+                  type="checkbox"
+                  id="terms"
+                  className="mt-1 w-4 h-4 bg-white/5 border-white/20 rounded focus:ring-gold text-gold"
+                />
+                <label htmlFor="terms" className="text-sm text-slate-400">
+                  I agree to the{' '}
+                  <Link href="/legal/terms" className="text-gold hover:underline">
+                    Terms of Service
+                  </Link>{' '}
+                  and{' '}
+                  <Link href="/legal/privacy" className="text-gold hover:underline">
+                    Privacy Policy
+                  </Link>
                 </label>
-                {errors.acceptTerms && (
-                  <p className="text-xs text-red-400 mt-1">{errors.acceptTerms.message}</p>
-                )}
-              </motion.div>
+              </div>
+              {errors.acceptTerms && (
+                <p className="text-xs text-red-400">{errors.acceptTerms.message}</p>
+              )}
 
               {/* Submit Button */}
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.5 }}
-                className="pt-2"
+              <motion.button
+                type="submit"
+                disabled={isLoading || !isValid}
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+                className={`w-full py-4 rounded-xl font-semibold text-base flex items-center justify-center gap-2 transition-all ${
+                  isLoading || !isValid
+                    ? 'bg-gold/50 text-void/70 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-gold to-amber-500 text-void hover:shadow-lg hover:shadow-gold/25'
+                }`}
               >
-                <button
-                  type="submit"
-                  disabled={isLoading || success || !isValid}
-                  className="relative w-full py-4 rounded-xl font-semibold text-black overflow-hidden group disabled:cursor-not-allowed"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-gold via-amber-400 to-gold bg-[length:200%_100%] group-hover:animate-shimmer transition-all group-disabled:opacity-50" />
-                  <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <div className="absolute inset-0 bg-gold/20 blur-xl" />
-                  </div>
-                  <span className="relative flex items-center justify-center gap-2">
-                    {isLoading ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        <span>Creating account...</span>
-                      </>
-                    ) : success ? (
-                      <>
-                        <CheckCircle2 className="w-5 h-5" />
-                        <span>Success!</span>
-                      </>
-                    ) : (
-                      <>
-                        <span>Create Account</span>
-                        <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
-                      </>
-                    )}
-                  </span>
-                </button>
-              </motion.div>
+                {isLoading ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Sending verification code...
+                  </>
+                ) : (
+                  <>
+                    Create Account
+                    <ArrowRight className="w-5 h-5" />
+                  </>
+                )}
+              </motion.button>
             </form>
 
-            {/* Sign In Link */}
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.55 }}
-              className="mt-6 text-center text-sm text-slate-400"
-            >
+            {/* Sign in link */}
+            <p className="mt-6 text-center text-sm text-slate-400">
               Already have an account?{' '}
               <Link
                 href="/auth/login"
-                className="text-gold hover:text-gold/80 font-medium transition-colors"
+                className="text-gold font-medium hover:underline"
               >
                 Sign in
               </Link>
-            </motion.p>
+            </p>
+
+            {/* Security badge */}
+            <div className="mt-6 pt-6 border-t border-white/[0.06] flex items-center justify-center gap-2 text-xs text-slate-500">
+              <ShieldCheck className="w-4 h-4" />
+              <span>256-bit SSL encryption</span>
+            </div>
           </div>
         </div>
-
-        {/* Security Badge */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.6 }}
-          className="mt-6 flex items-center justify-center gap-2 text-xs text-slate-500"
-        >
-          <ShieldCheck className="w-4 h-4" />
-          <span>Your data is protected with bank-grade encryption</span>
-        </motion.div>
       </motion.div>
-
-      <style jsx global>{`
-        @keyframes shimmer {
-          0% { background-position: 200% 0; }
-          100% { background-position: -200% 0; }
-        }
-        .group-hover\\:animate-shimmer:hover {
-          animation: shimmer 3s linear infinite;
-        }
-      `}</style>
     </div>
   );
 }
