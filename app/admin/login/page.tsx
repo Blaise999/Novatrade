@@ -22,11 +22,11 @@ export default function AdminLoginPage() {
     setIsLoading(true);
 
     try {
-      const success = await login(email, password);
-      if (success) {
+      const result = await login(email, password);
+      if (result.success) {
         router.push('/admin');
       } else {
-        setError('Invalid credentials. Access denied.');
+        setError(result.error || 'Invalid credentials. Access denied.');
       }
     } catch (err) {
       setError('An error occurred. Please try again.');
@@ -146,13 +146,12 @@ export default function AdminLoginPage() {
             </button>
           </form>
 
-          {/* Demo Credentials */}
-          <div className="mt-6 p-4 bg-gold/5 border border-gold/10 rounded-xl">
-            <p className="text-xs text-gold font-medium mb-2">Demo Credentials:</p>
-            <div className="space-y-1 text-xs text-slate-400 font-mono">
-              <p>Email: admin@novatrade.com</p>
-              <p>Password: admin123</p>
-            </div>
+          {/* Security Notice */}
+          <div className="mt-6 p-4 bg-loss/5 border border-loss/10 rounded-xl">
+            <p className="text-xs text-slate-400">
+              <span className="text-loss font-medium">🔒 Secure Access:</span> Admin accounts must be created via Supabase Auth 
+              and assigned the admin role in the database. Contact your system administrator for access.
+            </p>
           </div>
         </div>
 

@@ -10,6 +10,38 @@ import { TradeDb, BalanceDb, AdminSessionDb, type Trade } from '@/lib/db';
 import crypto from 'crypto';
 
 // ============================================
+// IDEMPOTENCY PROTECTION
+// Prevents duplicate trades on refresh/retry
+// ============================================
+const idempotencyCache = new Map<string, { tradeId: string; expiresAt: number }>();
+const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutes
+
+function checkIdempotency(key: string): string | null {
+  const record = idempotencyCache.get(key);
+  
+  // Clean up expired entries periodically
+  if (idempotencyCache.size > 10000) {
+    const now = Date.now();
+    for (const [k, v] of idempotencyCache.entries()) {
+      if (now > v.expiresAt) idempotencyCache.delete(k);
+    }
+  }
+  
+  if (record && Date.now() < record.expiresAt) {
+    return record.tradeId;
+  }
+  
+  return null;
+}
+
+function setIdempotency(key: string, tradeId: string): void {
+  idempotencyCache.set(key, {
+    tradeId,
+    expiresAt: Date.now() + IDEMPOTENCY_TTL,
+  });
+}
+
+// ============================================
 // GET /api/trades
 // ============================================
 
@@ -101,7 +133,45 @@ export async function POST(request: NextRequest) {
       duration = 60,
       payout = 85,
       sessionId,
+      idempotencyKey, // Client-provided key for duplicate prevention
     } = body;
+    
+    // Check idempotency
+    const clientIdempotencyKey = idempotencyKey || request.headers.get('x-idempotency-key');
+    if (clientIdempotencyKey) {
+      const existingTradeId = checkIdempotency(`${user.id}:${clientIdempotencyKey}`);
+      if (existingTradeId) {
+        // Return the existing trade instead of creating a duplicate
+        const existingTrade = TradeDb.getById(existingTradeId);
+        if (existingTrade) {
+          console.log(`[Trades API] Idempotency hit: returning existing trade ${existingTradeId}`);
+          return NextResponse.json({
+            success: true,
+            trade: existingTrade,
+            message: 'Trade already processed (idempotent)',
+            idempotent: true,
+          });
+        }
+      }
+    }
+    
+    // Generate server-side idempotency key if none provided
+    // Based on user, asset, amount, direction, and timestamp window (5 second window)
+    const timeWindow = Math.floor(Date.now() / 5000); // 5 second windows
+    const serverIdempotencyKey = `${user.id}:${asset}:${amount}:${direction}:${timeWindow}`;
+    const existingFromServer = checkIdempotency(serverIdempotencyKey);
+    if (existingFromServer) {
+      const existingTrade = TradeDb.getById(existingFromServer);
+      if (existingTrade) {
+        console.log(`[Trades API] Duplicate detected within 5s window: ${existingFromServer}`);
+        return NextResponse.json({
+          success: true,
+          trade: existingTrade,
+          message: 'Trade already processed (duplicate detected)',
+          idempotent: true,
+        });
+      }
+    }
     
     // Validation
     if (!type || !direction || !asset || !amount || !entryPrice) {
@@ -131,8 +201,9 @@ export async function POST(request: NextRequest) {
     BalanceDb.deductFunds(user.id, 'USD', amount, 'available');
     
     // Create trade
+    const tradeId = `TRD-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     const trade = TradeDb.create({
-      oderId: `TRD-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+      oderId: tradeId,
       type,
       direction,
       asset,
@@ -149,6 +220,12 @@ export async function POST(request: NextRequest) {
       userId: user.id,
       sessionId,
     });
+    
+    // Store idempotency keys
+    if (clientIdempotencyKey) {
+      setIdempotency(`${user.id}:${clientIdempotencyKey}`, trade.id);
+    }
+    setIdempotency(serverIdempotencyKey, trade.id);
     
     return NextResponse.json({
       success: true,

@@ -11,8 +11,11 @@ import {
 interface AdminAuthStore {
   admin: AdminUser | null;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<boolean>;
-  logout: () => void;
+  sessionToken: string | null;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  verifySession: () => Promise<boolean>;
+  getAuthHeader: () => Record<string, string>;
 }
 
 interface AdminSessionStore {
@@ -52,47 +55,117 @@ interface AdminSessionStore {
   deleteTemplate: (id: string) => void;
 }
 
-// Admin credentials (in production, this would be in a secure backend)
-const ADMIN_CREDENTIALS = [
-  { email: 'admin@novatrade.com', password: 'admin123', name: 'Super Admin', role: 'super_admin' as const },
-  { email: 'signal@novatrade.com', password: 'signal123', name: 'Signal Provider', role: 'signal_provider' as const },
-];
+// ============================================
+// SECURE ADMIN AUTHENTICATION
+// Authenticates against Supabase - NO hardcoded credentials
+// ============================================
 
 export const useAdminAuthStore = create<AdminAuthStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       admin: null,
       isAuthenticated: false,
+      sessionToken: null,
       
       login: async (email: string, password: string) => {
-        // Simulate API call
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        const admin = ADMIN_CREDENTIALS.find(
-          a => a.email === email && a.password === password
-        );
-        
-        if (admin) {
+        try {
+          // Call secure server-side API for admin authentication
+          const response = await fetch('/api/admin/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password }),
+          });
+          
+          const data = await response.json();
+          
+          if (!response.ok || !data.success) {
+            console.error('Admin login failed:', data.error);
+            return { success: false, error: data.error || 'Invalid credentials' };
+          }
+          
           const adminUser: AdminUser = {
-            id: `admin_${Date.now()}`,
-            email: admin.email,
-            name: admin.name,
-            role: admin.role,
-            createdAt: new Date(),
+            id: data.admin.id,
+            email: data.admin.email,
+            name: data.admin.name || data.admin.first_name || 'Admin',
+            role: data.admin.role as 'super_admin' | 'signal_provider',
+            createdAt: new Date(data.admin.created_at),
             lastLogin: new Date(),
           };
-          set({ admin: adminUser, isAuthenticated: true });
-          return true;
+          
+          set({ 
+            admin: adminUser, 
+            isAuthenticated: true,
+            sessionToken: data.sessionToken,
+          });
+          
+          return { success: true };
+        } catch (error: any) {
+          console.error('Admin login error:', error);
+          return { success: false, error: error.message || 'Login failed' };
         }
-        return false;
       },
       
-      logout: () => {
-        set({ admin: null, isAuthenticated: false });
+      logout: async () => {
+        const { sessionToken } = get();
+        
+        // Revoke session on server
+        if (sessionToken) {
+          try {
+            await fetch('/api/admin/auth/logout', {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${sessionToken}`,
+              },
+            });
+          } catch (error) {
+            console.error('Logout error:', error);
+          }
+        }
+        
+        set({ admin: null, isAuthenticated: false, sessionToken: null });
+      },
+      
+      // Verify session is still valid
+      verifySession: async () => {
+        const { sessionToken } = get();
+        if (!sessionToken) {
+          set({ admin: null, isAuthenticated: false });
+          return false;
+        }
+        
+        try {
+          const response = await fetch('/api/admin/auth/verify', {
+            headers: { 'Authorization': `Bearer ${sessionToken}` },
+          });
+          
+          if (!response.ok) {
+            set({ admin: null, isAuthenticated: false, sessionToken: null });
+            return false;
+          }
+          
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      
+      getAuthHeader: (): Record<string, string> => {
+        const { sessionToken } = get();
+        const headers: Record<string, string> = {};
+        if (sessionToken) {
+          headers['Authorization'] = `Bearer ${sessionToken}`;
+        }
+        return headers;
       },
     }),
     {
       name: 'novatrade-admin-auth',
+      partialize: (state) => ({
+        admin: state.admin,
+        isAuthenticated: state.isAuthenticated,
+        sessionToken: state.sessionToken,
+      }),
     }
   )
 );

@@ -579,6 +579,25 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         const snapPrice = position.currentPrice;
         const snapValue = position.quantity * snapPrice;
         
+        // Log shield activation to database for audit trail
+        if (isSupabaseConfigured() && state.account?.userId) {
+          supabase.from('shield_events').insert({
+            user_id: state.account.userId,
+            position_id: positionId,
+            symbol: position.symbol,
+            event_type: 'activated',
+            snap_price: snapPrice,
+            snap_value: snapValue,
+            market_price: position.currentPrice,
+            market_value: position.marketValue,
+            quantity: position.quantity,
+            cost_basis: position.totalCostBasis,
+          }).then(({ error }) => {
+            if (error) console.error('[Shield] Failed to log activation:', error);
+            else console.log(`[Shield] Activation logged: ${position.symbol} @ $${snapPrice.toFixed(2)}`);
+          });
+        }
+        
         set((state) => ({
           positions: state.positions.map((p) =>
             p.id === positionId
@@ -639,6 +658,32 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           marketValue,
           position.totalCostBasis
         );
+        
+        // Calculate shield impact (difference between shielded and market value)
+        const shieldImpact = (position.shieldSnapValue ?? 0) - marketValue;
+        
+        // Log shield deactivation to database for audit trail
+        if (isSupabaseConfigured() && state.account?.userId) {
+          supabase.from('shield_events').insert({
+            user_id: state.account.userId,
+            position_id: positionId,
+            symbol: position.symbol,
+            event_type: 'deactivated',
+            snap_price: position.shieldSnapPrice,
+            snap_value: position.shieldSnapValue,
+            market_price: position.currentPrice,
+            market_value: marketValue,
+            quantity: position.quantity,
+            cost_basis: position.totalCostBasis,
+            shield_impact: shieldImpact,
+            duration_seconds: position.shieldActivatedAt 
+              ? Math.floor((now.getTime() - position.shieldActivatedAt.getTime()) / 1000) 
+              : null,
+          }).then(({ error }) => {
+            if (error) console.error('[Shield] Failed to log deactivation:', error);
+            else console.log(`[Shield] Deactivation logged: ${position.symbol} | Impact: ${shieldImpact >= 0 ? '+' : ''}$${shieldImpact.toFixed(2)}`);
+          });
+        }
         
         set((state) => ({
           positions: state.positions.map((p) =>

@@ -180,8 +180,10 @@ export const verifyOTP = async (
     return { success: false, error: "Invalid OTP format. Must be 6 digits." };
   }
 
-  // TESTING MODE (optional) - align with 6-digit rule only
-  if (code === "000000") {
+  // TESTING MODE - ONLY IN DEVELOPMENT
+  // Remove this block entirely in production or ensure NODE_ENV is 'production'
+  if (process.env.NODE_ENV === 'development' && code === "000000") {
+    console.warn('[OTP] Test bypass used - NEVER allow this in production!');
     await supabaseAdmin
       .from("email_otps")
       .update({ used_at: nowIso() })
