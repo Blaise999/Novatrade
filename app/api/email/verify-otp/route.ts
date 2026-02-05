@@ -1,20 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyOTPCode } from "@/lib/email";
 
-const ALLOWED_OTP_TYPES = new Set([
-  "email_verification",
-  "password_reset",
-  "login",
-  "withdrawal",
-  "2fa",
-]);
+// ✅ Vercel/Next route handler hints
+export const runtime = "nodejs";
+export const maxDuration = 30;
 
-function coerceType(input: any) {
-  const t = typeof input === "string" ? input.trim() : "";
-  return t || "email_verification";
-}
-
-function withTimeout<T>(p: Promise<T>, ms = 15000): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms = 20000): Promise<T> {
   return Promise.race([
     p,
     new Promise<T>((_, reject) =>
@@ -25,22 +16,14 @@ function withTimeout<T>(p: Promise<T>, ms = 15000): Promise<T> {
 
 export async function POST(request: NextRequest) {
   const started = Date.now();
-  const requestId = `otp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
   try {
-    let body: any = null;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json(
-        { success: false, error: "Invalid JSON body" },
-        { status: 400 }
-      );
-    }
+    const body = await request.json().catch(() => null);
+    const email = String(body?.email ?? "").trim();
+    const otp = String(body?.otp ?? "").trim();
 
-    const email = typeof body?.email === "string" ? body.email.trim() : "";
-    const otp = typeof body?.otp === "string" ? body.otp.trim() : "";
-    const type = coerceType(body?.type);
+    // ✅ default type (prevents dumb 400s)
+    const type = String(body?.type ?? "email_verification").trim();
 
     if (!email || !otp) {
       return NextResponse.json(
@@ -56,34 +39,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!ALLOWED_OTP_TYPES.has(type)) {
-      return NextResponse.json(
-        { success: false, error: `Invalid OTP type: ${type}` },
-        { status: 400 }
-      );
-    }
+    console.log("[verify-otp] start", { email, type });
 
-    console.log("[verify-otp] start", { requestId, email, type });
-
-    const result = await withTimeout(verifyOTPCode(email, otp, type as any), 15000);
+    // ✅ more realistic timeout (serverless cold start + DB call)
+    const result = await withTimeout(verifyOTPCode(email, otp, type as any), 20000);
 
     console.log("[verify-otp] done", {
-      requestId,
       ms: Date.now() - started,
       success: result?.success,
       err: result?.error,
     });
 
-    if (result?.success) {
+    if (result.success) {
       return NextResponse.json({
         success: true,
         message: "Verification successful",
-        requestId,
       });
     }
 
     return NextResponse.json(
-      { success: false, error: result?.error || "Invalid code", requestId },
+      { success: false, error: result.error || "Invalid code" },
       { status: 400 }
     );
   } catch (err: any) {
@@ -98,7 +73,7 @@ export async function POST(request: NextRequest) {
 
     console.error("[API] Verify OTP error:", err);
     return NextResponse.json(
-      { success: false, error: "Verification failed" },
+      { success: false, error: msg },
       { status: 500 }
     );
   }

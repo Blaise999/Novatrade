@@ -9,10 +9,11 @@ import { createClient } from "@supabase/supabase-js";
 // ============================================
 
 const OTP_CONFIG = {
-  length: 6,                    // OTP length
-  expiryMinutes: 10,            // OTP expiry time
-  maxAttempts: 3,               // Max verification attempts
-  cooldownMinutes: 1,           // Cooldown between OTP requests
+  length: 6, // OTP length
+  expiryMinutes: 10, // OTP expiry time
+  maxAttempts: 3, // Max verification attempts
+  cooldownMinutes: 1, // Cooldown between OTP requests
+  idempotencySeconds: 60, // ✅ allow “already used” success window
 };
 
 export type OTPType =
@@ -74,6 +75,7 @@ const futureIsoMinutes = (minutes: number) =>
 // ============================================
 // DB MODEL (email_otps table)
 // Columns expected:
+// - id (uuid)
 // - email (text)
 // - type (text)
 // - otp_hash (text)
@@ -105,7 +107,7 @@ export const createOTP = async (
   type: OTPType = "email_verification"
 ): Promise<{ otp: string; expiresAt: Date } | { error: string }> => {
   const normalizedEmail = normalizeEmail(email);
-  const t = type ?? "email_verification";
+  const t = (type ?? "email_verification") as OTPType;
 
   if (!normalizedEmail) return { error: "Email is required" };
 
@@ -170,7 +172,7 @@ export const createOTP = async (
 };
 
 // ============================================
-// VERIFY OTP (DB)
+// VERIFY OTP (DB) — FIXED (idempotent + no double-submit pain)
 // ============================================
 
 export const verifyOTP = async (
@@ -180,13 +182,12 @@ export const verifyOTP = async (
 ): Promise<{ success: boolean; error?: string }> => {
   const normalizedEmail = normalizeEmail(email);
   const code = String(otp ?? "").trim(); // keep as string to preserve leading zeros
-  const t = type ?? "email_verification";
+  const t = (type ?? "email_verification") as OTPType;
 
   if (!normalizedEmail || !code) {
     return { success: false, error: "Email and OTP are required." };
   }
 
-  // API route already enforces 6 digits, but keeping safe here
   if (!/^\d{6}$/.test(code)) {
     return { success: false, error: "Invalid OTP format. Must be 6 digits." };
   }
@@ -203,13 +204,15 @@ export const verifyOTP = async (
     return { success: true };
   }
 
-  // Fetch latest active OTP row for email+type
+  // ✅ compute once
+  const inputHash = hashOTP(normalizedEmail, code);
+
+  // ✅ fetch latest OTP row (even if already used) for idempotency protection
   const { data, error } = await supabaseAdmin
     .from("email_otps")
     .select("id, otp_hash, expires_at, attempts, max_attempts, used_at, created_at")
     .eq("email", normalizedEmail)
     .eq("type", t)
-    .is("used_at", null)
     .order("created_at", { ascending: false })
     .limit(1);
 
@@ -220,6 +223,21 @@ export const verifyOTP = async (
   const row = (data?.[0] as OtpRow | undefined);
   if (!row) {
     return { success: false, error: "No verification code found. Please request a new one." };
+  }
+
+  // ✅ If already used, allow “same code” to return success within a short window
+  if (row.used_at) {
+    const usedMs = new Date(row.used_at).getTime();
+    const recentlyUsed = Date.now() - usedMs <= OTP_CONFIG.idempotencySeconds * 1000;
+
+    if (recentlyUsed && row.otp_hash === inputHash) {
+      return { success: true };
+    }
+
+    return {
+      success: false,
+      error: "This verification code was already used. Please request a new one.",
+    };
   }
 
   // Expired?
@@ -235,11 +253,8 @@ export const verifyOTP = async (
   }
 
   // Compare hashes
-  const inputHash = hashOTP(normalizedEmail, code);
-
   if (row.otp_hash !== inputHash) {
     const newAttempts = row.attempts + 1;
-
     await supabaseAdmin.from("email_otps").update({ attempts: newAttempts }).eq("id", row.id);
 
     const remaining = row.max_attempts - newAttempts;
@@ -259,13 +274,16 @@ export const verifyOTP = async (
 // OPTIONAL HELPERS
 // ============================================
 
-export const hasValidOTP = async (email: string, type: OTPType = "email_verification"): Promise<boolean> => {
+export const hasValidOTP = async (
+  email: string,
+  type: OTPType = "email_verification"
+): Promise<boolean> => {
   const normalizedEmail = normalizeEmail(email);
-  const t = type ?? "email_verification";
+  const t = (type ?? "email_verification") as OTPType;
 
   const { data, error } = await supabaseAdmin
     .from("email_otps")
-    .select("expires_at")
+    .select("expires_at, used_at, created_at")
     .eq("email", normalizedEmail)
     .eq("type", t)
     .is("used_at", null)
@@ -284,11 +302,11 @@ export const getOTPInfo = async (
   type: OTPType = "email_verification"
 ): Promise<{ exists: boolean; expiresAt?: Date; remainingAttempts?: number; type?: string }> => {
   const normalizedEmail = normalizeEmail(email);
-  const t = type ?? "email_verification";
+  const t = (type ?? "email_verification") as OTPType;
 
   const { data, error } = await supabaseAdmin
     .from("email_otps")
-    .select("expires_at, attempts, max_attempts, type")
+    .select("expires_at, attempts, max_attempts, type, used_at, created_at")
     .eq("email", normalizedEmail)
     .eq("type", t)
     .is("used_at", null)
@@ -311,9 +329,12 @@ export const getOTPInfo = async (
   };
 };
 
-export const invalidateOTP = async (email: string, type: OTPType = "email_verification"): Promise<void> => {
+export const invalidateOTP = async (
+  email: string,
+  type: OTPType = "email_verification"
+): Promise<void> => {
   const normalizedEmail = normalizeEmail(email);
-  const t = type ?? "email_verification";
+  const t = (type ?? "email_verification") as OTPType;
 
   await supabaseAdmin
     .from("email_otps")
