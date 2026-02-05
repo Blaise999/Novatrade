@@ -5,6 +5,14 @@
  *
  * - useStore(): user auth + user actions
  * - useAdminStore(): admin actions
+ *
+ * PLUS: back-compat stores so old pages compile:
+ * - useAuthStore (OTP bridge)
+ * - useUIStore
+ * - useNotificationStore
+ * - useWalletStore
+ * - useKYCStore
+ * - useTradingStore (re-export)
  */
 
 import { create } from 'zustand';
@@ -513,7 +521,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ✅ THIS IS THE ONE YOUR SCREENSHOT IS COMPLAINING ABOUT
   updateKycStatus: async (status) => {
     const { user } = get();
     if (!user) return false;
@@ -911,5 +918,280 @@ if (typeof window !== 'undefined' && isSupabaseConfigured()) {
   }
 }
 
-// Back-compat exports
+// ============================================
+// COMPAT STORES (fixes your TS errors)
+// ============================================
+
+// --- OTP bridge used by /auth/verify-otp pages ---
+export type AuthOtpStore = {
+  otpEmail: string | null;
+  otpName: string | null;
+  otpPassword: string | null;
+  redirectUrl: string | null;
+
+  setOtpEmail: (v: string | null) => void;
+  setOtpName: (v: string | null) => void;
+  setOtpPassword: (v: string | null) => void;
+  setRedirectUrl: (v: string | null) => void;
+
+  // ✅ needed by login + verify-otp pages
+  setUser: (u: {
+    email?: string;
+    firstName?: string;
+    lastName?: string;
+    name?: string;
+    password?: string;
+    redirectUrl?: string;
+  }) => void;
+
+  clearOtp: () => void;
+};
+
+export const useAuthStore = create<AuthOtpStore>((set) => ({
+  otpEmail: null,
+  otpName: null,
+  otpPassword: null,
+  redirectUrl: null,
+
+  setOtpEmail: (otpEmail) => set({ otpEmail }),
+  setOtpName: (otpName) => set({ otpName }),
+  setOtpPassword: (otpPassword) => set({ otpPassword }),
+  setRedirectUrl: (redirectUrl) => set({ redirectUrl }),
+
+  setUser: (u) => {
+    const name =
+      u.name ||
+      [u.firstName || '', u.lastName || ''].filter(Boolean).join(' ') ||
+      null;
+
+    set({
+      otpEmail: u.email?.toLowerCase?.() ?? null,
+      otpName: name,
+      otpPassword: u.password ?? null,
+      redirectUrl: u.redirectUrl ?? null,
+    });
+  },
+
+  clearOtp: () =>
+    set({ otpEmail: null, otpName: null, otpPassword: null, redirectUrl: null }),
+}));
+
+// --- UI store used by dashboard layout ---
+export type UIStore = {
+  // both names supported
+  mobileNavOpen: boolean;
+  mobileMenuOpen: boolean;
+
+  sidebarOpen: boolean;
+  activeTab: string;
+
+  setSidebarOpen: (v: boolean) => void;
+  toggleSidebar: () => void;
+
+  setMobileNavOpen: (v: boolean) => void;
+  toggleMobileNav: () => void;
+
+  setMobileMenuOpen: (v: boolean) => void;
+  toggleMobileMenu: () => void;
+
+  setActiveTab: (v: string) => void;
+};
+
+export const useUIStore = create<UIStore>((set, get) => ({
+  sidebarOpen: true,
+  activeTab: 'overview',
+
+  mobileNavOpen: false,
+  mobileMenuOpen: false,
+
+  setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
+  toggleSidebar: () => set({ sidebarOpen: !get().sidebarOpen }),
+
+  setMobileNavOpen: (v) => set({ mobileNavOpen: v, mobileMenuOpen: v }),
+  toggleMobileNav: () => {
+    const next = !get().mobileNavOpen;
+    set({ mobileNavOpen: next, mobileMenuOpen: next });
+  },
+
+  setMobileMenuOpen: (v) => set({ mobileNavOpen: v, mobileMenuOpen: v }),
+  toggleMobileMenu: () => {
+    const next = !get().mobileMenuOpen;
+    set({ mobileNavOpen: next, mobileMenuOpen: next });
+  },
+
+  setActiveTab: (activeTab) => set({ activeTab }),
+}));
+
+// --- Notifications store (stub but fully typed) ---
+export type NotificationItem = {
+  id: string;
+  title: string;
+  message?: string;
+  type?: 'info' | 'success' | 'warning' | 'error';
+  read?: boolean;
+  createdAt: string;
+};
+
+export type NotificationStore = {
+  notifications: NotificationItem[];
+  unreadCount: number;
+
+  addNotification: (n: Omit<NotificationItem, 'id' | 'createdAt'> & { id?: string }) => void;
+  removeNotification: (id: string) => void;
+  markRead: (id: string) => void;
+  clearAll: () => void;
+};
+
+export const useNotificationStore = create<NotificationStore>((set, get) => ({
+  notifications: [],
+  unreadCount: 0,
+
+  addNotification: (n) => {
+    const item: NotificationItem = {
+      id: n.id || `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      title: n.title,
+      message: n.message,
+      type: n.type || 'info',
+      read: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    const next = [item, ...get().notifications].slice(0, 50);
+    set({
+      notifications: next,
+      unreadCount: next.filter((x) => !x.read).length,
+    });
+  },
+
+  removeNotification: (id) => {
+    const next = get().notifications.filter((n) => n.id !== id);
+    set({
+      notifications: next,
+      unreadCount: next.filter((x) => !x.read).length,
+    });
+  },
+
+  markRead: (id) => {
+    const next = get().notifications.map((n) => (n.id === id ? { ...n, read: true } : n));
+    set({
+      notifications: next,
+      unreadCount: next.filter((x) => !x.read).length,
+    });
+  },
+
+  clearAll: () => set({ notifications: [], unreadCount: 0 }),
+}));
+
+// --- Wallet store used by dashboard/wallet page ---
+export type WalletStore = {
+  walletAddress: string | null;
+  address: string | null;
+
+  chainId: number | null;
+  isConnecting: boolean;
+  isConnected: boolean;
+
+  setWalletAddress: (v: string | null) => void;
+  setAddress: (v: string | null) => void;
+
+  connectWallet: (address: string, chainId?: number) => Promise<void>;
+  disconnectWallet: () => void;
+};
+
+export const useWalletStore = create<WalletStore>((set) => ({
+  walletAddress: null,
+  address: null,
+  chainId: null,
+  isConnecting: false,
+  isConnected: false,
+
+  setWalletAddress: (v) => set({ walletAddress: v, address: v, isConnected: !!v }),
+  setAddress: (v) => set({ walletAddress: v, address: v, isConnected: !!v }),
+
+  connectWallet: async (address, chainId) => {
+    set({ isConnecting: true });
+    try {
+      set({
+        walletAddress: address,
+        address,
+        chainId: chainId ?? null,
+        isConnected: true,
+      });
+
+      // best-effort: store into profile if logged in
+      const auth = useStore.getState();
+      if (auth?.user?.id && auth.updateProfile) {
+        await auth.updateProfile({ walletAddress: address });
+      }
+    } finally {
+      set({ isConnecting: false });
+    }
+  },
+
+  disconnectWallet: () =>
+    set({
+      walletAddress: null,
+      address: null,
+      chainId: null,
+      isConnected: false,
+      isConnecting: false,
+    }),
+}));
+
+/// --- KYC wizard store used by /kyc page ---
+export type KYCStore = {
+  currentStep: number;
+  step: number; // back-compat
+  data: Record<string, any>;
+  isSubmitting: boolean;
+
+  // ✅ BOTH supported
+  setCurrentStep: (n: number) => void;
+  setStep: (n: number) => void; // back-compat alias
+
+  nextStep: () => void;
+  prevStep: () => void;
+
+  updateData: (patch: Record<string, any>) => void;
+  setSubmitting: (v: boolean) => void;
+
+  resetKyc: () => void;
+};
+
+export const useKYCStore = create<KYCStore>((set, get) => ({
+  currentStep: 1,
+  step: 1,
+  data: {},
+  isSubmitting: false,
+
+  setCurrentStep: (n) => set({ currentStep: n, step: n }),
+
+  // ✅ FIX for your TS error
+  setStep: (n) => set({ currentStep: n, step: n }),
+
+  nextStep: () => {
+    const next = get().currentStep + 1;
+    set({ currentStep: next, step: next });
+  },
+
+  prevStep: () => {
+    const next = Math.max(1, get().currentStep - 1);
+    set({ currentStep: next, step: next });
+  },
+
+  updateData: (patch) => set({ data: { ...get().data, ...patch } }),
+  setSubmitting: (v) => set({ isSubmitting: v }),
+
+  resetKyc: () => set({ currentStep: 1, step: 1, data: {}, isSubmitting: false }),
+}));
+
+
+// ============================================
+// RE-EXPORTS / BACK-COMPAT
+// ============================================
+
+// Old code imports these from "@/lib/store"
 export { supabase, isSupabaseConfigured };
+
+// Old portfolio code imports useTradingStore from "@/lib/store"
+export { useTradingAccountStore as useTradingStore } from './trading-store';

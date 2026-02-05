@@ -1,3 +1,5 @@
+'use client';
+
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
@@ -19,11 +21,11 @@ import {
   calculateLiquidationPrice,
 } from './trading-types';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
-import { 
-  updateUserBalance, 
-  syncStockTrade, 
+import {
+  updateUserBalance,
+  syncStockTrade,
   syncFXTrade,
-  notifyBalanceUpdate 
+  notifyBalanceUpdate,
 } from '@/lib/services/balance-sync';
 
 // ==========================================
@@ -35,13 +37,13 @@ import {
  * This is the critical sync between trading P&L and the user's actual balance
  */
 async function syncBalanceToSupabase(
-  userId: string, 
+  userId: string,
   newBalance: number,
   pnlChange: number,
   description: string
 ): Promise<boolean> {
   const result = await updateUserBalance(userId, newBalance, pnlChange, description);
-  
+
   if (result.success && result.newBalance !== undefined) {
     // Notify all listeners that balance has changed
     notifyBalanceUpdate({
@@ -51,7 +53,7 @@ async function syncBalanceToSupabase(
       timestamp: new Date(),
     });
   }
-  
+
   return result.success;
 }
 
@@ -63,25 +65,29 @@ interface TradingAccountState {
   // Accounts
   spotAccount: TradingAccount | null;
   marginAccount: TradingAccount | null;
-  
+
   // Positions
   stockPositions: StockPosition[];
   marginPositions: MarginPosition[];
-  
+
   // Orders
   openOrders: Order[];
   orderHistory: Order[];
   fills: Fill[];
-  
+
   // Ledger
   ledger: LedgerEntry[];
-  
+
+  // ✅ Back-compat for your portfolio page
+  activeTrades: any[];
+  tradeHistory: any[];
+
   // Account actions
   initializeAccounts: (userId: string, initialBalance?: number) => void;
   updateSpotAccount: (updates: Partial<TradingAccount>) => void;
   updateMarginAccount: (updates: Partial<TradingAccount>) => void;
   syncBalanceFromUser: (balance: number) => void;
-  
+
   // Admin actions
   adminAdjustBalance: (
     accountType: 'spot' | 'margin',
@@ -89,7 +95,7 @@ interface TradingAccountState {
     adminId: string,
     note: string
   ) => void;
-  
+
   // Stock trading (Spot model)
   executeStockBuy: (
     symbol: string,
@@ -98,16 +104,16 @@ interface TradingAccountState {
     price: number,
     fee: number
   ) => { success: boolean; error?: string };
-  
+
   executeStockSell: (
     positionId: string,
     qty: number,
     price: number,
     fee: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
-  
+
   updateStockPositionPrice: (symbol: string, price: number) => void;
-  
+
   // Margin/FX trading
   openMarginPosition: (
     symbol: string,
@@ -121,25 +127,25 @@ interface TradingAccountState {
     stopLoss?: number,
     takeProfit?: number
   ) => { success: boolean; error?: string };
-  
+
   closeMarginPosition: (
     positionId: string,
     price: number,
     fee: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
-  
+
   reduceMarginPosition: (
     positionId: string,
     qty: number,
     price: number,
     fee: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
-  
+
   updateMarginPositionPrice: (symbol: string, price: number) => void;
-  
+
   // Risk management
-  checkLiquidation: () => string[];  // Returns position IDs to liquidate
-  
+  checkLiquidation: () => string[];
+
   // Pending Orders (Limit/Stop)
   placeLimitOrder: (params: {
     symbol: string;
@@ -154,17 +160,19 @@ interface TradingAccountState {
     stopLoss?: number;
     takeProfit?: number;
   }) => { success: boolean; orderId?: string; error?: string };
-  
+
   cancelOrder: (orderId: string) => { success: boolean; error?: string };
-  
+
   checkPendingOrders: (currentPrices: Record<string, { bid: number; ask: number }>) => void;
-  
+
   // Swap/Overnight Fees (for FX positions held overnight)
-  applySwapFees: (swapRates: Record<string, { longSwap: number; shortSwap: number }>) => void;
-  
+  applySwapFees: (
+    swapRates: Record<string, { longSwap: number; shortSwap: number }>
+  ) => void;
+
   // Ledger
   addLedgerEntry: (entry: Omit<LedgerEntry, 'id' | 'createdAt'>) => void;
-  
+
   // Computed values
   calculateSpotEquity: () => number;
   calculateMarginEquity: () => number;
@@ -182,12 +190,15 @@ export const useTradingAccountStore = create<TradingAccountState>()(
       orderHistory: [],
       fills: [],
       ledger: [],
-      
+
+      // ✅ back-compat
+      activeTrades: [],
+      tradeHistory: [],
+
       initializeAccounts: (userId, initialBalance = 0) => {
         const now = new Date();
         const balance = Number(initialBalance) || 0;
-        
-        // Accounts start with user's balance from Supabase
+
         const spotAccount: TradingAccount = {
           id: `spot_${userId}`,
           userId,
@@ -207,8 +218,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           createdAt: now,
           updatedAt: now,
         };
-        
-        // Margin account also gets the same balance
+
         const marginAccount: TradingAccount = {
           id: `margin_${userId}`,
           userId,
@@ -229,10 +239,10 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           createdAt: now,
           updatedAt: now,
         };
-        
+
         set({ spotAccount, marginAccount });
       },
-      
+
       updateSpotAccount: (updates) => {
         set((state) => ({
           spotAccount: state.spotAccount
@@ -240,7 +250,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
             : null,
         }));
       },
-      
+
       updateMarginAccount: (updates) => {
         set((state) => ({
           marginAccount: state.marginAccount
@@ -248,63 +258,68 @@ export const useTradingAccountStore = create<TradingAccountState>()(
             : null,
         }));
       },
-      
+
       syncBalanceFromUser: (balance: number) => {
         const state = get();
         const now = new Date();
-        
-        // Calculate the difference from current positions/margin
+
+        // ✅ FIX: StockPosition has marketValue, not currentValue
         const spotPositionValue = state.stockPositions.reduce(
-          (sum, p) => sum + p.currentValue, 0
+          (sum, p) => sum + (p.marketValue || 0),
+          0
         );
+
         const marginUsed = state.marginAccount?.marginUsed || 0;
         const unrealizedPnL = state.marginPositions.reduce(
-          (sum, p) => sum + (p.unrealizedPnL || 0), 0
+          (sum, p) => sum + (p.unrealizedPnL || 0),
+          0
         );
-        
-        // Update spot account
+
         if (state.spotAccount) {
           const availableToTrade = Math.max(0, balance - spotPositionValue);
           set((state) => ({
-            spotAccount: state.spotAccount ? {
-              ...state.spotAccount,
-              cash: balance,
-              balance: balance,
-              equity: balance + spotPositionValue,
-              availableToTrade,
-              availableToWithdraw: availableToTrade,
-              freeMargin: availableToTrade,
-              updatedAt: now,
-            } : null,
+            spotAccount: state.spotAccount
+              ? {
+                  ...state.spotAccount,
+                  cash: balance,
+                  balance: balance,
+                  equity: balance + spotPositionValue,
+                  availableToTrade,
+                  availableToWithdraw: availableToTrade,
+                  freeMargin: availableToTrade,
+                  updatedAt: now,
+                }
+              : null,
           }));
         }
-        
-        // Update margin account
+
         if (state.marginAccount) {
           const equity = balance + unrealizedPnL;
           const freeMargin = Math.max(0, equity - marginUsed);
           set((state) => ({
-            marginAccount: state.marginAccount ? {
-              ...state.marginAccount,
-              cash: balance,
-              balance: balance,
-              equity,
-              availableToTrade: freeMargin,
-              availableToWithdraw: Math.max(0, balance - marginUsed),
-              freeMargin,
-              marginLevel: marginUsed > 0 ? (equity / marginUsed) * 100 : undefined,
-              updatedAt: now,
-            } : null,
+            marginAccount: state.marginAccount
+              ? {
+                  ...state.marginAccount,
+                  cash: balance,
+                  balance: balance,
+                  equity,
+                  availableToTrade: freeMargin,
+                  availableToWithdraw: Math.max(0, balance - marginUsed),
+                  freeMargin,
+                  marginLevel: marginUsed > 0 ? (equity / marginUsed) * 100 : undefined,
+                  updatedAt: now,
+                }
+              : null,
           }));
         }
       },
-      
+
       adminAdjustBalance: (accountType, amount, adminId, note) => {
         const state = get();
         const account = accountType === 'spot' ? state.spotAccount : state.marginAccount;
-        
+
         if (!account) return;
-        
+
         const entry: LedgerEntry = {
           id: `ledger_${Date.now()}`,
           accountId: account.id,
@@ -317,7 +332,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           adminNote: note,
           createdAt: new Date(),
         };
-        
+
         if (accountType === 'spot') {
           set((state) => ({
             spotAccount: state.spotAccount
@@ -330,6 +345,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                 }
               : null,
             ledger: [...state.ledger, entry],
+            tradeHistory: [...state.tradeHistory, entry],
           }));
         } else {
           set((state) => ({
@@ -343,50 +359,39 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                 }
               : null,
             ledger: [...state.ledger, entry],
+            tradeHistory: [...state.tradeHistory, entry],
           }));
         }
       },
-      
+
       // STOCK TRADING (SPOT MODEL)
       executeStockBuy: (symbol, name, qty, price, fee) => {
         const state = get();
         const account = state.spotAccount;
-        
+
         if (!account) return { success: false, error: 'Account not initialized' };
-        
-        // Stock cost: total = qty * price + fee
+
         const cost = qty * price + fee;
-        
+
         if (cost > account.cash) {
           return { success: false, error: 'Insufficient funds' };
         }
-        
+
         const newCash = account.cash - cost;
-        const existingPosition = state.stockPositions.find(p => p.symbol === symbol);
+        const existingPosition = state.stockPositions.find((p) => p.symbol === symbol);
         const now = new Date();
-        
+
         if (existingPosition) {
-          // Update existing position with weighted average
-          // Formula: new_avg = (q_old*avg_old + q_buy*buy_price + fee) / new_q
           const newAvg = calculateNewAvgEntry(
             existingPosition.qty,
             existingPosition.avgEntry,
             qty,
             price,
-            fee  // Include fee in cost basis
+            fee
           );
-          
-          set((state) => ({
-            spotAccount: state.spotAccount
-              ? {
-                  ...state.spotAccount,
-                  cash: newCash,
-                  balance: newCash,
-                  availableToTrade: newCash,
-                  updatedAt: now,
-                }
-              : null,
-            stockPositions: state.stockPositions.map(p =>
+
+          set((state) => {
+            const nextStockPositions = state.stockPositions.map((p) =>
               p.symbol === symbol
                 ? {
                     ...p,
@@ -397,11 +402,23 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                     updatedAt: now,
                   }
                 : p
-            ),
-          }));
+            );
+
+            return {
+              spotAccount: state.spotAccount
+                ? {
+                    ...state.spotAccount,
+                    cash: newCash,
+                    balance: newCash,
+                    availableToTrade: newCash,
+                    updatedAt: now,
+                  }
+                : null,
+              stockPositions: nextStockPositions,
+              activeTrades: [...nextStockPositions, ...state.marginPositions],
+            };
+          });
         } else {
-          // Create new position
-          // Average entry includes fee: (qty * price + fee) / qty
           const avgEntryWithFee = (qty * price + fee) / qty;
           const newPosition: StockPosition = {
             id: `stock_${Date.now()}`,
@@ -413,27 +430,30 @@ export const useTradingAccountStore = create<TradingAccountState>()(
             avgEntry: avgEntryWithFee,
             currentPrice: price,
             marketValue: qty * price,
-            unrealizedPnL: -fee, // Start with the fee as initial loss
+            unrealizedPnL: -fee,
             unrealizedPnLPercent: (-fee / (qty * price)) * 100,
             openedAt: now,
             updatedAt: now,
           };
-          
-          set((state) => ({
-            spotAccount: state.spotAccount
-              ? {
-                  ...state.spotAccount,
-                  cash: newCash,
-                  balance: newCash,
-                  availableToTrade: newCash,
-                  updatedAt: now,
-                }
-              : null,
-            stockPositions: [...state.stockPositions, newPosition],
-          }));
+
+          set((state) => {
+            const nextStockPositions = [...state.stockPositions, newPosition];
+            return {
+              spotAccount: state.spotAccount
+                ? {
+                    ...state.spotAccount,
+                    cash: newCash,
+                    balance: newCash,
+                    availableToTrade: newCash,
+                    updatedAt: now,
+                  }
+                : null,
+              stockPositions: nextStockPositions,
+              activeTrades: [...nextStockPositions, ...state.marginPositions],
+            };
+          });
         }
-        
-        // Add ledger entry
+
         get().addLedgerEntry({
           accountId: account.id,
           type: 'trade_open',
@@ -444,63 +464,48 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           referenceType: 'stock_buy',
           description: `Buy ${qty} ${symbol} @ $${price.toFixed(2)}`,
         });
-        
-        // 🔥 CRITICAL: Sync the new balance to Supabase (deduct cost)
-        syncBalanceToSupabase(
-          account.userId,
-          newCash,
-          -cost,
-          `Stock Buy: ${qty} ${symbol}`
-        );
-        
+
+        syncBalanceToSupabase(account.userId, newCash, -cost, `Stock Buy: ${qty} ${symbol}`);
+
         return { success: true };
       },
-      
+
       executeStockSell: (positionId, qty, price, fee) => {
         const state = get();
         const account = state.spotAccount;
-        const position = state.stockPositions.find(p => p.id === positionId);
-        
+        const position = state.stockPositions.find((p) => p.id === positionId);
+
         if (!account) return { success: false, error: 'Account not initialized' };
         if (!position) return { success: false, error: 'Position not found' };
         if (qty > position.qty) return { success: false, error: 'Quantity exceeds position' };
-        
-        // Stock P&L formula from doc: realized = (sell_price - avg) * q_sell - fee
+
         const grossPnL = (price - position.avgEntry) * qty;
-        const realizedPnL = grossPnL - fee;  // Net P&L after fee
+        const realizedPnL = grossPnL - fee;
         const proceeds = qty * price - fee;
         const newCash = account.cash + proceeds;
         const now = new Date();
-        
+
         if (qty === position.qty) {
-          // Close entire position
-          set((state) => ({
-            spotAccount: state.spotAccount
-              ? {
-                  ...state.spotAccount,
-                  cash: newCash,
-                  balance: newCash,
-                  availableToTrade: newCash,
-                  realizedPnL: state.spotAccount.realizedPnL + realizedPnL,
-                  updatedAt: now,
-                }
-              : null,
-            stockPositions: state.stockPositions.filter(p => p.id !== positionId),
-          }));
+          set((state) => {
+            const nextStockPositions = state.stockPositions.filter((p) => p.id !== positionId);
+            return {
+              spotAccount: state.spotAccount
+                ? {
+                    ...state.spotAccount,
+                    cash: newCash,
+                    balance: newCash,
+                    availableToTrade: newCash,
+                    realizedPnL: state.spotAccount.realizedPnL + realizedPnL,
+                    updatedAt: now,
+                  }
+                : null,
+              stockPositions: nextStockPositions,
+              activeTrades: [...nextStockPositions, ...state.marginPositions],
+            };
+          });
         } else {
-          // Partial close
-          set((state) => ({
-            spotAccount: state.spotAccount
-              ? {
-                  ...state.spotAccount,
-                  cash: newCash,
-                  balance: newCash,
-                  availableToTrade: newCash,
-                  realizedPnL: state.spotAccount.realizedPnL + realizedPnL,
-                  updatedAt: now,
-                }
-              : null,
-            stockPositions: state.stockPositions.map(p =>
+          set((state) => {
+            const nextStockPositions = state.stockPositions.map((p) =>
               p.id === positionId
                 ? {
                     ...p,
@@ -510,11 +515,25 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                     updatedAt: now,
                   }
                 : p
-            ),
-          }));
+            );
+
+            return {
+              spotAccount: state.spotAccount
+                ? {
+                    ...state.spotAccount,
+                    cash: newCash,
+                    balance: newCash,
+                    availableToTrade: newCash,
+                    realizedPnL: state.spotAccount.realizedPnL + realizedPnL,
+                    updatedAt: now,
+                  }
+                : null,
+              stockPositions: nextStockPositions,
+              activeTrades: [...nextStockPositions, ...state.marginPositions],
+            };
+          });
         }
-        
-        // Add ledger entry
+
         get().addLedgerEntry({
           accountId: account.id,
           type: 'trade_close',
@@ -523,23 +542,24 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           balanceAfter: newCash,
           referenceId: positionId,
           referenceType: 'stock_sell',
-          description: `Sell ${qty} ${position.symbol} @ $${price.toFixed(2)} | PnL: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)}`,
+          description: `Sell ${qty} ${position.symbol} @ $${price.toFixed(
+            2
+          )} | PnL: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)}`,
         });
-        
-        // 🔥 CRITICAL: Sync the new balance to Supabase
+
         syncBalanceToSupabase(
           account.userId,
           newCash,
           realizedPnL,
           `Stock Sell: ${qty} ${position.symbol}`
         );
-        
+
         return { success: true, realizedPnL };
       },
-      
+
       updateStockPositionPrice: (symbol, price) => {
-        set((state) => ({
-          stockPositions: state.stockPositions.map(p =>
+        set((state) => {
+          const nextStockPositions = state.stockPositions.map((p) =>
             p.symbol === symbol
               ? {
                   ...p,
@@ -550,28 +570,43 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                   updatedAt: new Date(),
                 }
               : p
-          ),
-        }));
+          );
+
+          return {
+            stockPositions: nextStockPositions,
+            activeTrades: [...nextStockPositions, ...state.marginPositions],
+          };
+        });
       },
-      
+
       // MARGIN/FX TRADING
-      openMarginPosition: (symbol, name, type, side, qty, price, leverage, fee, stopLoss, takeProfit) => {
+      openMarginPosition: (
+        symbol,
+        name,
+        type,
+        side,
+        qty,
+        price,
+        leverage,
+        fee,
+        stopLoss,
+        takeProfit
+      ) => {
         const state = get();
         const account = state.marginAccount;
-        
+
         if (!account) return { success: false, error: 'Account not initialized' };
-        
-        // Margin calculation: margin = notional / leverage
+
         const notional = qty * price;
         const requiredMargin = calculateRequiredMargin(qty, price, leverage);
-        
+
         if (requiredMargin > account.freeMargin) {
           return { success: false, error: 'Insufficient margin' };
         }
-        
+
         const newBalance = account.balance - fee;
         const now = new Date();
-        
+
         const newPosition: MarginPosition = {
           id: `margin_${Date.now()}`,
           accountId: account.id,
@@ -595,23 +630,23 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           openedAt: now,
           updatedAt: now,
         };
-        
-        // Calculate liquidation price
+
         const equity = calculateMarginEquity(newBalance, 0, 0, 0);
         newPosition.liquidationPrice = calculateLiquidationPrice(newPosition, equity, 0.5);
-        
+
         set((state) => {
+          const nextMarginPositions = [...state.marginPositions, newPosition];
           const newMarginUsed = state.marginAccount!.marginUsed + requiredMargin;
-          // Equity = balance + unrealizedPnL (existing positions)
+
           const currentUnrealizedPnL = state.marginPositions.reduce(
-            (sum, p) => sum + (p.unrealizedPnL || 0), 0
+            (sum, p) => sum + (p.unrealizedPnL || 0),
+            0
           );
           const newEquity = newBalance + currentUnrealizedPnL;
-          // Free margin = equity - used margin
           const newFreeMargin = newEquity - newMarginUsed;
-          // Margin level = (equity / used margin) * 100
-          const newMarginLevel = newMarginUsed > 0 ? (newEquity / newMarginUsed) * 100 : undefined;
-          
+          const newMarginLevel =
+            newMarginUsed > 0 ? (newEquity / newMarginUsed) * 100 : undefined;
+
           return {
             marginAccount: state.marginAccount
               ? {
@@ -625,11 +660,11 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                   updatedAt: now,
                 }
               : null,
-            marginPositions: [...state.marginPositions, newPosition],
+            marginPositions: nextMarginPositions,
+            activeTrades: [...state.stockPositions, ...nextMarginPositions],
           };
         });
-        
-        // Add ledger entry
+
         get().addLedgerEntry({
           accountId: account.id,
           type: 'trade_open',
@@ -640,8 +675,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           referenceType: 'margin_open',
           description: `Open ${side.toUpperCase()} ${qty} ${symbol} @ ${price} (${leverage}x)`,
         });
-        
-        // Sync fee deduction to Supabase (small but keeps balance accurate)
+
         if (fee > 0) {
           syncBalanceToSupabase(
             account.userId,
@@ -650,44 +684,44 @@ export const useTradingAccountStore = create<TradingAccountState>()(
             `FX Open Fee: ${symbol} ${side.toUpperCase()}`
           );
         }
-        
+
         return { success: true };
       },
-      
+
       closeMarginPosition: (positionId, price, fee) => {
         const state = get();
         const account = state.marginAccount;
-        const position = state.marginPositions.find(p => p.id === positionId);
-        
+        const position = state.marginPositions.find((p) => p.id === positionId);
+
         if (!account) return { success: false, error: 'Account not initialized' };
         if (!position) return { success: false, error: 'Position not found' };
-        
-        // Calculate P&L using the formula from the doc:
-        // Long: pnl = (price - open) * units
-        // Short: pnl = (open - price) * units
+
         const realizedPnL = calculateMarginPnL(position, price);
         const newBalance = account.balance + realizedPnL - fee;
         const now = new Date();
-        
-        // Update local state first
-        set((state) => ({
-          marginAccount: state.marginAccount
-            ? {
-                ...state.marginAccount,
-                balance: newBalance,
-                cash: newBalance, // Keep cash in sync
-                marginUsed: state.marginAccount.marginUsed - position.requiredMargin,
-                freeMargin: newBalance - (state.marginAccount.marginUsed - position.requiredMargin),
-                equity: newBalance, // Update equity
-                realizedPnL: state.marginAccount.realizedPnL + realizedPnL,
-                unrealizedPnL: state.marginAccount.unrealizedPnL - position.unrealizedPnL,
-                updatedAt: now,
-              }
-            : null,
-          marginPositions: state.marginPositions.filter(p => p.id !== positionId),
-        }));
-        
-        // Add ledger entry
+
+        set((state) => {
+          const nextMarginPositions = state.marginPositions.filter((p) => p.id !== positionId);
+
+          return {
+            marginAccount: state.marginAccount
+              ? {
+                  ...state.marginAccount,
+                  balance: newBalance,
+                  cash: newBalance,
+                  marginUsed: state.marginAccount.marginUsed - position.requiredMargin,
+                  freeMargin: newBalance - (state.marginAccount.marginUsed - position.requiredMargin),
+                  equity: newBalance,
+                  realizedPnL: state.marginAccount.realizedPnL + realizedPnL,
+                  unrealizedPnL: state.marginAccount.unrealizedPnL - position.unrealizedPnL,
+                  updatedAt: now,
+                }
+              : null,
+            marginPositions: nextMarginPositions,
+            activeTrades: [...state.stockPositions, ...nextMarginPositions],
+          };
+        });
+
         get().addLedgerEntry({
           accountId: account.id,
           type: 'trade_close',
@@ -696,52 +730,40 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           balanceAfter: newBalance,
           referenceId: positionId,
           referenceType: 'margin_close',
-          description: `Close ${position.side.toUpperCase()} ${position.qty} ${position.symbol} @ ${price} | PnL: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)}`,
+          description: `Close ${position.side.toUpperCase()} ${position.qty} ${
+            position.symbol
+          } @ ${price} | PnL: ${realizedPnL >= 0 ? '+' : ''}$${realizedPnL.toFixed(2)}`,
         });
-        
-        // 🔥 CRITICAL: Sync the new balance to Supabase
-        // This ensures profits/losses affect the user's actual deposited balance
+
         syncBalanceToSupabase(
           account.userId,
           newBalance,
           realizedPnL - fee,
           `FX Close: ${position.symbol} ${position.side.toUpperCase()}`
         );
-        
+
         return { success: true, realizedPnL };
       },
-      
+
       reduceMarginPosition: (positionId, qty, price, fee) => {
         const state = get();
         const account = state.marginAccount;
-        const position = state.marginPositions.find(p => p.id === positionId);
-        
+        const position = state.marginPositions.find((p) => p.id === positionId);
+
         if (!account) return { success: false, error: 'Account not initialized' };
         if (!position) return { success: false, error: 'Position not found' };
         if (qty >= position.qty) {
           return get().closeMarginPosition(positionId, price, fee);
         }
-        
+
         const ratio = qty / position.qty;
         const realizedPnL = calculateMarginPnL({ ...position, qty }, price);
         const marginReleased = position.requiredMargin * ratio;
         const newBalance = account.balance + realizedPnL - fee;
         const now = new Date();
-        
-        set((state) => ({
-          marginAccount: state.marginAccount
-            ? {
-                ...state.marginAccount,
-                balance: newBalance,
-                cash: newBalance,
-                marginUsed: state.marginAccount.marginUsed - marginReleased,
-                freeMargin: newBalance - (state.marginAccount.marginUsed - marginReleased),
-                equity: newBalance + (state.marginAccount.unrealizedPnL || 0),
-                realizedPnL: state.marginAccount.realizedPnL + realizedPnL,
-                updatedAt: now,
-              }
-            : null,
-          marginPositions: state.marginPositions.map(p =>
+
+        set((state) => {
+          const nextMarginPositions = state.marginPositions.map((p) =>
             p.id === positionId
               ? {
                   ...p,
@@ -752,27 +774,41 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                   updatedAt: now,
                 }
               : p
-          ),
-        }));
-        
-        // 🔥 Sync partial close P&L to Supabase
+          );
+
+          return {
+            marginAccount: state.marginAccount
+              ? {
+                  ...state.marginAccount,
+                  balance: newBalance,
+                  cash: newBalance,
+                  marginUsed: state.marginAccount.marginUsed - marginReleased,
+                  freeMargin: newBalance - (state.marginAccount.marginUsed - marginReleased),
+                  equity: newBalance + (state.marginAccount.unrealizedPnL || 0),
+                  realizedPnL: state.marginAccount.realizedPnL + realizedPnL,
+                  updatedAt: now,
+                }
+              : null,
+            marginPositions: nextMarginPositions,
+            activeTrades: [...state.stockPositions, ...nextMarginPositions],
+          };
+        });
+
         syncBalanceToSupabase(
           account.userId,
           newBalance,
           realizedPnL - fee,
           `FX Partial Close: ${position.symbol} (${qty} units)`
         );
-        
+
         return { success: true, realizedPnL };
       },
-      
+
       updateMarginPositionPrice: (symbol, price) => {
         set((state) => {
-          const updatedPositions = state.marginPositions.map(p => {
+          const updatedPositions = state.marginPositions.map((p) => {
             if (p.symbol !== symbol) return p;
-            
             const unrealizedPnL = calculateMarginPnL(p, price);
-            
             return {
               ...p,
               currentPrice: price,
@@ -781,110 +817,96 @@ export const useTradingAccountStore = create<TradingAccountState>()(
               updatedAt: new Date(),
             };
           });
-          
-          // Recalculate account unrealized PnL
-          const totalUnrealizedPnL = updatedPositions.reduce(
-            (sum, p) => sum + p.unrealizedPnL,
-            0
-          );
-          
+
+          const totalUnrealizedPnL = updatedPositions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
+
           return {
             marginPositions: updatedPositions,
+            activeTrades: [...state.stockPositions, ...updatedPositions],
             marginAccount: state.marginAccount
               ? {
                   ...state.marginAccount,
                   unrealizedPnL: totalUnrealizedPnL,
                   equity: state.marginAccount.balance + totalUnrealizedPnL,
-                  marginLevel: state.marginAccount.marginUsed > 0
-                    ? ((state.marginAccount.balance + totalUnrealizedPnL) / state.marginAccount.marginUsed) * 100
-                    : undefined,
+                  marginLevel:
+                    state.marginAccount.marginUsed > 0
+                      ? ((state.marginAccount.balance + totalUnrealizedPnL) /
+                          state.marginAccount.marginUsed) *
+                        100
+                      : undefined,
                 }
               : null,
           };
         });
       },
-      
+
       checkLiquidation: () => {
         const state = get();
         const account = state.marginAccount;
         if (!account || state.marginPositions.length === 0) return [];
-        
-        // Calculate total account metrics
+
         const totalUnrealizedPnL = state.marginPositions.reduce(
-          (sum, p) => sum + (p.unrealizedPnL || 0), 0
+          (sum, p) => sum + (p.unrealizedPnL || 0),
+          0
         );
         const totalUsedMargin = state.marginPositions.reduce(
-          (sum, p) => sum + (p.requiredMargin || 0), 0
+          (sum, p) => sum + (p.requiredMargin || 0),
+          0
         );
         const totalMaintenanceMargin = state.marginPositions.reduce(
-          (sum, p) => sum + (p.maintenanceMargin || p.requiredMargin * 0.5), 0
+          (sum, p) => sum + (p.maintenanceMargin || p.requiredMargin * 0.5),
+          0
         );
-        
-        // Account equity = balance + unrealized P&L
+
         const accountEquity = account.balance + totalUnrealizedPnL;
-        
-        // Margin Level % = (Equity / Used Margin) * 100
-        const marginLevelPercent = totalUsedMargin > 0 
-          ? (accountEquity / totalUsedMargin) * 100 
-          : Infinity;
-        
+        const marginLevelPercent = totalUsedMargin > 0 ? (accountEquity / totalUsedMargin) * 100 : Infinity;
+
         const positionsToLiquidate: string[] = [];
-        
-        // Stop-out level: typically 50% margin level
-        // When equity falls below maintenance margin, liquidate worst positions first
+
         if (accountEquity <= totalMaintenanceMargin || marginLevelPercent < 50) {
-          // Sort positions by P&L (worst first) for liquidation order
           const sortedPositions = [...state.marginPositions].sort(
             (a, b) => (a.unrealizedPnL || 0) - (b.unrealizedPnL || 0)
           );
-          
+
           let remainingEquity = accountEquity;
           let remainingMargin = totalUsedMargin;
-          
+
           for (const position of sortedPositions) {
-            // Check if we still need to liquidate
             if (remainingMargin > 0 && (remainingEquity / remainingMargin) * 100 < 100) {
               positionsToLiquidate.push(position.id);
               remainingMargin -= position.requiredMargin;
-              remainingEquity -= position.unrealizedPnL; // Remove this position's P&L impact
+              remainingEquity -= position.unrealizedPnL;
             }
           }
         }
-        
+
         return positionsToLiquidate;
       },
-      
-      // ==========================================
-      // PENDING ORDERS (Limit/Stop)
-      // ==========================================
-      
+
       placeLimitOrder: (params) => {
         const state = get();
-        const { symbol, name, type, side, orderType, qty, limitPrice, stopPrice, leverage, stopLoss, takeProfit } = params;
-        
-        // Determine which account to use
+        const { symbol, name, type, side, orderType, qty, limitPrice, stopPrice, leverage, stopLoss, takeProfit } =
+          params;
+
         const isStock = type === 'stock';
         const account = isStock ? state.spotAccount : state.marginAccount;
-        
+
         if (!account) return { success: false, error: 'Account not initialized' };
-        
-        // Calculate required funds/margin
+
         let requiredAmount: number;
         if (isStock) {
-          // For stocks: full purchase price
           requiredAmount = qty * limitPrice;
           if (requiredAmount > (account.cash || 0)) {
             return { success: false, error: 'Insufficient funds for limit order' };
           }
         } else {
-          // For margin: margin required
           const effectiveLeverage = leverage || account.leverage || 100;
           requiredAmount = (qty * limitPrice) / effectiveLeverage;
           if (requiredAmount > (account.freeMargin || 0)) {
             return { success: false, error: 'Insufficient margin for limit order' };
           }
         }
-        
+
         const now = new Date();
         const newOrder: Order = {
           id: `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -902,23 +924,23 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           createdAt: now,
           updatedAt: now,
         };
-        
+
         set((state) => ({
           openOrders: [...state.openOrders, newOrder],
         }));
-        
+
         return { success: true, orderId: newOrder.id };
       },
-      
+
       cancelOrder: (orderId) => {
         const state = get();
-        const order = state.openOrders.find(o => o.id === orderId);
-        
+        const order = state.openOrders.find((o) => o.id === orderId);
+
         if (!order) return { success: false, error: 'Order not found' };
         if (order.status !== 'pending' && order.status !== 'open') {
           return { success: false, error: 'Order cannot be cancelled' };
         }
-        
+
         const now = new Date();
         const cancelledOrder: Order = {
           ...order,
@@ -926,33 +948,31 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           cancelledAt: now,
           updatedAt: now,
         };
-        
+
         set((state) => ({
-          openOrders: state.openOrders.filter(o => o.id !== orderId),
+          openOrders: state.openOrders.filter((o) => o.id !== orderId),
           orderHistory: [cancelledOrder, ...state.orderHistory],
         }));
-        
+
         return { success: true };
       },
-      
+
       checkPendingOrders: (currentPrices) => {
         const state = get();
         const ordersToFill: Order[] = [];
-        
-        state.openOrders.forEach(order => {
+
+        state.openOrders.forEach((order) => {
           if (order.status !== 'pending' && order.status !== 'open') return;
-          
+
           const priceData = currentPrices[order.symbol];
           if (!priceData) return;
-          
+
           const { bid, ask } = priceData;
           let shouldFill = false;
           let fillPrice = 0;
-          
+
           switch (order.type) {
             case 'limit':
-              // Buy limit: fills when ask drops to or below limit price
-              // Sell limit: fills when bid rises to or above limit price
               if (order.side === 'buy' && ask <= (order.price || 0)) {
                 shouldFill = true;
                 fillPrice = order.price || ask;
@@ -961,10 +981,8 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                 fillPrice = order.price || bid;
               }
               break;
-              
+
             case 'stop':
-              // Buy stop: fills when ask rises to or above stop price
-              // Sell stop: fills when bid drops to or below stop price
               if (order.side === 'buy' && ask >= (order.stopPrice || 0)) {
                 shouldFill = true;
                 fillPrice = ask;
@@ -973,40 +991,42 @@ export const useTradingAccountStore = create<TradingAccountState>()(
                 fillPrice = bid;
               }
               break;
-              
+
             case 'stop_limit':
-              // Stop-limit: stop triggers first, then becomes limit order
-              if (order.side === 'buy' && ask >= (order.stopPrice || 0) && ask <= (order.price || 0)) {
+              if (
+                order.side === 'buy' &&
+                ask >= (order.stopPrice || 0) &&
+                ask <= (order.price || 0)
+              ) {
                 shouldFill = true;
                 fillPrice = order.price || ask;
-              } else if (order.side === 'sell' && bid <= (order.stopPrice || 0) && bid >= (order.price || 0)) {
+              } else if (
+                order.side === 'sell' &&
+                bid <= (order.stopPrice || 0) &&
+                bid >= (order.price || 0)
+              ) {
                 shouldFill = true;
                 fillPrice = order.price || bid;
               }
               break;
           }
-          
+
           if (shouldFill) {
             ordersToFill.push({ ...order, avgFillPrice: fillPrice });
           }
         });
-        
-        // Execute filled orders
-        ordersToFill.forEach(order => {
+
+        ordersToFill.forEach((order) => {
           const fillPrice = order.avgFillPrice || order.price || 0;
-          const fee = fillPrice * order.qty * 0.0001; // 0.01% fee
-          
-          // Remove from open orders
+
           set((state) => ({
-            openOrders: state.openOrders.filter(o => o.id !== order.id),
+            openOrders: state.openOrders.filter((o) => o.id !== order.id),
           }));
-          
-          // Execute the trade (this will add to order history via the trading functions)
-          // For simplicity, we call the market execution functions
-          // In a real implementation, you'd want to pass the order metadata
-          console.log(`[Trading] Limit order filled: ${order.side} ${order.qty} ${order.symbol} @ ${fillPrice}`);
-          
-          // Mark order as filled and add to history
+
+          console.log(
+            `[Trading] Limit order filled: ${order.side} ${order.qty} ${order.symbol} @ ${fillPrice}`
+          );
+
           const filledOrder: Order = {
             ...order,
             status: 'filled',
@@ -1015,54 +1035,48 @@ export const useTradingAccountStore = create<TradingAccountState>()(
             filledAt: new Date(),
             updatedAt: new Date(),
           };
-          
+
           set((state) => ({
             orderHistory: [filledOrder, ...state.orderHistory],
           }));
         });
       },
-      
-      // ==========================================
-      // SWAP/OVERNIGHT FEES
-      // ==========================================
-      
+
       applySwapFees: (swapRates) => {
         const state = get();
         const account = state.marginAccount;
         if (!account || state.marginPositions.length === 0) return;
-        
+
         let totalSwapCharged = 0;
         const now = new Date();
-        
-        // Apply swap to each position
-        const updatedPositions = state.marginPositions.map(position => {
+
+        const updatedPositions = state.marginPositions.map((position) => {
           const rates = swapRates[position.symbol];
           if (!rates) return position;
-          
-          // Swap is typically per lot per day
-          // Standard lot = 100,000 units
+
           const lots = position.qty / 100000;
           const swapRate = position.side === 'long' ? rates.longSwap : rates.shortSwap;
           const swapAmount = lots * swapRate;
-          
+
           totalSwapCharged += swapAmount;
-          
+
           return {
             ...position,
             accumulatedFunding: (position.accumulatedFunding || 0) + swapAmount,
             updatedAt: now,
           };
         });
-        
-        // Deduct swap from account balance
+
         if (totalSwapCharged !== 0) {
           const newBalance = account.balance - totalSwapCharged;
           const totalUnrealizedPnL = updatedPositions.reduce(
-            (sum, p) => sum + (p.unrealizedPnL || 0), 0
+            (sum, p) => sum + (p.unrealizedPnL || 0),
+            0
           );
-          
+
           set({
             marginPositions: updatedPositions,
+            activeTrades: [...get().stockPositions, ...updatedPositions],
             marginAccount: {
               ...account,
               balance: newBalance,
@@ -1072,72 +1086,58 @@ export const useTradingAccountStore = create<TradingAccountState>()(
               updatedAt: now,
             },
           });
-          
-          // Add ledger entry for swap
+
           get().addLedgerEntry({
             accountId: account.id,
             type: 'funding',
             amount: -totalSwapCharged,
             balanceBefore: account.balance,
             balanceAfter: newBalance,
-            description: `Overnight swap fees: ${totalSwapCharged >= 0 ? '-' : '+'}$${Math.abs(totalSwapCharged).toFixed(2)}`,
+            description: `Overnight swap fees: ${totalSwapCharged >= 0 ? '-' : '+'}$${Math.abs(
+              totalSwapCharged
+            ).toFixed(2)}`,
           });
-          
+
           console.log(`[Trading] Swap fees applied: $${totalSwapCharged.toFixed(2)}`);
         }
       },
-      
+
       addLedgerEntry: (entry) => {
         const newEntry: LedgerEntry = {
           ...entry,
           id: `ledger_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
           createdAt: new Date(),
         };
-        
+
         set((state) => ({
           ledger: [newEntry, ...state.ledger],
+          tradeHistory: [newEntry, ...state.tradeHistory],
         }));
       },
-      
+
       calculateSpotEquity: () => {
         const state = get();
         const account = state.spotAccount;
         if (!account) return 0;
-        
-        const marketValue = state.stockPositions.reduce(
-          (sum, p) => sum + p.marketValue,
-          0
-        );
-        
+
+        const marketValue = state.stockPositions.reduce((sum, p) => sum + p.marketValue, 0);
         return account.cash + marketValue;
       },
-      
+
       calculateMarginEquity: () => {
         const state = get();
         const account = state.marginAccount;
         if (!account) return 0;
-        
-        return calculateMarginEquity(
-          account.balance,
-          account.unrealizedPnL,
-          0,
-          0
-        );
+
+        return calculateMarginEquity(account.balance, account.unrealizedPnL, 0, 0);
       },
-      
+
       calculateTotalUnrealizedPnL: () => {
         const state = get();
-        
-        const stockPnL = state.stockPositions.reduce(
-          (sum, p) => sum + p.unrealizedPnL,
-          0
-        );
-        
-        const marginPnL = state.marginPositions.reduce(
-          (sum, p) => sum + p.unrealizedPnL,
-          0
-        );
-        
+
+        const stockPnL = state.stockPositions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
+        const marginPnL = state.marginPositions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
+
         return stockPnL + marginPnL;
       },
     }),
@@ -1148,7 +1148,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
         marginAccount: state.marginAccount,
         stockPositions: state.stockPositions,
         marginPositions: state.marginPositions,
-        ledger: state.ledger.slice(0, 100), // Keep last 100 entries
+        ledger: state.ledger.slice(0, 100),
       }),
     }
   )
@@ -1162,7 +1162,7 @@ interface InvestmentsState {
   investments: Investment[];
   totalInvested: number;
   totalEarned: number;
-  
+
   createInvestment: (investment: Omit<Investment, 'id' | 'createdAt'>) => void;
   updateInvestmentValue: (id: string, newValue: number, earned: number) => void;
   completeInvestment: (id: string) => void;
@@ -1174,23 +1174,23 @@ export const useInvestmentsStore = create<InvestmentsState>()(
       investments: [],
       totalInvested: 0,
       totalEarned: 0,
-      
+
       createInvestment: (investment) => {
         const newInvestment: Investment = {
           ...investment,
           id: `inv_${Date.now()}`,
           createdAt: new Date(),
         };
-        
+
         set((state) => ({
           investments: [...state.investments, newInvestment],
           totalInvested: state.totalInvested + investment.principal,
         }));
       },
-      
+
       updateInvestmentValue: (id, newValue, earned) => {
         set((state) => ({
-          investments: state.investments.map(inv =>
+          investments: state.investments.map((inv) =>
             inv.id === id
               ? { ...inv, currentValue: newValue, totalEarned: inv.totalEarned + earned }
               : inv
@@ -1198,10 +1198,10 @@ export const useInvestmentsStore = create<InvestmentsState>()(
           totalEarned: state.totalEarned + earned,
         }));
       },
-      
+
       completeInvestment: (id) => {
         set((state) => ({
-          investments: state.investments.map(inv =>
+          investments: state.investments.map((inv) =>
             inv.id === id ? { ...inv, status: 'completed' } : inv
           ),
         }));
@@ -1220,7 +1220,7 @@ export const useInvestmentsStore = create<InvestmentsState>()(
 interface AirdropsState {
   participations: AirdropParticipation[];
   totalPointsEarned: number;
-  
+
   joinAirdrop: (airdropId: string, airdropName: string, totalTasks: number) => void;
   completeTask: (participationId: string, taskId: string, points: number) => void;
   claimAirdrop: (participationId: string) => void;
@@ -1231,7 +1231,7 @@ export const useAirdropsStore = create<AirdropsState>()(
     (set) => ({
       participations: [],
       totalPointsEarned: 0,
-      
+
       joinAirdrop: (airdropId, airdropName, totalTasks) => {
         const participation: AirdropParticipation = {
           id: `airdrop_${Date.now()}`,
@@ -1244,15 +1244,15 @@ export const useAirdropsStore = create<AirdropsState>()(
           status: 'active',
           createdAt: new Date(),
         };
-        
+
         set((state) => ({
           participations: [...state.participations, participation],
         }));
       },
-      
+
       completeTask: (participationId, taskId, points) => {
         set((state) => ({
-          participations: state.participations.map(p =>
+          participations: state.participations.map((p) =>
             p.id === participationId
               ? {
                   ...p,
@@ -1265,13 +1265,11 @@ export const useAirdropsStore = create<AirdropsState>()(
           totalPointsEarned: state.totalPointsEarned + points,
         }));
       },
-      
+
       claimAirdrop: (participationId) => {
         set((state) => ({
-          participations: state.participations.map(p =>
-            p.id === participationId
-              ? { ...p, status: 'claimed', claimedAt: new Date() }
-              : p
+          participations: state.participations.map((p) =>
+            p.id === participationId ? { ...p, status: 'claimed', claimedAt: new Date() } : p
           ),
         }));
       },
@@ -1288,7 +1286,7 @@ export const useAirdropsStore = create<AirdropsState>()(
 
 interface DepositAddressesState {
   addresses: DepositAddress[];
-  
+
   getAddress: (currency: string, network: string) => DepositAddress | undefined;
   updateAddress: (id: string, newAddress: string, adminId: string) => void;
   addAddress: (address: Omit<DepositAddress, 'id' | 'updatedAt'>) => void;
@@ -1340,38 +1338,36 @@ export const useDepositAddressesStore = create<DepositAddressesState>()(
           updatedAt: new Date(),
         },
       ],
-      
+
       getAddress: (currency, network) => {
         return get().addresses.find(
-          a => a.currency === currency && a.network === network && a.isActive
+          (a) => a.currency === currency && a.network === network && a.isActive
         );
       },
-      
+
       updateAddress: (id, newAddress, adminId) => {
         set((state) => ({
-          addresses: state.addresses.map(a =>
-            a.id === id
-              ? { ...a, address: newAddress, updatedBy: adminId, updatedAt: new Date() }
-              : a
+          addresses: state.addresses.map((a) =>
+            a.id === id ? { ...a, address: newAddress, updatedBy: adminId, updatedAt: new Date() } : a
           ),
         }));
       },
-      
+
       addAddress: (address) => {
-        const newAddress: DepositAddress = {
+        const newAddressObj: DepositAddress = {
           ...address,
           id: `${address.currency.toLowerCase()}_${address.network.toLowerCase()}_${Date.now()}`,
           updatedAt: new Date(),
         };
-        
+
         set((state) => ({
-          addresses: [...state.addresses, newAddress],
+          addresses: [...state.addresses, newAddressObj],
         }));
       },
-      
+
       toggleActive: (id) => {
         set((state) => ({
-          addresses: state.addresses.map(a =>
+          addresses: state.addresses.map((a) =>
             a.id === id ? { ...a, isActive: !a.isActive, updatedAt: new Date() } : a
           ),
         }));
