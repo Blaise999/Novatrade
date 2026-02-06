@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyOTPCode } from "@/lib/email";
+import { verifyOTPCode, isEmailConfigured } from "@/lib/email";
+import { isSupabaseConfigured } from "@/lib/supabase/client";
 
 // ✅ Vercel/Next route handler hints
 export const runtime = "nodejs";
@@ -37,6 +38,16 @@ export async function POST(request: NextRequest) {
         { success: false, error: "Invalid OTP format. Must be 6 digits." },
         { status: 400 }
       );
+    }
+
+    // ✅ DEMO MODE: If email service or Supabase not configured, accept any 6-digit code
+    if (!isEmailConfigured() || !isSupabaseConfigured()) {
+      console.log(`[verify-otp] Demo mode: accepting code ${otp} for ${email}`);
+      return NextResponse.json({
+        success: true,
+        message: "Verification successful (demo mode)",
+        demo: true,
+      });
     }
 
     console.log("[verify-otp] start", { email, type });

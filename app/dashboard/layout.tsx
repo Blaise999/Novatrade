@@ -390,6 +390,24 @@ export default function DashboardLayout({
               </p>
             </div>
 
+            {/* Wallet Status */}
+            {user.walletAddress ? (
+              <div className="hidden md:flex items-center gap-2 px-3 py-2 bg-profit/10 rounded-xl border border-profit/20">
+                <div className="w-2 h-2 rounded-full bg-profit animate-pulse" />
+                <span className="text-xs font-medium text-profit">
+                  {user.walletAddress.slice(0, 6)}…{user.walletAddress.slice(-4)}
+                </span>
+              </div>
+            ) : (
+              <Link
+                href="/connect-wallet"
+                className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
+              >
+                <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
+              </Link>
+            )}
+
             {/* Deposit Button */}
             <Link
               href="/dashboard/wallet"
@@ -439,6 +457,14 @@ export default function DashboardLayout({
                         {user.firstName || user.email.split('@')[0]}
                       </p>
                       <p className="text-xs text-slate-500">{user.email}</p>
+                      {user.walletAddress && (
+                        <div className="flex items-center gap-1.5 mt-1.5">
+                          <div className="w-1.5 h-1.5 rounded-full bg-profit" />
+                          <p className="text-xs text-profit font-mono">
+                            {user.walletAddress.slice(0, 6)}…{user.walletAddress.slice(-4)}
+                          </p>
+                        </div>
+                      )}
                     </div>
                     <div className="py-2">
                       <Link

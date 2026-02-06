@@ -198,7 +198,7 @@ interface AuthStore {
 export const useStore = create<AuthStore>((set, get) => ({
   user: null,
   isAuthenticated: false,
-  isLoading: false,
+  isLoading: true,  // ✅ Start true — prevents redirect before checkSession runs
   error: null,
 
   deposits: [],
@@ -220,7 +220,10 @@ export const useStore = create<AuthStore>((set, get) => ({
         localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: userWithoutPw, isAuthenticated: true });
-        return { success: true, redirect: '/dashboard' };
+        
+        // ✅ Respect registration status for proper redirect
+        const status = (userWithoutPw.registrationStatus as RegistrationStatus) || 'complete';
+        return { success: true, redirect: getRegistrationRedirect(status) };
       }
 
       const authRes = await withTimeout(
@@ -334,7 +337,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'complete',
+          registrationStatus: 'pending_kyc',
           isActive: true,
           createdAt: new Date().toISOString(),
         };
@@ -445,6 +448,15 @@ export const useStore = create<AuthStore>((set, get) => ({
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, ...updates };
         localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        // ✅ Also update the users array so changes survive re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+          const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
+          if (idx >= 0) {
+            users[idx] = { ...users[idx], ...updates };
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
+          }
+        } catch {}
         set({ user: updatedUser });
         return true;
       }
@@ -482,6 +494,15 @@ export const useStore = create<AuthStore>((set, get) => ({
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, registrationStatus: status };
         localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        // ✅ Also update the users array so status survives re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+          const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
+          if (idx >= 0) {
+            users[idx] = { ...users[idx], registrationStatus: status };
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
+          }
+        } catch {}
         set({ user: updatedUser });
         return true;
       }

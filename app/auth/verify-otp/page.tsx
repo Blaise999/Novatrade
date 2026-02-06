@@ -200,13 +200,13 @@ export default function VerifyOTPPage() {
 
       pushLog("signup start", { email: otpEmail, firstName, lastName });
 
-      const signupSuccess = await withTimeout(signup(otpEmail, otpPassword, firstName, lastName), 25000, "supabase.signup");
+      const signupResult = await withTimeout(signup(otpEmail, otpPassword, firstName, lastName), 25000, "supabase.signup");
 
-      pushLog("signup result", { signupSuccess });
+      pushLog("signup result", { signupResult });
 
-      if (!signupSuccess) {
+      if (!signupResult || !signupResult.success) {
         // ✅ IMPORTANT: don't let it auto-verify again with same code forever
-        setError("Account creation failed. If this email already exists, go to Login.");
+        setError(signupResult?.error || "Account creation failed. If this email already exists, go to Login.");
         pushLog("signup failed -> redirect login in 2s");
         setTimeout(() => router.push("/auth/login"), 2000);
         return;
@@ -433,6 +433,13 @@ export default function VerifyOTPPage() {
       <div className="bg-white/5 rounded-xl p-4 border border-white/5">
         <p className="text-xs text-slate-500 text-center">
           💡 <strong className="text-slate-400">Tip:</strong> Check your spam folder. Code expires in 10 minutes.
+        </p>
+      </div>
+
+      {/* Demo mode hint */}
+      <div className="bg-gold/5 rounded-xl p-3 border border-gold/10">
+        <p className="text-xs text-gold/80 text-center">
+          🧪 <strong>Demo mode:</strong> Enter any 6-digit code (e.g. 123456) to continue.
         </p>
       </div>
     </motion.div>

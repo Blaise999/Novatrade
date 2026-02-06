@@ -384,7 +384,14 @@ export const useStore = create<AuthStore>((set, get) => ({
         localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: normalizeUser(userWithoutPw), isAuthenticated: true });
-        return { success: true, redirect: '/dashboard' };
+        
+        // ✅ Respect registration status for proper redirect
+        const regStatus = userWithoutPw.registrationStatus || 'complete';
+        const redirect = regStatus === 'pending_kyc' ? '/kyc'
+          : regStatus === 'pending_wallet' ? '/connect-wallet'
+          : regStatus === 'pending_verification' ? '/auth/verify-otp'
+          : '/dashboard';
+        return { success: true, redirect };
       }
 
       const authRes = await withTimeout(
@@ -500,7 +507,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'complete',
+          registrationStatus: 'pending_kyc',
           isActive: true,
           createdAt: new Date().toISOString(),
         });

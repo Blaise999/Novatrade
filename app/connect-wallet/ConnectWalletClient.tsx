@@ -34,7 +34,7 @@ export default function ConnectWalletClient() {
   const router = useRouter();
 
   // ✅ include updateProfile so we can save wallet address
-  const { updateRegistrationStatus, updateProfile, isAuthenticated } = useStore();
+  const { updateRegistrationStatus, updateProfile, isAuthenticated, isLoading: authLoading } = useStore();
 
   const { address, isConnected, isConnecting, chain } = useAccount();
   const { disconnect } = useDisconnect();
@@ -50,6 +50,9 @@ export default function ConnectWalletClient() {
     const completeRegistration = async () => {
       // guard
       if (!isConnected || !address || hasRedirected) return;
+
+      // Wait for auth to load
+      if (authLoading) return;
 
       // Optional safety: don’t let people “complete” without being logged in
       if (!isAuthenticated) {
@@ -80,6 +83,7 @@ export default function ConnectWalletClient() {
     updateRegistrationStatus,
     updateProfile,
     isAuthenticated,
+    authLoading,
   ]);
 
   const handleSkip = async () => {

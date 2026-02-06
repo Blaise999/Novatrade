@@ -63,7 +63,7 @@ const nationalities = [
 
 export default function KYCPage() {
   const router = useRouter();
-  const { user, updateKycStatus, updateRegistrationStatus } = useStore();
+  const { user, isLoading, updateKycStatus, updateRegistrationStatus } = useStore();
   const { currentStep, data, updateData, setStep, setSubmitting, isSubmitting } = useKYCStore();
   
   const [idFrontFile, setIdFrontFile] = useState<File | null>(null);
@@ -71,12 +71,12 @@ export default function KYCPage() {
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
   const [proofOfAddressFile, setProofOfAddressFile] = useState<File | null>(null);
 
-  // Check authentication
+  // Check authentication (wait for loading to finish first)
   useEffect(() => {
-    if (!user) {
+    if (!isLoading && !user) {
       router.push('/auth/login');
     }
-  }, [user, router]);
+  }, [user, isLoading, router]);
 
   const steps = [
     { id: 1, title: 'Personal Info', icon: User },
@@ -146,7 +146,10 @@ export default function KYCPage() {
           </Link>
           
           <button
-            onClick={() => router.push('/connect-wallet')}
+            onClick={async () => {
+              await updateRegistrationStatus('pending_wallet');
+              router.push('/connect-wallet');
+            }}
             className="text-sm text-slate-400 hover:text-cream transition-colors"
           >
             Skip for now

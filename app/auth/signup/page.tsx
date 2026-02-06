@@ -157,7 +157,7 @@ function PasswordStrength({ password }: { password: string }) {
 // ============================================
 export default function SignupPage() {
   const router = useRouter();
-  const { setUser } = useAuthStore();
+  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useAuthStore();
   const { sendOTP } = useEmail();
 
   const [showPassword, setShowPassword] = useState(false);
@@ -182,15 +182,13 @@ export default function SignupPage() {
     setError(null);
 
     try {
-      // Store user data in auth store for verify-otp page
-      setUser({
-        email: data.email.toLowerCase(),
-        name: `${data.firstName} ${data.lastName}`,
-        firstName: data.firstName,
-        lastName: data.lastName,
-        password: data.password,
-        redirectUrl: '/dashboard',
-      });
+      // Store signup data in auth store for verify-otp page
+      // NOTE: Use the dedicated OTP fields — NOT setUser (which sets
+      // isAuthenticated:true prematurely and leaks password into user state)
+      setOtpEmail(data.email.toLowerCase());
+      setOtpName(`${data.firstName} ${data.lastName}`);
+      setOtpPassword(data.password);
+      setRedirectUrl('/kyc');
 
       // Send OTP email
       const otpResult = await sendOTP(data.email.toLowerCase(), `${data.firstName} ${data.lastName}`);
@@ -206,6 +204,7 @@ export default function SignupPage() {
     } catch (err: any) {
       console.error('Signup error:', err);
       setError(err?.message || 'Something went wrong. Please try again.');
+    } finally {
       setIsLoading(false);
     }
   };

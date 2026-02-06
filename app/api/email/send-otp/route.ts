@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sendOTPEmail } from "@/lib/email";
+import { sendOTPEmail, isEmailConfigured } from "@/lib/email";
+import { isSupabaseConfigured } from "@/lib/supabase/client";
 
 const ALLOWED_OTP_TYPES = new Set([
   "email_verification",
@@ -48,6 +49,20 @@ export async function POST(request: NextRequest) {
         { success: false, error: `Invalid OTP type: ${type}` },
         { status: 400 }
       );
+    }
+
+    // ✅ DEMO MODE: If email service or Supabase not configured, return success
+    // so the signup → OTP flow still works. The verify-otp endpoint will accept
+    // any 6-digit code in demo mode.
+    if (!isEmailConfigured() || !isSupabaseConfigured()) {
+      console.log(`[API] Demo mode: OTP "sent" to ${email} (use any 6-digit code to verify)`);
+      return NextResponse.json({
+        success: true,
+        message: "OTP sent (demo mode)",
+        demo: true,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        requestId,
+      });
     }
 
     const result = await sendOTPEmail(email, name, type as any);
