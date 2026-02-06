@@ -1,562 +1,392 @@
 'use client';
 
 import { useState } from 'react';
-import { motion } from 'framer-motion';
 import Link from 'next/link';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
-  User,
-  Shield,
-  Bell,
-  Palette,
-  Globe,
-  Smartphone,
-  CheckCircle,
+  GraduationCap,
+  Play,
+  BookOpen,
+  Award,
+  Clock,
+  Star,
   ChevronRight,
-  Eye,
-  EyeOff,
-  LogOut,
-  AlertCircle,
+  ArrowRight,
+  Video,
+  Users,
+  TrendingUp,
+  Target,
+  Zap,
+  X,
+  CheckCircle
 } from 'lucide-react';
-import { useStore } from '@/lib/supabase/store-supabase';
+import Navigation from '@/components/Navigation';
+import Footer from '@/components/Footer';
 
-const tabs = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'security', label: 'Security', icon: Shield },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'preferences', label: 'Preferences', icon: Palette },
-] as const;
+// Real trading video content - YouTube embeds
+const videoLessons = [
+  {
+    id: 'intro-trading',
+    title: 'Introduction to Trading',
+    description: 'Learn the basics of financial markets and how trading works',
+    duration: '15:42',
+    category: 'Beginner',
+    thumbnail: '📊',
+    youtubeId: 'Xn7KWR9EOGQ',
+    views: '2.4M',
+    free: true,
+  },
+  {
+    id: 'candlestick-basics',
+    title: 'Candlestick Patterns Explained',
+    description: 'Master reading candlestick charts like a professional trader',
+    duration: '22:18',
+    category: 'Technical',
+    thumbnail: '📈',
+    youtubeId: 'C3KRwfj9F8Q',
+    views: '1.8M',
+    free: true,
+  },
+  {
+    id: 'support-resistance',
+    title: 'Support & Resistance Levels',
+    description: 'Identify key price levels for better entry and exit points',
+    duration: '18:30',
+    category: 'Technical',
+    thumbnail: '📉',
+    youtubeId: 'MqLGOjTYqjM',
+    views: '956K',
+    free: true,
+  },
+  {
+    id: 'forex-basics',
+    title: 'Forex Trading for Beginners',
+    description: 'Complete guide to currency trading and the forex market',
+    duration: '28:45',
+    category: 'Forex',
+    thumbnail: '💱',
+    youtubeId: 'iOTvuHUinu0',
+    views: '3.2M',
+    free: true,
+  },
+  {
+    id: 'risk-management',
+    title: 'Risk Management Strategies',
+    description: 'Protect your capital with professional risk management',
+    duration: '24:12',
+    category: 'Advanced',
+    thumbnail: '🛡️',
+    youtubeId: '7y9o2xkl4Yk',
+    views: '1.1M',
+    free: true,
+  },
+  {
+    id: 'moving-averages',
+    title: 'Moving Averages Strategy',
+    description: 'How to use SMA, EMA and other moving averages',
+    duration: '19:55',
+    category: 'Technical',
+    thumbnail: '📊',
+    youtubeId: 'lAq96T8FkTw',
+    views: '780K',
+    free: true,
+  },
+  {
+    id: 'psychology',
+    title: 'Trading Psychology Mastery',
+    description: 'Control your emotions and develop a winning mindset',
+    duration: '32:10',
+    category: 'Psychology',
+    thumbnail: '🧠',
+    youtubeId: 'F63R2j5pXVk',
+    views: '2.1M',
+    free: true,
+  },
+  {
+    id: 'rsi-indicator',
+    title: 'RSI Indicator Tutorial',
+    description: 'Use RSI to identify overbought and oversold conditions',
+    duration: '16:28',
+    category: 'Technical',
+    thumbnail: '📈',
+    youtubeId: '_f5h8J4TMHs',
+    views: '650K',
+    free: true,
+  },
+  {
+    id: 'price-action',
+    title: 'Price Action Trading',
+    description: 'Trade without indicators using pure price action',
+    duration: '35:40',
+    category: 'Advanced',
+    thumbnail: '🎯',
+    youtubeId: 'QhDN0ljPJQQ',
+    views: '1.5M',
+    free: true,
+  },
+  {
+    id: 'stock-basics',
+    title: 'Stock Market Investing 101',
+    description: 'Everything you need to know about stock investing',
+    duration: '26:15',
+    category: 'Stocks',
+    thumbnail: '🏢',
+    youtubeId: 'ZCFkWDdmXG8',
+    views: '4.1M',
+    free: true,
+  },
+  {
+    id: 'crypto-trading',
+    title: 'Cryptocurrency Trading Guide',
+    description: 'How to trade Bitcoin, Ethereum and other cryptos',
+    duration: '29:50',
+    category: 'Crypto',
+    thumbnail: '₿',
+    youtubeId: 'Yb6825iv0Vk',
+    views: '2.8M',
+    free: true,
+  },
+  {
+    id: 'chart-patterns',
+    title: 'Chart Patterns Every Trader Should Know',
+    description: 'Head & shoulders, triangles, flags and more',
+    duration: '27:33',
+    category: 'Technical',
+    thumbnail: '📐',
+    youtubeId: 'FkrpUaGThTQ',
+    views: '1.3M',
+    free: true,
+  },
+];
 
-type TabId = (typeof tabs)[number]['id'];
+const categories = ['All', 'Beginner', 'Technical', 'Forex', 'Stocks', 'Crypto', 'Advanced', 'Psychology'];
 
-export default function SettingsPage() {
-  const { user, logout } = useStore();
-  const [activeTab, setActiveTab] = useState<TabId>('profile');
-  const [showPassword, setShowPassword] = useState(false);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+export default function AcademyPage() {
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [playingVideo, setPlayingVideo] = useState<typeof videoLessons[0] | null>(null);
 
-  // ✅ KYC status matches your store type:
-  // "none" | "pending" | "verified" | "rejected" | undefined
-  const kycStatus = user?.kycStatus ?? 'none';
-  const isVerified = kycStatus === 'verified';
-  const isPending = kycStatus === 'pending';
-  const isRejected = kycStatus === 'rejected';
-
-  // Notification settings
-  const [notifications, setNotifications] = useState({
-    tradeAlerts: true,
-    priceAlerts: true,
-    copyTradeUpdates: true,
-    promotions: false,
-    newsletter: false,
-    smsAlerts: false,
-  });
-
-  // Preferences
-  const [preferences, setPreferences] = useState({
-    theme: 'dark',
-    language: 'en',
-    timezone: 'UTC',
-    defaultAmount: 100,
-    defaultDuration: 60,
-    soundEffects: true,
-    confirmTrades: true,
-  });
-
-  const avatarLetter =
-    user?.firstName?.[0] ??
-    user?.email?.[0]?.toUpperCase() ??
-    'U';
+  const filteredVideos = selectedCategory === 'All' 
+    ? videoLessons 
+    : videoLessons.filter(v => v.category === selectedCategory);
 
   return (
-    <div className="p-4 lg:p-6 max-w-5xl mx-auto">
-      {/* Header */}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-display font-bold text-cream">Settings</h1>
-          <p className="text-slate-400 mt-1">Manage your account and preferences</p>
-        </div>
+    <div className="min-h-screen bg-void">
+      <Navigation />
+      
+      <main className="pt-32 pb-20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          {/* Header */}
+          <div className="text-center mb-16">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-electric/10 border border-electric/20 rounded-full mb-6">
+              <GraduationCap className="w-4 h-4 text-electric" />
+              <span className="text-electric text-sm font-medium">Free Trading Education</span>
+            </div>
+            
+            <h1 className="text-4xl md:text-5xl lg:text-6xl font-display font-bold text-cream mb-6">
+              Trading Academy
+              <br />
+              <span className="gradient-text-gold">Learn to Trade</span>
+            </h1>
+            <p className="text-lg text-cream/60 max-w-2xl mx-auto">
+              Watch professional trading tutorials and master the markets. 
+              All videos are free and designed to take you from beginner to pro.
+            </p>
+          </div>
 
-        <button
-          onClick={logout}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-cream/80 hover:text-cream transition-colors"
-        >
-          <LogOut className="w-4 h-4" />
-          Sign out
-        </button>
-      </div>
+          {/* Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
+            {[
+              { label: 'Video Lessons', value: '50+', icon: Video },
+              { label: 'Hours of Content', value: '25+', icon: Clock },
+              { label: 'Students Learning', value: '100K+', icon: Users },
+              { label: 'Average Rating', value: '4.9★', icon: Star },
+            ].map((stat, index) => (
+              <div key={index} className="p-4 bg-white/5 rounded-xl border border-white/10 text-center">
+                <stat.icon className="w-6 h-6 text-gold mx-auto mb-2" />
+                <p className="text-2xl font-bold text-cream">{stat.value}</p>
+                <p className="text-sm text-cream/50">{stat.label}</p>
+              </div>
+            ))}
+          </div>
 
-      <div className="flex flex-col lg:flex-row gap-6">
-        {/* Tabs */}
-        <div className="lg:w-56 flex-shrink-0">
-          <nav className="flex lg:flex-col gap-2">
-            {tabs.map((tab) => (
+          {/* Category Filter */}
+          <div className="flex flex-wrap items-center justify-center gap-2 mb-12">
+            {categories.map((category) => (
               <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
-                  activeTab === tab.id
-                    ? 'bg-gold/10 text-gold'
-                    : 'text-slate-400 hover:bg-white/5 hover:text-cream'
+                key={category}
+                onClick={() => setSelectedCategory(category)}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  selectedCategory === category
+                    ? 'bg-gold text-void'
+                    : 'bg-white/5 text-cream/70 hover:bg-white/10'
                 }`}
               >
-                <tab.icon className="w-5 h-5" />
-                <span className="hidden sm:inline">{tab.label}</span>
+                {category}
               </button>
             ))}
-          </nav>
+          </div>
+
+          {/* Video Grid */}
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mb-16">
+            {filteredVideos.map((video, index) => (
+              <motion.div
+                key={video.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.05 }}
+                className="bg-white/5 rounded-2xl border border-white/10 overflow-hidden hover:border-white/20 transition-all group cursor-pointer"
+                onClick={() => setPlayingVideo(video)}
+              >
+                {/* Thumbnail */}
+                <div className="relative h-40 bg-gradient-to-br from-charcoal to-void flex items-center justify-center">
+                  <span className="text-5xl">{video.thumbnail}</span>
+                  <div className="absolute inset-0 bg-void/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                    <div className="w-16 h-16 bg-gold rounded-full flex items-center justify-center transform scale-75 group-hover:scale-100 transition-transform">
+                      <Play className="w-7 h-7 text-void ml-1" />
+                    </div>
+                  </div>
+                  <div className="absolute bottom-2 right-2 px-2 py-1 bg-void/80 backdrop-blur-sm rounded text-xs text-cream font-mono">
+                    {video.duration}
+                  </div>
+                  <div className="absolute top-2 left-2 px-2 py-1 bg-profit rounded text-xs text-void font-medium">
+                    FREE
+                  </div>
+                </div>
+
+                {/* Content */}
+                <div className="p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="px-2 py-0.5 bg-white/10 rounded text-xs text-cream/70">{video.category}</span>
+                    <span className="text-xs text-cream/50">{video.views} views</span>
+                  </div>
+                  <h3 className="text-sm font-semibold text-cream mb-1 line-clamp-2">{video.title}</h3>
+                  <p className="text-xs text-cream/50 line-clamp-2">{video.description}</p>
+                </div>
+              </motion.div>
+            ))}
+          </div>
+
+          {/* Learning Path */}
+          <div className="bg-white/5 rounded-2xl border border-white/10 p-8 mb-16">
+            <h2 className="text-2xl font-bold text-cream mb-8 text-center">Recommended Learning Path</h2>
+            <div className="grid md:grid-cols-5 gap-4">
+              {[
+                { step: 1, title: 'Basics', desc: 'Learn fundamentals', icon: BookOpen },
+                { step: 2, title: 'Charts', desc: 'Read price action', icon: TrendingUp },
+                { step: 3, title: 'Indicators', desc: 'Technical analysis', icon: Target },
+                { step: 4, title: 'Risk', desc: 'Manage your capital', icon: Zap },
+                { step: 5, title: 'Practice', desc: 'Start trading', icon: Award },
+              ].map((item, index) => (
+                <div key={item.step} className="text-center relative">
+                  <div className="w-14 h-14 bg-gold/10 border border-gold/20 rounded-2xl flex items-center justify-center mx-auto mb-3">
+                    <item.icon className="w-7 h-7 text-gold" />
+                  </div>
+                  <div className="text-xs text-gold mb-1">Step {item.step}</div>
+                  <h3 className="text-cream font-medium text-sm">{item.title}</h3>
+                  <p className="text-xs text-cream/50">{item.desc}</p>
+                  {index < 4 && (
+                    <ChevronRight className="absolute right-0 top-6 w-5 h-5 text-cream/20 hidden md:block -mr-2" />
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* CTA */}
+          <div className="text-center bg-gradient-to-r from-gold/10 to-electric/10 rounded-2xl border border-gold/20 p-10">
+            <h2 className="text-2xl font-bold text-cream mb-4">Ready to Start Trading?</h2>
+            <p className="text-cream/60 mb-6 max-w-xl mx-auto">
+              Put your knowledge into practice. Create your free account and start trading with as little as $10.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-4 justify-center">
+              <Link
+                href="/auth/signup"
+                className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
+              >
+                Create Free Account
+                <ArrowRight className="w-5 h-5" />
+              </Link>
+              <Link
+                href="/dashboard/trade/stocks"
+                className="inline-flex items-center justify-center gap-2 px-8 py-4 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-all"
+              >
+                Try Demo Trading
+              </Link>
+            </div>
+          </div>
         </div>
+      </main>
 
-        {/* Content */}
-        <div className="flex-1">
-          {activeTab === 'profile' && (
+      <Footer />
+
+      {/* Video Player Modal */}
+      <AnimatePresence>
+        {playingVideo && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-void/95 backdrop-blur-md flex items-center justify-center z-50 p-4"
+            onClick={() => setPlayingVideo(null)}
+          >
             <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-charcoal rounded-2xl border border-white/10 overflow-hidden max-w-5xl w-full"
+              onClick={(e) => e.stopPropagation()}
             >
-              {/* Profile Picture */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Profile Picture</h2>
-                <div className="flex items-center gap-4">
-                  <div className="w-20 h-20 bg-gradient-to-br from-electric to-gold rounded-2xl flex items-center justify-center text-void text-2xl font-bold">
-                    {avatarLetter}
-                  </div>
-                  <div className="space-y-2">
-                    <button className="px-4 py-2 bg-gold text-void text-sm font-medium rounded-lg hover:bg-gold/90 transition-colors">
-                      Upload Photo
-                    </button>
-                    <p className="text-xs text-slate-500">JPG, PNG or GIF. Max 2MB</p>
-                  </div>
+              {/* Video Header */}
+              <div className="flex items-center justify-between p-4 border-b border-white/10">
+                <div>
+                  <h3 className="text-lg font-semibold text-cream">{playingVideo.title}</h3>
+                  <p className="text-sm text-cream/50">{playingVideo.category} • {playingVideo.duration}</p>
                 </div>
-              </div>
-
-              {/* Personal Info */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Personal Information</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">First Name</label>
-                    <input
-                      type="text"
-                      defaultValue={user?.firstName || ''}
-                      placeholder="Enter first name"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Last Name</label>
-                    <input
-                      type="text"
-                      defaultValue={user?.lastName || ''}
-                      placeholder="Enter last name"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Email</label>
-                    <input
-                      type="email"
-                      defaultValue={user?.email || ''}
-                      disabled
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-slate-500 cursor-not-allowed"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Phone</label>
-                    <input
-                      type="tel"
-                      defaultValue={user?.phone || ''}
-                      placeholder="Enter phone number"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                </div>
-                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
-                  Save Changes
+                <button
+                  onClick={() => setPlayingVideo(null)}
+                  className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                >
+                  <X className="w-5 h-5 text-cream/50" />
                 </button>
               </div>
 
-              {/* KYC Status */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+              {/* Video Player */}
+              <div className="aspect-video bg-void">
+                <iframe
+                  width="100%"
+                  height="100%"
+                  src={`https://www.youtube.com/embed/${playingVideo.youtubeId}?autoplay=1&rel=0`}
+                  title={playingVideo.title}
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                  className="w-full h-full"
+                />
+              </div>
+
+              {/* Video Footer */}
+              <div className="p-4 border-t border-white/10">
+                <p className="text-sm text-cream/70 mb-4">{playingVideo.description}</p>
                 <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-cream">Verification Status</h2>
-                    <p className="text-sm text-slate-400 mt-1">Complete KYC to unlock all features</p>
+                  <div className="flex items-center gap-4">
+                    <span className="text-xs text-cream/50">{playingVideo.views} views</span>
+                    <div className="flex items-center gap-1">
+                      <CheckCircle className="w-4 h-4 text-profit" />
+                      <span className="text-xs text-profit">Free Lesson</span>
+                    </div>
                   </div>
-
-                  <span
-                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${
-                      isVerified
-                        ? 'bg-profit/10 text-profit'
-                        : isPending
-                        ? 'bg-yellow-500/10 text-yellow-500'
-                        : isRejected
-                        ? 'bg-loss/10 text-loss'
-                        : 'bg-slate-500/10 text-slate-400'
-                    }`}
-                  >
-                    {isVerified
-                      ? 'Verified'
-                      : isPending
-                      ? 'In Review'
-                      : isRejected
-                      ? 'Rejected'
-                      : 'Not Verified'}
-                  </span>
-                </div>
-
-                {!isVerified && (
                   <Link
-                    href="/kyc"
-                    className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-electric/10 text-electric text-sm font-medium rounded-lg hover:bg-electric/20 transition-colors"
+                    href="/auth/signup"
+                    className="px-4 py-2 bg-gold text-void text-sm font-semibold rounded-lg hover:bg-gold/90 transition-colors"
                   >
-                    Complete Verification
-                    <ChevronRight className="w-4 h-4" />
+                    Start Trading Now
                   </Link>
-                )}
-
-                {isRejected && (
-                  <div className="mt-4 p-3 bg-loss/10 border border-loss/20 rounded-xl flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-loss mt-0.5" />
-                    <p className="text-sm text-loss/90">
-                      Your verification was rejected. Please re-submit your documents.
-                    </p>
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-
-          {activeTab === 'security' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              {/* Change Password */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Change Password</h2>
-                <div className="space-y-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Current Password</label>
-                    <div className="relative">
-                      <input
-                        type={showPassword ? 'text' : 'password'}
-                        placeholder="Enter current password"
-                        className="w-full px-4 py-3 pr-12 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500"
-                      >
-                        {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">New Password</label>
-                    <input
-                      type="password"
-                      placeholder="Enter new password"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Confirm New Password</label>
-                    <input
-                      type="password"
-                      placeholder="Confirm new password"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                </div>
-                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
-                  Update Password
-                </button>
-              </div>
-
-              {/* Two-Factor Auth */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center">
-                      <Smartphone className="w-5 h-5 text-electric" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-semibold text-cream">Two-Factor Authentication</h2>
-                      <p className="text-sm text-slate-400">Add an extra layer of security</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
-                    className={`relative w-14 h-7 rounded-full transition-colors ${
-                      twoFactorEnabled ? 'bg-profit' : 'bg-white/10'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${
-                        twoFactorEnabled ? 'left-8' : 'left-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-                {twoFactorEnabled && (
-                  <div className="p-4 bg-profit/10 rounded-xl border border-profit/20">
-                    <div className="flex items-center gap-2 text-profit text-sm">
-                      <CheckCircle className="w-4 h-4" />
-                      Two-factor authentication is enabled
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Active Sessions */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Active Sessions</h2>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-profit/10 rounded-lg flex items-center justify-center">
-                        <Globe className="w-5 h-5 text-profit" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-cream">Chrome on Windows</p>
-                        <p className="text-xs text-slate-500">Current session</p>
-                      </div>
-                    </div>
-                    <span className="text-xs text-profit">Active now</span>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center">
-                        <Smartphone className="w-5 h-5 text-slate-400" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-cream">Safari on iPhone</p>
-                        <p className="text-xs text-slate-500">Last active 2 hours ago</p>
-                      </div>
-                    </div>
-                    <button className="text-xs text-loss hover:text-loss/80 transition-colors">
-                      Revoke
-                    </button>
-                  </div>
-                </div>
-                <button className="mt-4 text-sm text-loss hover:text-loss/80 transition-colors">
-                  Sign out all other sessions
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {activeTab === 'notifications' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Email Notifications</h2>
-                <div className="space-y-4">
-                  {[
-                    { key: 'tradeAlerts', label: 'Trade Alerts', desc: 'Get notified when trades are executed' },
-                    { key: 'priceAlerts', label: 'Price Alerts', desc: 'Receive alerts when prices hit your targets' },
-                    { key: 'copyTradeUpdates', label: 'Copy Trading Updates', desc: 'Updates from traders you follow' },
-                    { key: 'promotions', label: 'Promotions', desc: 'Special offers and bonuses' },
-                    { key: 'newsletter', label: 'Newsletter', desc: 'Weekly market updates and analysis' },
-                  ].map((item) => (
-                    <div key={item.key} className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-cream">{item.label}</p>
-                        <p className="text-xs text-slate-500">{item.desc}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setNotifications({
-                            ...notifications,
-                            [item.key]: !notifications[item.key as keyof typeof notifications],
-                          })
-                        }
-                        className={`relative w-12 h-6 rounded-full transition-colors ${
-                          notifications[item.key as keyof typeof notifications] ? 'bg-profit' : 'bg-white/10'
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                            notifications[item.key as keyof typeof notifications] ? 'left-7' : 'left-1'
-                          }`}
-                        />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">SMS Notifications</h2>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-cream">SMS Alerts</p>
-                    <p className="text-xs text-slate-500">Receive critical alerts via SMS</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setNotifications({ ...notifications, smsAlerts: !notifications.smsAlerts })}
-                    className={`relative w-12 h-6 rounded-full transition-colors ${
-                      notifications.smsAlerts ? 'bg-profit' : 'bg-white/10'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                        notifications.smsAlerts ? 'left-7' : 'left-1'
-                      }`}
-                    />
-                  </button>
                 </div>
               </div>
             </motion.div>
-          )}
-
-          {activeTab === 'preferences' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              {/* Trading Preferences */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Trading Preferences</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Default Trade Amount</label>
-                    <select
-                      value={preferences.defaultAmount}
-                      onChange={(e) => setPreferences({ ...preferences, defaultAmount: parseInt(e.target.value) })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="10">$10</option>
-                      <option value="25">$25</option>
-                      <option value="50">$50</option>
-                      <option value="100">$100</option>
-                      <option value="250">$250</option>
-                      <option value="500">$500</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Default Duration</label>
-                    <select
-                      value={preferences.defaultDuration}
-                      onChange={(e) => setPreferences({ ...preferences, defaultDuration: parseInt(e.target.value) })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="30">30 seconds</option>
-                      <option value="60">1 minute</option>
-                      <option value="120">2 minutes</option>
-                      <option value="300">5 minutes</option>
-                      <option value="900">15 minutes</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-cream">Sound Effects</p>
-                      <p className="text-xs text-slate-500">Play sounds on trade execution</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setPreferences({ ...preferences, soundEffects: !preferences.soundEffects })}
-                      className={`relative w-12 h-6 rounded-full transition-colors ${
-                        preferences.soundEffects ? 'bg-profit' : 'bg-white/10'
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                          preferences.soundEffects ? 'left-7' : 'left-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-cream">Confirm Trades</p>
-                      <p className="text-xs text-slate-500">Show confirmation before executing</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setPreferences({ ...preferences, confirmTrades: !preferences.confirmTrades })}
-                      className={`relative w-12 h-6 rounded-full transition-colors ${
-                        preferences.confirmTrades ? 'bg-profit' : 'bg-white/10'
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                          preferences.confirmTrades ? 'left-7' : 'left-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Display Preferences */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Display</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Language</label>
-                    <select
-                      value={preferences.language}
-                      onChange={(e) => setPreferences({ ...preferences, language: e.target.value })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="en">English</option>
-                      <option value="es">Español</option>
-                      <option value="pt">Português</option>
-                      <option value="fr">Français</option>
-                      <option value="de">Deutsch</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Timezone</label>
-                    <select
-                      value={preferences.timezone}
-                      onChange={(e) => setPreferences({ ...preferences, timezone: e.target.value })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="UTC">UTC</option>
-                      <option value="EST">Eastern Time (EST)</option>
-                      <option value="PST">Pacific Time (PST)</option>
-                      <option value="GMT">GMT</option>
-                      <option value="CET">Central European Time</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Danger Zone */}
-              <div className="bg-loss/5 rounded-2xl border border-loss/20 p-6">
-                <h2 className="text-lg font-semibold text-loss mb-2">Danger Zone</h2>
-                <p className="text-sm text-slate-400 mb-4">
-                  These actions are irreversible. Please proceed with caution.
-                </p>
-                <div className="flex flex-wrap gap-3">
-                  <button className="px-4 py-2 bg-white/5 text-cream text-sm font-medium rounded-lg hover:bg-white/10 transition-colors">
-                    Download Data
-                  </button>
-                  <button className="px-4 py-2 bg-loss/10 text-loss text-sm font-medium rounded-lg hover:bg-loss/20 transition-colors">
-                    Delete Account
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </div>
-      </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

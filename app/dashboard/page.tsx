@@ -1,560 +1,563 @@
 'use client';
 
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { motion } from 'framer-motion';
 import {
-  User,
-  Shield,
-  Bell,
-  Palette,
-  Globe,
-  Smartphone,
-  CheckCircle,
+  TrendingUp,
+  TrendingDown,
+  PieChart,
+  BarChart3,
+  Calendar,
+  Filter,
+  Download,
+  RefreshCw,
+  Clock,
+  Target,
+  Wallet,
+  Activity,
   ChevronRight,
-  Eye,
-  EyeOff,
-  LogOut,
-  AlertCircle,
+  ArrowUpRight,
+  ArrowDownRight,
+  Shield,
+  ShieldCheck,
+  ShieldOff,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
+import { useSpotTradingStore } from '@/lib/spot-trading-store';
+import type { SpotPosition } from '@/lib/spot-trading-types';
 
-const tabs = [
-  { id: 'profile', label: 'Profile', icon: User },
-  { id: 'security', label: 'Security', icon: Shield },
-  { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'preferences', label: 'Preferences', icon: Palette },
-] as const;
+// ============================================
+// CRYPTO ASSETS DATA (for icons)
+// ============================================
 
-type TabId = (typeof tabs)[number]['id'];
+const cryptoIcons: Record<string, string> = {
+  BTC: '₿',
+  ETH: 'Ξ',
+  BNB: '◆',
+  SOL: '◎',
+  XRP: '✕',
+  ADA: '₳',
+  DOGE: 'Ð',
+  AVAX: '🔺',
+  DOT: '●',
+  LINK: '⬡',
+};
 
-export default function SettingsPage() {
-  const { user, logout } = useStore();
-  const [activeTab, setActiveTab] = useState<TabId>('profile');
-  const [showPassword, setShowPassword] = useState(false);
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+// ============================================
+// SHIELD STATUS BADGE
+// ============================================
 
-  // ✅ KYC status matches your store type:
-  // "none" | "pending" | "verified" | "rejected" | undefined
-  const kycStatus = user?.kycStatus ?? 'none';
-  const isVerified = kycStatus === 'verified';
-  const isPending = kycStatus === 'pending';
-  const isRejected = kycStatus === 'rejected';
-
-  // Notification settings
-  const [notifications, setNotifications] = useState({
-    tradeAlerts: true,
-    priceAlerts: true,
-    copyTradeUpdates: true,
-    promotions: false,
-    newsletter: false,
-    smsAlerts: false,
-  });
-
-  // Preferences
-  const [preferences, setPreferences] = useState({
-    theme: 'dark',
-    language: 'en',
-    timezone: 'UTC',
-    defaultAmount: 100,
-    defaultDuration: 60,
-    soundEffects: true,
-    confirmTrades: true,
-  });
-
-  const avatarLetter =
-    user?.firstName?.[0] ??
-    user?.email?.[0]?.toUpperCase() ??
-    'U';
+const ShieldStatusBadge = ({ 
+  position, 
+  onToggle 
+}: { 
+  position: SpotPosition; 
+  onToggle: () => void;
+}) => {
+  const priceChange = position.shieldEnabled && position.shieldSnapPrice 
+    ? position.currentPrice - position.shieldSnapPrice 
+    : 0;
+  const priceChangePercent = position.shieldSnapPrice 
+    ? (priceChange / position.shieldSnapPrice) * 100 
+    : 0;
+  
+  // Calculate protected/missed amount
+  const currentValue = position.quantity * position.currentPrice;
+  const shieldedValue = position.shieldSnapValue || 0;
+  const protectedAmount = shieldedValue - currentValue;
 
   return (
-    <div className="p-4 lg:p-6 max-w-5xl mx-auto">
-      {/* Header */}
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-display font-bold text-cream">Settings</h1>
-          <p className="text-slate-400 mt-1">Manage your account and preferences</p>
+    <div className="flex items-center gap-2">
+      {position.shieldEnabled ? (
+        <div className="flex flex-col items-end gap-1">
+          <span className="flex items-center gap-1.5 px-2 py-1 bg-blue-500/20 text-blue-400 rounded-lg text-xs font-medium border border-blue-500/30">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            Protected
+          </span>
+          {protectedAmount !== 0 && (
+            <span className={`text-xs ${protectedAmount > 0 ? 'text-profit' : 'text-loss'}`}>
+              {protectedAmount > 0 ? 'Saved' : 'Missed'}: ${Math.abs(protectedAmount).toFixed(2)}
+            </span>
+          )}
         </div>
-
+      ) : (
         <button
-          onClick={logout}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-cream/80 hover:text-cream transition-colors"
+          onClick={(e) => { e.stopPropagation(); onToggle(); }}
+          className="flex items-center gap-1.5 px-2 py-1 bg-white/5 text-slate-400 rounded-lg text-xs font-medium hover:bg-white/10 transition-all border border-white/10"
         >
-          <LogOut className="w-4 h-4" />
-          Sign out
+          <Shield className="w-3.5 h-3.5" />
+          Shield
         </button>
+      )}
+    </div>
+  );
+};
+
+// ============================================
+// POSITION ROW COMPONENT
+// ============================================
+
+const PositionRow = ({ 
+  position, 
+  onToggleShield 
+}: { 
+  position: SpotPosition; 
+  onToggleShield: () => void;
+}) => {
+  const liveValue = position.quantity * position.currentPrice;
+  const displayValue = position.displayValue;
+  const displayPnL = position.displayPnL;
+  const displayPnLPercent = position.displayPnLPercent;
+
+  return (
+    <tr className={`hover:bg-white/5 transition-colors ${position.shieldEnabled ? 'bg-blue-500/5' : ''}`}>
+      <td className="px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-lg font-bold ${
+            position.shieldEnabled 
+              ? 'bg-blue-500/20 border border-blue-500/30' 
+              : 'bg-orange-500/10'
+          }`}>
+            {cryptoIcons[position.symbol] || position.symbol[0]}
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-cream">{position.symbol}</p>
+              {position.shieldEnabled && (
+                <Lock className="w-3 h-3 text-blue-400" />
+              )}
+            </div>
+            <p className="text-xs text-slate-500">{position.name}</p>
+          </div>
+        </div>
+      </td>
+      <td className="px-5 py-4">
+        <span className="text-sm text-cream font-mono">
+          {position.quantity.toFixed(6)}
+        </span>
+      </td>
+      <td className="px-5 py-4">
+        <div className="text-right">
+          <span className="text-sm text-slate-400 font-mono">
+            ${position.avgBuyPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </span>
+        </div>
+      </td>
+      <td className="px-5 py-4">
+        <div className="text-right">
+          {position.shieldEnabled && position.shieldSnapPrice ? (
+            <div className="space-y-0.5">
+              <span className="text-sm text-blue-400 font-mono flex items-center justify-end gap-1">
+                <Lock className="w-3 h-3" />
+                ${position.shieldSnapPrice.toLocaleString()}
+              </span>
+              <span className="text-xs text-slate-500 font-mono">
+                Live: ${position.currentPrice.toLocaleString()}
+              </span>
+            </div>
+          ) : (
+            <span className="text-sm text-cream font-mono">
+              ${position.currentPrice.toLocaleString()}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="px-5 py-4">
+        <div className="text-right">
+          <span className={`text-sm font-semibold ${position.shieldEnabled ? 'text-blue-400' : 'text-cream'}`}>
+            ${displayValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </span>
+          {position.shieldEnabled && (
+            <p className="text-xs text-slate-500">
+              Live: ${liveValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            </p>
+          )}
+        </div>
+      </td>
+      <td className="px-5 py-4">
+        <div className="text-right">
+          <span className={`text-sm font-semibold ${displayPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {displayPnL >= 0 ? '+' : ''}{displayPnL.toFixed(2)}
+          </span>
+          <p className={`text-xs ${displayPnLPercent >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {displayPnLPercent >= 0 ? '+' : ''}{displayPnLPercent.toFixed(2)}%
+          </p>
+        </div>
+      </td>
+      <td className="px-5 py-4">
+        <ShieldStatusBadge position={position} onToggle={onToggleShield} />
+      </td>
+    </tr>
+  );
+};
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+
+export default function PortfolioPage() {
+  const { user } = useStore();
+  const { 
+    positions, 
+    account,
+    tradeHistory,
+    toggleShield,
+    getShieldSummary,
+    getTotalUnrealizedPnL,
+    getDisplayPortfolioValue,
+  } = useSpotTradingStore();
+  
+  const [selectedPeriod, setSelectedPeriod] = useState<'1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'>('1M');
+
+  // Calculate stats
+  const totalValue = getDisplayPortfolioValue();
+  const totalPnL = getTotalUnrealizedPnL();
+  const cashBalance = user?.balance || 0;
+  const totalEquity = cashBalance + totalValue;
+  const shieldSummary = getShieldSummary();
+
+  // Calculate allocation
+  const allocation = [
+    { 
+      asset: 'Crypto', 
+      value: totalValue > 0 ? (totalValue / totalEquity) * 100 : 0, 
+      color: '#F59E0B',
+      amount: totalValue
+    },
+    { 
+      asset: 'Cash', 
+      value: totalEquity > 0 ? (cashBalance / totalEquity) * 100 : 100, 
+      color: '#64748B',
+      amount: cashBalance
+    },
+  ].filter(a => a.value > 0);
+
+  // Recent trades from history
+  const recentTrades = tradeHistory.slice(0, 5);
+
+  return (
+    <div className="p-4 lg:p-6 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-cream">Portfolio</h1>
+          <p className="text-slate-400 mt-1">Track your crypto holdings and performance</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {shieldSummary.activeShields > 0 && (
+            <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
+              <ShieldCheck className="w-4 h-4 text-blue-400" />
+              <span className="text-sm text-blue-400">
+                {shieldSummary.activeShields} Shield{shieldSummary.activeShields > 1 ? 's' : ''} Active
+              </span>
+              <span className="text-xs text-blue-400/70">
+                (${shieldSummary.totalShielded.toLocaleString()} protected)
+              </span>
+            </div>
+          )}
+          <button className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm text-slate-400 hover:text-cream transition-all">
+            <Download className="w-4 h-4" />
+            Export
+          </button>
+        </div>
       </div>
 
-      <div className="flex flex-col lg:flex-row gap-6">
-        {/* Tabs */}
-        <div className="lg:w-56 flex-shrink-0">
-          <nav className="flex lg:flex-col gap-2">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
-                  activeTab === tab.id
-                    ? 'bg-gold/10 text-gold'
-                    : 'text-slate-400 hover:bg-white/5 hover:text-cream'
-                }`}
+      {/* Stats Cards */}
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-5 bg-gradient-to-br from-gold/10 to-gold/5 rounded-2xl border border-gold/20"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-slate-400">Total Equity</p>
+            <Wallet className="w-5 h-5 text-gold" />
+          </div>
+          <p className="text-3xl font-bold text-cream">
+            ${totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </p>
+          <p className="text-sm text-slate-500 mt-2">Cash + Crypto</p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="p-5 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-slate-400">Portfolio Value</p>
+            <Activity className="w-5 h-5 text-orange-400" />
+          </div>
+          <p className="text-3xl font-bold text-cream">
+            ${totalValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </p>
+          <p className="text-sm text-slate-500 mt-2">{positions.length} position{positions.length !== 1 ? 's' : ''}</p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className="p-5 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-slate-400">Unrealized P&L</p>
+            {totalPnL >= 0 ? (
+              <TrendingUp className="w-5 h-5 text-profit" />
+            ) : (
+              <TrendingDown className="w-5 h-5 text-loss" />
+            )}
+          </div>
+          <p className={`text-3xl font-bold ${totalPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}
+          </p>
+          <p className="text-sm text-slate-500 mt-2">All positions</p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.3 }}
+          className={`p-5 rounded-2xl border ${
+            shieldSummary.activeShields > 0 
+              ? 'bg-blue-500/5 border-blue-500/20' 
+              : 'bg-white/5 border-white/5'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-slate-400">Protected</p>
+            <ShieldCheck className={`w-5 h-5 ${shieldSummary.activeShields > 0 ? 'text-blue-400' : 'text-slate-500'}`} />
+          </div>
+          <p className={`text-3xl font-bold ${shieldSummary.activeShields > 0 ? 'text-blue-400' : 'text-slate-500'}`}>
+            ${shieldSummary.totalShielded.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          </p>
+          <p className="text-sm text-slate-500 mt-2">
+            {shieldSummary.activeShields} shield{shieldSummary.activeShields !== 1 ? 's' : ''} active
+          </p>
+        </motion.div>
+      </div>
+
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Portfolio Allocation */}
+        <div className="lg:col-span-2 bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
+          <div className="p-5 border-b border-white/5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-cream">Your Holdings</h2>
+              <Link
+                href="/dashboard/trade/crypto"
+                className="flex items-center gap-1 text-sm text-gold hover:text-gold/80 transition-colors"
               >
-                <tab.icon className="w-5 h-5" />
-                <span className="hidden sm:inline">{tab.label}</span>
-              </button>
-            ))}
-          </nav>
+                Trade
+                <ChevronRight className="w-4 h-4" />
+              </Link>
+            </div>
+          </div>
+
+          {positions.length === 0 ? (
+            <div className="p-12 text-center">
+              <Wallet className="w-16 h-16 mx-auto mb-4 text-slate-600" />
+              <h3 className="text-lg font-semibold text-cream mb-2">No Holdings Yet</h3>
+              <p className="text-slate-400 mb-4">Start building your crypto portfolio</p>
+              <Link
+                href="/dashboard/trade/crypto"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
+              >
+                Buy Crypto
+                <ArrowUpRight className="w-4 h-4" />
+              </Link>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-white/5">
+                    <th className="px-5 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Asset
+                    </th>
+                    <th className="px-5 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Quantity
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Avg Cost
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Price
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Value
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      P&L
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500 uppercase tracking-wider">
+                      Shield
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {positions.map((position) => (
+                    <PositionRow 
+                      key={position.id} 
+                      position={position}
+                      onToggleShield={() => toggleShield(position.id)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
-        {/* Content */}
-        <div className="flex-1">
-          {activeTab === 'profile' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              {/* Profile Picture */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Profile Picture</h2>
-                <div className="flex items-center gap-4">
-                  <div className="w-20 h-20 bg-gradient-to-br from-electric to-gold rounded-2xl flex items-center justify-center text-void text-2xl font-bold">
-                    {avatarLetter}
-                  </div>
-                  <div className="space-y-2">
-                    <button className="px-4 py-2 bg-gold text-void text-sm font-medium rounded-lg hover:bg-gold/90 transition-colors">
-                      Upload Photo
-                    </button>
-                    <p className="text-xs text-slate-500">JPG, PNG or GIF. Max 2MB</p>
-                  </div>
+        {/* Allocation Chart */}
+        <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
+          <h2 className="text-lg font-semibold text-cream mb-4">Allocation</h2>
+          
+          {/* Simple pie chart representation */}
+          <div className="relative w-40 h-40 mx-auto mb-6">
+            <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+              {allocation.reduce((acc, item, i) => {
+                const startOffset = acc.offset;
+                const dashArray = item.value;
+                acc.elements.push(
+                  <circle
+                    key={i}
+                    cx="50"
+                    cy="50"
+                    r="40"
+                    fill="transparent"
+                    stroke={item.color}
+                    strokeWidth="20"
+                    strokeDasharray={`${dashArray} ${100 - dashArray}`}
+                    strokeDashoffset={-startOffset}
+                  />
+                );
+                acc.offset += item.value;
+                return acc;
+              }, { elements: [] as JSX.Element[], offset: 0 }).elements}
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center">
+                <p className="text-2xl font-bold text-cream">
+                  ${totalEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </p>
+                <p className="text-xs text-slate-500">Total</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Legend */}
+          <div className="space-y-3">
+            {allocation.map((item) => (
+              <div key={item.asset} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div
+                    className="w-3 h-3 rounded"
+                    style={{ backgroundColor: item.color }}
+                  />
+                  <span className="text-sm text-slate-400">{item.asset}</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-medium text-cream">{item.value.toFixed(1)}%</span>
+                  <p className="text-xs text-slate-500">${item.amount.toLocaleString()}</p>
                 </div>
               </div>
+            ))}
+          </div>
 
-              {/* Personal Info */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Personal Information</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">First Name</label>
-                    <input
-                      type="text"
-                      defaultValue={user?.firstName || ''}
-                      placeholder="Enter first name"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Last Name</label>
-                    <input
-                      type="text"
-                      defaultValue={user?.lastName || ''}
-                      placeholder="Enter last name"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Email</label>
-                    <input
-                      type="email"
-                      defaultValue={user?.email || ''}
-                      disabled
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-slate-500 cursor-not-allowed"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Phone</label>
-                    <input
-                      type="tel"
-                      defaultValue={user?.phone || ''}
-                      placeholder="Enter phone number"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                </div>
-                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
-                  Save Changes
-                </button>
+          {/* Shield Summary */}
+          {shieldSummary.activeShields > 0 && (
+            <div className="mt-6 pt-4 border-t border-white/10">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldCheck className="w-4 h-4 text-blue-400" />
+                <span className="text-sm font-medium text-blue-400">Shield Summary</span>
               </div>
-
-              {/* KYC Status */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold text-cream">Verification Status</h2>
-                    <p className="text-sm text-slate-400 mt-1">Complete KYC to unlock all features</p>
+              <div className="space-y-2">
+                {shieldSummary.positions.map((p) => (
+                  <div key={p.symbol} className="flex items-center justify-between text-xs">
+                    <span className="text-slate-400">{p.symbol}</span>
+                    <div className="text-right">
+                      <span className="text-blue-400">${p.snapValue.toLocaleString()}</span>
+                      <span className={`ml-2 ${p.priceChangePercent >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        {p.priceChangePercent >= 0 ? '↑' : '↓'}{Math.abs(p.priceChangePercent).toFixed(1)}%
+                      </span>
+                    </div>
                   </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
-                  <span
-                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${
-                      isVerified
-                        ? 'bg-profit/10 text-profit'
-                        : isPending
-                        ? 'bg-yellow-500/10 text-yellow-500'
-                        : isRejected
-                        ? 'bg-loss/10 text-loss'
-                        : 'bg-slate-500/10 text-slate-400'
-                    }`}
-                  >
-                    {isVerified
-                      ? 'Verified'
-                      : isPending
-                      ? 'In Review'
-                      : isRejected
-                      ? 'Rejected'
-                      : 'Not Verified'}
-                  </span>
-                </div>
+      {/* Recent Activity */}
+      {recentTrades.length > 0 && (
+        <div className="mt-6 bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
+          <div className="p-5 border-b border-white/5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-cream">Recent Activity</h2>
+              <Link
+                href="/dashboard/history"
+                className="flex items-center gap-1 text-sm text-gold hover:text-gold/80 transition-colors"
+              >
+                View All
+                <ChevronRight className="w-4 h-4" />
+              </Link>
+            </div>
+          </div>
 
-                {!isVerified && (
-                  <Link
-                    href="/kyc"
-                    className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-electric/10 text-electric text-sm font-medium rounded-lg hover:bg-electric/20 transition-colors"
-                  >
-                    Complete Verification
-                    <ChevronRight className="w-4 h-4" />
-                  </Link>
-                )}
-
-                {isRejected && (
-                  <div className="mt-4 p-3 bg-loss/10 border border-loss/20 rounded-xl flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-loss mt-0.5" />
-                    <p className="text-sm text-loss/90">
-                      Your verification was rejected. Please re-submit your documents.
+          <div className="divide-y divide-white/5">
+            {recentTrades.map((trade) => (
+              <div key={trade.id} className="px-5 py-4 flex items-center justify-between hover:bg-white/5 transition-colors">
+                <div className="flex items-center gap-3">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                    trade.side === 'buy' ? 'bg-profit/10' : 'bg-loss/10'
+                  }`}>
+                    {trade.side === 'buy' ? (
+                      <ArrowUpRight className="w-4 h-4 text-profit" />
+                    ) : (
+                      <ArrowDownRight className="w-4 h-4 text-loss" />
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-cream">
+                      {trade.side === 'buy' ? 'Bought' : 'Sold'} {trade.symbol}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {trade.quantity.toFixed(6)} @ ${trade.price.toLocaleString()}
                     </p>
                   </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-
-          {activeTab === 'security' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              {/* Change Password */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Change Password</h2>
-                <div className="space-y-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Current Password</label>
-                    <div className="relative">
-                      <input
-                        type={showPassword ? 'text' : 'password'}
-                        placeholder="Enter current password"
-                        className="w-full px-4 py-3 pr-12 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500"
-                      >
-                        {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">New Password</label>
-                    <input
-                      type="password"
-                      placeholder="Enter new password"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Confirm New Password</label>
-                    <input
-                      type="password"
-                      placeholder="Confirm new password"
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-                    />
-                  </div>
                 </div>
-                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
-                  Update Password
-                </button>
-              </div>
-
-              {/* Two-Factor Auth */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center">
-                      <Smartphone className="w-5 h-5 text-electric" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-semibold text-cream">Two-Factor Authentication</h2>
-                      <p className="text-sm text-slate-400">Add an extra layer of security</p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
-                    className={`relative w-14 h-7 rounded-full transition-colors ${
-                      twoFactorEnabled ? 'bg-profit' : 'bg-white/10'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${
-                        twoFactorEnabled ? 'left-8' : 'left-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-                {twoFactorEnabled && (
-                  <div className="p-4 bg-profit/10 rounded-xl border border-profit/20">
-                    <div className="flex items-center gap-2 text-profit text-sm">
-                      <CheckCircle className="w-4 h-4" />
-                      Two-factor authentication is enabled
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Active Sessions */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Active Sessions</h2>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-profit/10 rounded-lg flex items-center justify-center">
-                        <Globe className="w-5 h-5 text-profit" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-cream">Chrome on Windows</p>
-                        <p className="text-xs text-slate-500">Current session</p>
-                      </div>
-                    </div>
-                    <span className="text-xs text-profit">Active now</span>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center">
-                        <Smartphone className="w-5 h-5 text-slate-400" />
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-cream">Safari on iPhone</p>
-                        <p className="text-xs text-slate-500">Last active 2 hours ago</p>
-                      </div>
-                    </div>
-                    <button className="text-xs text-loss hover:text-loss/80 transition-colors">
-                      Revoke
-                    </button>
-                  </div>
-                </div>
-                <button className="mt-4 text-sm text-loss hover:text-loss/80 transition-colors">
-                  Sign out all other sessions
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {activeTab === 'notifications' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Email Notifications</h2>
-                <div className="space-y-4">
-                  {[
-                    { key: 'tradeAlerts', label: 'Trade Alerts', desc: 'Get notified when trades are executed' },
-                    { key: 'priceAlerts', label: 'Price Alerts', desc: 'Receive alerts when prices hit your targets' },
-                    { key: 'copyTradeUpdates', label: 'Copy Trading Updates', desc: 'Updates from traders you follow' },
-                    { key: 'promotions', label: 'Promotions', desc: 'Special offers and bonuses' },
-                    { key: 'newsletter', label: 'Newsletter', desc: 'Weekly market updates and analysis' },
-                  ].map((item) => (
-                    <div key={item.key} className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-cream">{item.label}</p>
-                        <p className="text-xs text-slate-500">{item.desc}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setNotifications({
-                            ...notifications,
-                            [item.key]: !notifications[item.key as keyof typeof notifications],
-                          })
-                        }
-                        className={`relative w-12 h-6 rounded-full transition-colors ${
-                          notifications[item.key as keyof typeof notifications] ? 'bg-profit' : 'bg-white/10'
-                        }`}
-                      >
-                        <span
-                          className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                            notifications[item.key as keyof typeof notifications] ? 'left-7' : 'left-1'
-                          }`}
-                        />
-                      </button>
-                    </div>
-                  ))}
+                <div className="text-right">
+                  <p className="text-sm font-medium text-cream">
+                    ${trade.totalValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    {new Date(trade.executedAt).toLocaleDateString()}
+                  </p>
                 </div>
               </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">SMS Notifications</h2>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-cream">SMS Alerts</p>
-                    <p className="text-xs text-slate-500">Receive critical alerts via SMS</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setNotifications({ ...notifications, smsAlerts: !notifications.smsAlerts })}
-                    className={`relative w-12 h-6 rounded-full transition-colors ${
-                      notifications.smsAlerts ? 'bg-profit' : 'bg-white/10'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                        notifications.smsAlerts ? 'left-7' : 'left-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          )}
-
-          {activeTab === 'preferences' && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              {/* Trading Preferences */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Trading Preferences</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Default Trade Amount</label>
-                    <select
-                      value={preferences.defaultAmount}
-                      onChange={(e) => setPreferences({ ...preferences, defaultAmount: parseInt(e.target.value) })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="10">$10</option>
-                      <option value="25">$25</option>
-                      <option value="50">$50</option>
-                      <option value="100">$100</option>
-                      <option value="250">$250</option>
-                      <option value="500">$500</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Default Duration</label>
-                    <select
-                      value={preferences.defaultDuration}
-                      onChange={(e) => setPreferences({ ...preferences, defaultDuration: parseInt(e.target.value) })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="30">30 seconds</option>
-                      <option value="60">1 minute</option>
-                      <option value="120">2 minutes</option>
-                      <option value="300">5 minutes</option>
-                      <option value="900">15 minutes</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-cream">Sound Effects</p>
-                      <p className="text-xs text-slate-500">Play sounds on trade execution</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setPreferences({ ...preferences, soundEffects: !preferences.soundEffects })}
-                      className={`relative w-12 h-6 rounded-full transition-colors ${
-                        preferences.soundEffects ? 'bg-profit' : 'bg-white/10'
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                          preferences.soundEffects ? 'left-7' : 'left-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-cream">Confirm Trades</p>
-                      <p className="text-xs text-slate-500">Show confirmation before executing</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setPreferences({ ...preferences, confirmTrades: !preferences.confirmTrades })}
-                      className={`relative w-12 h-6 rounded-full transition-colors ${
-                        preferences.confirmTrades ? 'bg-profit' : 'bg-white/10'
-                      }`}
-                    >
-                      <span
-                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-                          preferences.confirmTrades ? 'left-7' : 'left-1'
-                        }`}
-                      />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Display Preferences */}
-              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
-                <h2 className="text-lg font-semibold text-cream mb-4">Display</h2>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Language</label>
-                    <select
-                      value={preferences.language}
-                      onChange={(e) => setPreferences({ ...preferences, language: e.target.value })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="en">English</option>
-                      <option value="es">Español</option>
-                      <option value="pt">Português</option>
-                      <option value="fr">Français</option>
-                      <option value="de">Deutsch</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-sm text-slate-400 mb-2 block">Timezone</label>
-                    <select
-                      value={preferences.timezone}
-                      onChange={(e) => setPreferences({ ...preferences, timezone: e.target.value })}
-                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-                    >
-                      <option value="UTC">UTC</option>
-                      <option value="EST">Eastern Time (EST)</option>
-                      <option value="PST">Pacific Time (PST)</option>
-                      <option value="GMT">GMT</option>
-                      <option value="CET">Central European Time</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* Danger Zone */}
-              <div className="bg-loss/5 rounded-2xl border border-loss/20 p-6">
-                <h2 className="text-lg font-semibold text-loss mb-2">Danger Zone</h2>
-                <p className="text-sm text-slate-400 mb-4">
-                  These actions are irreversible. Please proceed with caution.
-                </p>
-                <div className="flex flex-wrap gap-3">
-                  <button className="px-4 py-2 bg-white/5 text-cream text-sm font-medium rounded-lg hover:bg-white/10 transition-colors">
-                    Download Data
-                  </button>
-                  <button className="px-4 py-2 bg-loss/10 text-loss text-sm font-medium rounded-lg hover:bg-loss/20 transition-colors">
-                    Delete Account
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          )}
+      {/* Info Panel */}
+      <div className="mt-6 p-4 bg-blue-500/10 rounded-2xl border border-blue-500/20">
+        <div className="flex items-start gap-3">
+          <Shield className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <h3 className="text-sm font-semibold text-blue-400 mb-1">About Shield Mode</h3>
+            <p className="text-sm text-blue-400/80">
+              Shield Mode lets you lock your portfolio value at the current price. While active, 
+              the live price continues to move, but your displayed value stays frozen. This is a 
+              "synthetic pause" - use it to protect gains or wait out volatility. Toggle it on any 
+              position from the Holdings table above.
+            </p>
+          </div>
         </div>
       </div>
     </div>

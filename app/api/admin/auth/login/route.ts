@@ -33,7 +33,6 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
     return { allowed: true };
   }
   
-  // Reset if window has passed
   if (now - record.lastAttempt > RATE_LIMIT_WINDOW) {
     loginAttempts.set(ip, { count: 1, lastAttempt: now });
     return { allowed: true };
@@ -51,10 +50,6 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
 
 function generateSessionToken(): string {
   return crypto.randomBytes(32).toString('hex');
-}
-
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 export async function POST(request: NextRequest) {
@@ -90,16 +85,14 @@ export async function POST(request: NextRequest) {
     });
     
     if (authError || !authData.user) {
-      // Log failed attempt
       console.log(`[Admin Auth] Failed login attempt for ${email} from ${ip}`);
-      
       return NextResponse.json(
         { success: false, error: 'Invalid credentials' },
         { status: 401 }
       );
     }
     
-    // Check if user has admin role
+    // Check if user has admin role in the users table
     const { data: userData, error: userError } = await supabaseAdmin
       .from('users')
       .select('id, email, first_name, last_name, role, is_active')
@@ -113,10 +106,9 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    if (!['admin', 'super_admin'].includes(userData.role)) {
-      // Log unauthorized attempt
+    // Accept 'admin' role (matches your schema CHECK constraint)
+    if (userData.role !== 'admin') {
       console.log(`[Admin Auth] Non-admin user ${email} attempted admin login from ${ip}`);
-      
       return NextResponse.json(
         { success: false, error: 'Access denied. Admin privileges required.' },
         { status: 403 }
@@ -130,45 +122,28 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    // Generate secure session token
+    // Generate session token (stored client-side via zustand persist)
     const sessionToken = generateSessionToken();
-    const tokenHash = hashToken(sessionToken);
     
-    // Store session in database
-    const { error: sessionError } = await supabaseAdmin
-      .from('admin_sessions')
-      .insert({
+    // Log successful login to admin_logs
+    try {
+      await supabaseAdmin.from('admin_logs').insert({
         admin_id: userData.id,
-        token_hash: tokenHash,
-        ip_address: ip,
-        user_agent: request.headers.get('user-agent'),
-        expires_at: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(), // 8 hours
+        action: 'admin_login',
+        details: { ip_address: ip, user_agent: request.headers.get('user-agent') },
       });
-    
-    if (sessionError) {
-      console.error('[Admin Auth] Failed to create session:', sessionError);
-      return NextResponse.json(
-        { success: false, error: 'Failed to create session' },
-        { status: 500 }
-      );
+    } catch (logErr) {
+      // Non-critical — don't block login if logging fails
+      console.warn('[Admin Auth] Failed to write audit log:', logErr);
     }
     
-    // Log successful login
-    await supabaseAdmin.from('admin_logs').insert({
-      admin_id: userData.id,
-      action: 'admin_login',
-      ip_address: ip,
-      user_agent: request.headers.get('user-agent'),
-    });
-    
     // Update last login
-    await supabaseAdmin
-      .from('users')
-      .update({ 
-        last_login_at: new Date().toISOString(),
-        last_login_ip: ip,
-      })
-      .eq('id', userData.id);
+    try {
+      await supabaseAdmin
+        .from('users')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', userData.id);
+    } catch (_) {}
     
     // Reset rate limit on successful login
     loginAttempts.delete(ip);
@@ -186,7 +161,7 @@ export async function POST(request: NextRequest) {
         role: userData.role,
         created_at: authData.user.created_at,
       },
-      sessionToken, // Return plain token, store hashed version
+      sessionToken,
     });
     
   } catch (error: any) {

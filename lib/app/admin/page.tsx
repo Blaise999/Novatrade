@@ -1,683 +1,653 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  Users,
+  Search,
+  Edit,
+  Trash2,
+  Plus,
+  Minus,
+  DollarSign,
   Wallet,
   Bitcoin,
-  Building2,
-  CreditCard,
-  Plus,
-  Edit2,
-  Trash2,
+  Shield,
+  CheckCircle,
+  AlertCircle,
+  X,
+  RefreshCw,
+  Copy,
+  ExternalLink,
+  Settings,
+  ChevronDown,
   Eye,
   EyeOff,
-  CheckCircle,
-  XCircle,
-  Clock,
   Save,
-  X,
-  Settings,
-  Users,
-  DollarSign,
-  Copy,
-  Mail,
-  MessageCircle,
-  AlertCircle,
-  ChevronDown,
-  ChevronUp,
-  Image
+  Globe
 } from 'lucide-react';
-import { useDepositSettingsStore, CryptoWallet, BankAccount, PaymentProcessor, PendingDeposit } from '@/lib/deposit-settings';
+import { useAdminAuthStore } from '@/lib/admin-store';
+import { useDepositAddressesStore } from '@/lib/trading-store';
 
-type ActiveTab = 'pending' | 'crypto' | 'bank' | 'processors' | 'settings';
+// Mock users data (in production, this would come from a database)
+interface MockUser {
+  id: string;
+  email: string;
+  name: string;
+  balance: number;
+  marginBalance: number;
+  status: 'active' | 'suspended' | 'pending';
+  kycLevel: number;
+  createdAt: string;
+  lastLogin: string;
+}
 
-export default function AdminDepositsPage() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('pending');
-  const [editingCrypto, setEditingCrypto] = useState<CryptoWallet | null>(null);
-  const [editingBank, setEditingBank] = useState<BankAccount | null>(null);
-  const [editingProcessor, setEditingProcessor] = useState<PaymentProcessor | null>(null);
-  const [showAddModal, setShowAddModal] = useState<'crypto' | 'bank' | 'processor' | null>(null);
-  const [selectedDeposit, setSelectedDeposit] = useState<PendingDeposit | null>(null);
-  const [rejectNote, setRejectNote] = useState('');
+const mockUsers: MockUser[] = [
+  { id: '1', email: 'john@example.com', name: 'John Doe', balance: 5000, marginBalance: 10000, status: 'active', kycLevel: 2, createdAt: '2024-01-15', lastLogin: '2024-01-20' },
+  { id: '2', email: 'jane@example.com', name: 'Jane Smith', balance: 15000, marginBalance: 25000, status: 'active', kycLevel: 3, createdAt: '2024-01-10', lastLogin: '2024-01-20' },
+  { id: '3', email: 'bob@example.com', name: 'Bob Wilson', balance: 2500, marginBalance: 5000, status: 'pending', kycLevel: 1, createdAt: '2024-01-18', lastLogin: '2024-01-19' },
+  { id: '4', email: 'alice@example.com', name: 'Alice Brown', balance: 50000, marginBalance: 100000, status: 'active', kycLevel: 3, createdAt: '2023-12-01', lastLogin: '2024-01-20' },
+  { id: '5', email: 'charlie@example.com', name: 'Charlie Davis', balance: 1000, marginBalance: 2000, status: 'suspended', kycLevel: 1, createdAt: '2024-01-05', lastLogin: '2024-01-10' },
+];
 
-  const {
-    cryptoWallets,
-    bankAccounts,
-    paymentProcessors,
-    pendingDeposits,
-    confirmedDeposits,
-    globalMinDeposit,
-    depositInstructions,
-    supportEmail,
-    supportWhatsApp,
-    requireProof,
-    addCryptoWallet,
-    updateCryptoWallet,
-    removeCryptoWallet,
-    toggleCryptoWallet,
-    addBankAccount,
-    updateBankAccount,
-    removeBankAccount,
-    toggleBankAccount,
-    addPaymentProcessor,
-    updatePaymentProcessor,
-    removePaymentProcessor,
-    togglePaymentProcessor,
-    confirmDeposit,
-    rejectDeposit,
-    updateGlobalSettings,
-    getPendingDeposits,
-  } = useDepositSettingsStore();
-
-  // Form states for adding new items
-  const [newCrypto, setNewCrypto] = useState<Partial<CryptoWallet>>({
-    symbol: '', name: '', network: '', address: '', icon: '₿', enabled: true, minDeposit: 50, confirmations: 6
+export default function AdminUsersPage() {
+  const { admin, isAuthenticated } = useAdminAuthStore();
+  const { addresses, updateAddress, addAddress, toggleActive } = useDepositAddressesStore();
+  
+  const [users, setUsers] = useState<MockUser[]>(mockUsers);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedUser, setSelectedUser] = useState<MockUser | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showAddressModal, setShowAddressModal] = useState(false);
+  const [editAmount, setEditAmount] = useState('');
+  const [editType, setEditType] = useState<'spot' | 'margin'>('spot');
+  const [editAction, setEditAction] = useState<'add' | 'subtract' | 'set'>('add');
+  const [editNote, setEditNote] = useState('');
+  
+  // New address form
+  const [newAddress, setNewAddress] = useState({
+    currency: '',
+    network: '',
+    address: '',
+    memo: ''
   });
-  const [newBank, setNewBank] = useState<Partial<BankAccount>>({
-    bankName: '', accountName: '', accountNumber: '', country: '', currency: 'USD', enabled: true, minDeposit: 100
-  });
-  const [newProcessor, setNewProcessor] = useState<Partial<PaymentProcessor>>({
-    name: '', type: 'ewallet', accountId: '', accountName: '', enabled: true, minDeposit: 50, fee: '0%', icon: '💳'
-  });
+  
+  // Edit address state
+  const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
+  const [editingAddressValue, setEditingAddressValue] = useState('');
 
-  // Settings form
-  const [settings, setSettings] = useState({
-    globalMinDeposit,
-    depositInstructions,
-    supportEmail,
-    supportWhatsApp: supportWhatsApp || '',
-    requireProof
-  });
+  if (!isAuthenticated || !admin) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-slate-400">Please log in to access this page.</p>
+      </div>
+    );
+  }
 
-  const pending = getPendingDeposits();
+  const filteredUsers = users.filter(user =>
+    user.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    user.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
-  const handleConfirmDeposit = (deposit: PendingDeposit) => {
-    // Confirm the deposit
-    const confirmed = confirmDeposit(deposit.id, 'admin');
-    if (confirmed) {
-      // NOTE: Balance crediting should happen inside your confirmDeposit() logic / backend.
-      // We removed adminAddBalance here to fix the build blocker.
-      setSelectedDeposit(null);
+  const handleEditBalance = () => {
+    if (!selectedUser || !editAmount) return;
+    
+    const amount = parseFloat(editAmount);
+    if (isNaN(amount)) return;
+    
+    setUsers(prev => prev.map(user => {
+      if (user.id !== selectedUser.id) return user;
+      
+      const balanceKey = editType === 'spot' ? 'balance' : 'marginBalance';
+      let newBalance: number;
+      
+      switch (editAction) {
+        case 'add':
+          newBalance = user[balanceKey] + amount;
+          break;
+        case 'subtract':
+          newBalance = Math.max(0, user[balanceKey] - amount);
+          break;
+        case 'set':
+          newBalance = amount;
+          break;
+        default:
+          newBalance = user[balanceKey];
+      }
+      
+      return { ...user, [balanceKey]: newBalance };
+    }));
+    
+    setShowEditModal(false);
+    setSelectedUser(null);
+    setEditAmount('');
+    setEditNote('');
+  };
+
+  const handleSaveAddress = (id: string) => {
+    if (admin) {
+      updateAddress(id, editingAddressValue, admin.id);
     }
+    setEditingAddressId(null);
+    setEditingAddressValue('');
   };
 
-  const handleRejectDeposit = (deposit: PendingDeposit) => {
-    rejectDeposit(deposit.id, 'admin', rejectNote);
-    setSelectedDeposit(null);
-    setRejectNote('');
+  const handleAddNewAddress = () => {
+    if (!newAddress.currency || !newAddress.network || !newAddress.address) return;
+    
+    addAddress({
+      currency: newAddress.currency.toUpperCase(),
+      network: newAddress.network,
+      address: newAddress.address,
+      memo: newAddress.memo || undefined,
+      isActive: true,
+    });
+    
+    setNewAddress({ currency: '', network: '', address: '', memo: '' });
+    setShowAddressModal(false);
   };
 
-  const handleSaveCrypto = () => {
-    if (editingCrypto) {
-      updateCryptoWallet(editingCrypto.id, editingCrypto);
-      setEditingCrypto(null);
-    } else if (newCrypto.symbol && newCrypto.address) {
-      addCryptoWallet(newCrypto as Omit<CryptoWallet, 'id'>);
-      setNewCrypto({ symbol: '', name: '', network: '', address: '', icon: '₿', enabled: true, minDeposit: 50, confirmations: 6 });
-      setShowAddModal(null);
-    }
-  };
-
-  const handleSaveBank = () => {
-    if (editingBank) {
-      updateBankAccount(editingBank.id, editingBank);
-      setEditingBank(null);
-    } else if (newBank.bankName && newBank.accountNumber) {
-      addBankAccount(newBank as Omit<BankAccount, 'id'>);
-      setNewBank({ bankName: '', accountName: '', accountNumber: '', country: '', currency: 'USD', enabled: true, minDeposit: 100 });
-      setShowAddModal(null);
-    }
-  };
-
-  const handleSaveProcessor = () => {
-    if (editingProcessor) {
-      updatePaymentProcessor(editingProcessor.id, editingProcessor);
-      setEditingProcessor(null);
-    } else if (newProcessor.name && newProcessor.accountId) {
-      addPaymentProcessor(newProcessor as Omit<PaymentProcessor, 'id'>);
-      setNewProcessor({ name: '', type: 'ewallet', accountId: '', accountName: '', enabled: true, minDeposit: 50, fee: '0%', icon: '💳' });
-      setShowAddModal(null);
-    }
-  };
-
-  const handleSaveSettings = () => {
-    updateGlobalSettings(settings);
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
   };
 
   return (
-    <div className="p-6">
+    <div className="space-y-6">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-cream">Deposit Management</h1>
-        <p className="text-slate-400 mt-1">Configure payment methods and process deposits</p>
-      </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className="bg-yellow-500/10 rounded-xl p-4 border border-yellow-500/20">
-          <div className="flex items-center gap-3">
-            <Clock className="w-8 h-8 text-yellow-500" />
-            <div>
-              <p className="text-2xl font-bold text-cream">{pending.length}</p>
-              <p className="text-sm text-yellow-500">Pending</p>
-            </div>
-          </div>
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-cream">User Management</h1>
+          <p className="text-slate-400 mt-1">Manage user accounts and deposit addresses</p>
         </div>
-        <div className="bg-profit/10 rounded-xl p-4 border border-profit/20">
-          <div className="flex items-center gap-3">
-            <CheckCircle className="w-8 h-8 text-profit" />
-            <div>
-              <p className="text-2xl font-bold text-cream">{confirmedDeposits.filter(d => d.status === 'confirmed').length}</p>
-              <p className="text-sm text-profit">Confirmed</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-          <div className="flex items-center gap-3">
-            <Bitcoin className="w-8 h-8 text-orange-500" />
-            <div>
-              <p className="text-2xl font-bold text-cream">{cryptoWallets.filter(w => w.enabled).length}</p>
-              <p className="text-sm text-cream/60">Active Crypto</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-          <div className="flex items-center gap-3">
-            <Building2 className="w-8 h-8 text-green-500" />
-            <div>
-              <p className="text-2xl font-bold text-cream">{bankAccounts.filter(b => b.enabled).length + paymentProcessors.filter(p => p.enabled).length}</p>
-              <p className="text-sm text-cream/60">Other Methods</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-        {[
-          { id: 'pending', label: 'Pending Deposits', icon: Clock, badge: pending.length },
-          { id: 'crypto', label: 'Crypto Wallets', icon: Bitcoin },
-          { id: 'bank', label: 'Bank Accounts', icon: Building2 },
-          { id: 'processors', label: 'Other Methods', icon: CreditCard },
-          { id: 'settings', label: 'Settings', icon: Settings },
-        ].map((tab) => (
+        <div className="flex items-center gap-3">
           <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as ActiveTab)}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
-              activeTab === tab.id ? 'bg-gold text-void' : 'bg-white/5 text-cream/60 hover:text-cream hover:bg-white/10'
-            }`}
+            onClick={() => setShowAddressModal(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-gold text-void font-semibold rounded-lg hover:bg-gold/90 transition-all"
           >
-            <tab.icon className="w-4 h-4" />
-            {tab.label}
-            {tab.badge !== undefined && tab.badge > 0 && (
-              <span className="px-2 py-0.5 bg-loss text-white text-xs rounded-full">{tab.badge}</span>
-            )}
+            <Wallet className="w-4 h-4" />
+            Manage Addresses
           </button>
-        ))}
+        </div>
       </div>
 
-      {/* Tab Content */}
-      <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
-        {/* Pending Deposits */}
-        {activeTab === 'pending' && (
-          <div>
-            <h2 className="text-lg font-semibold text-cream mb-4">Pending Deposit Requests</h2>
-            {pending.length === 0 ? (
-              <div className="text-center py-12">
-                <CheckCircle className="w-12 h-12 text-profit/20 mx-auto mb-4" />
-                <p className="text-cream/60">No pending deposits</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {pending.map((deposit) => (
-                  <div key={deposit.id} className="p-4 bg-void/50 rounded-xl border border-white/5">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-yellow-500/10 rounded-lg flex items-center justify-center">
-                          <DollarSign className="w-5 h-5 text-yellow-500" />
-                        </div>
-                        <div>
-                          <p className="font-semibold text-cream">${deposit.amount.toLocaleString()}</p>
-                          <p className="text-xs text-cream/50">{deposit.userEmail}</p>
-                        </div>
+      {/* Deposit Addresses Section */}
+      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-white/5">
+          <h2 className="text-lg font-semibold text-cream flex items-center gap-2">
+            <Bitcoin className="w-5 h-5 text-orange-500" />
+            Deposit Addresses
+          </h2>
+          <button
+            onClick={() => setShowAddressModal(true)}
+            className="text-sm text-gold hover:text-gold/80"
+          >
+            + Add New
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="text-xs text-slate-400 border-b border-white/5">
+                <th className="text-left p-4">Currency</th>
+                <th className="text-left p-4">Network</th>
+                <th className="text-left p-4">Address</th>
+                <th className="text-center p-4">Status</th>
+                <th className="text-right p-4">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {addresses.map(addr => (
+                <tr key={addr.id} className="border-b border-white/5 hover:bg-white/5">
+                  <td className="p-4">
+                    <span className="text-sm font-medium text-cream">{addr.currency}</span>
+                  </td>
+                  <td className="p-4">
+                    <span className="text-sm text-slate-400">{addr.network}</span>
+                  </td>
+                  <td className="p-4">
+                    {editingAddressId === addr.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={editingAddressValue}
+                          onChange={(e) => setEditingAddressValue(e.target.value)}
+                          className="flex-1 px-3 py-1 bg-white/5 border border-gold rounded text-cream text-sm font-mono focus:outline-none"
+                          autoFocus
+                        />
+                        <button
+                          onClick={() => handleSaveAddress(addr.id)}
+                          className="p-1 bg-profit rounded hover:bg-profit/80"
+                        >
+                          <Save className="w-4 h-4 text-void" />
+                        </button>
+                        <button
+                          onClick={() => setEditingAddressId(null)}
+                          className="p-1 bg-loss/20 rounded hover:bg-loss/30"
+                        >
+                          <X className="w-4 h-4 text-loss" />
+                        </button>
                       </div>
-                      <div className="text-right">
-                        <p className="text-sm text-cream">{deposit.methodName}</p>
-                        <p className="text-xs text-cream/50">{new Date(deposit.createdAt).toLocaleString()}</p>
-                      </div>
-                    </div>
-
-                    {deposit.transactionRef && (
-                      <div className="mb-3 p-2 bg-white/5 rounded-lg">
-                        <p className="text-xs text-cream/50 mb-1">Transaction Reference</p>
-                        <p className="text-sm text-cream font-mono break-all">{deposit.transactionRef}</p>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-mono text-cream">
+                          {addr.address.slice(0, 10)}...{addr.address.slice(-8)}
+                        </span>
+                        <button
+                          onClick={() => copyToClipboard(addr.address)}
+                          className="p-1 hover:bg-white/10 rounded"
+                        >
+                          <Copy className="w-3 h-3 text-slate-400" />
+                        </button>
                       </div>
                     )}
-
-                    {deposit.proofImage && (
-                      <div className="mb-3">
-                        <p className="text-xs text-cream/50 mb-1">Payment Proof</p>
-                        <img src={deposit.proofImage} alt="Proof" className="w-full max-w-md h-40 object-cover rounded-lg" />
-                      </div>
-                    )}
-
-                    <div className="flex gap-2">
+                  </td>
+                  <td className="p-4 text-center">
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      addr.isActive
+                        ? 'bg-profit/10 text-profit'
+                        : 'bg-loss/10 text-loss'
+                    }`}>
+                      {addr.isActive ? 'Active' : 'Inactive'}
+                    </span>
+                  </td>
+                  <td className="p-4">
+                    <div className="flex items-center justify-end gap-2">
                       <button
-                        onClick={() => handleConfirmDeposit(deposit)}
-                        className="flex-1 py-2 bg-profit text-void font-medium rounded-lg hover:bg-profit/90 transition-colors flex items-center justify-center gap-2"
+                        onClick={() => {
+                          setEditingAddressId(addr.id);
+                          setEditingAddressValue(addr.address);
+                        }}
+                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                        title="Edit Address"
                       >
-                        <CheckCircle className="w-4 h-4" /> Confirm
+                        <Edit className="w-4 h-4 text-slate-400" />
                       </button>
                       <button
-                        onClick={() => setSelectedDeposit(deposit)}
-                        className="flex-1 py-2 bg-loss/20 text-loss font-medium rounded-lg hover:bg-loss/30 transition-colors flex items-center justify-center gap-2"
+                        onClick={() => toggleActive(addr.id)}
+                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                        title={addr.isActive ? 'Deactivate' : 'Activate'}
                       >
-                        <XCircle className="w-4 h-4" /> Reject
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Crypto Wallets */}
-        {activeTab === 'crypto' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-cream">Cryptocurrency Wallets</h2>
-              <button
-                onClick={() => setShowAddModal('crypto')}
-                className="flex items-center gap-2 px-4 py-2 bg-gold text-void font-medium rounded-lg hover:bg-gold/90 transition-colors"
-              >
-                <Plus className="w-4 h-4" /> Add Wallet
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {cryptoWallets.map((wallet) => (
-                <div key={wallet.id} className={`p-4 rounded-xl border ${wallet.enabled ? 'bg-void/50 border-white/10' : 'bg-void/20 border-white/5 opacity-60'}`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-orange-500/20 rounded-lg flex items-center justify-center text-lg">
-                        {wallet.icon}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="font-semibold text-cream">{wallet.name}</p>
-                          <span className="text-xs px-2 py-0.5 bg-white/10 rounded">{wallet.symbol}</span>
-                        </div>
-                        <p className="text-xs text-cream/50">{wallet.network} • Min: ${wallet.minDeposit}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => toggleCryptoWallet(wallet.id)}
-                        className={`p-2 rounded-lg transition-colors ${wallet.enabled ? 'bg-profit/20 text-profit' : 'bg-white/5 text-cream/40'}`}
-                      >
-                        {wallet.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                      </button>
-                      <button
-                        onClick={() => setEditingCrypto(wallet)}
-                        className="p-2 bg-white/5 rounded-lg text-cream/60 hover:text-cream transition-colors"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => removeCryptoWallet(wallet.id)}
-                        className="p-2 bg-loss/10 rounded-lg text-loss hover:bg-loss/20 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
+                        {addr.isActive ? (
+                          <EyeOff className="w-4 h-4 text-slate-400" />
+                        ) : (
+                          <Eye className="w-4 h-4 text-slate-400" />
+                        )}
                       </button>
                     </div>
-                  </div>
-                  <div className="mt-3 p-2 bg-white/5 rounded-lg">
-                    <p className="text-xs text-cream/50 font-mono break-all">{wallet.address}</p>
-                  </div>
-                </div>
+                  </td>
+                </tr>
               ))}
-            </div>
-          </div>
-        )}
-
-        {/* Bank Accounts */}
-        {activeTab === 'bank' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-cream">Bank Accounts</h2>
-              <button
-                onClick={() => setShowAddModal('bank')}
-                className="flex items-center gap-2 px-4 py-2 bg-gold text-void font-medium rounded-lg hover:bg-gold/90 transition-colors"
-              >
-                <Plus className="w-4 h-4" /> Add Bank
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {bankAccounts.map((bank) => (
-                <div key={bank.id} className={`p-4 rounded-xl border ${bank.enabled ? 'bg-void/50 border-white/10' : 'bg-void/20 border-white/5 opacity-60'}`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-green-500/20 rounded-lg flex items-center justify-center">
-                        <Building2 className="w-5 h-5 text-green-500" />
-                      </div>
-                      <div>
-                        <p className="font-semibold text-cream">{bank.bankName}</p>
-                        <p className="text-xs text-cream/50">{bank.country} • {bank.currency} • Min: ${bank.minDeposit}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => toggleBankAccount(bank.id)}
-                        className={`p-2 rounded-lg transition-colors ${bank.enabled ? 'bg-profit/20 text-profit' : 'bg-white/5 text-cream/40'}`}
-                      >
-                        {bank.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                      </button>
-                      <button
-                        onClick={() => setEditingBank(bank)}
-                        className="p-2 bg-white/5 rounded-lg text-cream/60 hover:text-cream transition-colors"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => removeBankAccount(bank.id)}
-                        className="p-2 bg-loss/10 rounded-lg text-loss hover:bg-loss/20 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                    <div className="p-2 bg-white/5 rounded-lg">
-                      <p className="text-xs text-cream/50">Account Name</p>
-                      <p className="text-cream">{bank.accountName}</p>
-                    </div>
-                    <div className="p-2 bg-white/5 rounded-lg">
-                      <p className="text-xs text-cream/50">Account Number</p>
-                      <p className="text-cream font-mono">{bank.accountNumber}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Payment Processors */}
-        {activeTab === 'processors' && (
-          <div>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-cream">Payment Processors</h2>
-              <button
-                onClick={() => setShowAddModal('processor')}
-                className="flex items-center gap-2 px-4 py-2 bg-gold text-void font-medium rounded-lg hover:bg-gold/90 transition-colors"
-              >
-                <Plus className="w-4 h-4" /> Add Method
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              {paymentProcessors.map((processor) => (
-                <div key={processor.id} className={`p-4 rounded-xl border ${processor.enabled ? 'bg-void/50 border-white/10' : 'bg-void/20 border-white/5 opacity-60'}`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center text-lg">
-                        {processor.icon}
-                      </div>
-                      <div>
-                        <p className="font-semibold text-cream">{processor.name}</p>
-                        <p className="text-xs text-cream/50">Fee: {processor.fee} • Min: ${processor.minDeposit}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => togglePaymentProcessor(processor.id)}
-                        className={`p-2 rounded-lg transition-colors ${processor.enabled ? 'bg-profit/20 text-profit' : 'bg-white/5 text-cream/40'}`}
-                      >
-                        {processor.enabled ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-                      </button>
-                      <button
-                        onClick={() => setEditingProcessor(processor)}
-                        className="p-2 bg-white/5 rounded-lg text-cream/60 hover:text-cream transition-colors"
-                      >
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => removePaymentProcessor(processor.id)}
-                        className="p-2 bg-loss/10 rounded-lg text-loss hover:bg-loss/20 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="mt-3 p-2 bg-white/5 rounded-lg">
-                    <p className="text-xs text-cream/50">Account: {processor.accountId}</p>
-                    <p className="text-xs text-cream/50">Name: {processor.accountName}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Settings */}
-        {activeTab === 'settings' && (
-          <div>
-            <h2 className="text-lg font-semibold text-cream mb-4">Deposit Settings</h2>
-
-            <div className="space-y-4 max-w-2xl">
-              <div>
-                <label className="text-sm text-cream/60 mb-2 block">Global Minimum Deposit ($)</label>
-                <input
-                  type="number"
-                  value={settings.globalMinDeposit}
-                  onChange={(e) => setSettings({ ...settings, globalMinDeposit: parseInt(e.target.value) || 0 })}
-                  className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream focus:border-gold focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm text-cream/60 mb-2 block">Support Email</label>
-                <input
-                  type="email"
-                  value={settings.supportEmail}
-                  onChange={(e) => setSettings({ ...settings, supportEmail: e.target.value })}
-                  className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream focus:border-gold focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm text-cream/60 mb-2 block">Support WhatsApp</label>
-                <input
-                  type="text"
-                  value={settings.supportWhatsApp}
-                  onChange={(e) => setSettings({ ...settings, supportWhatsApp: e.target.value })}
-                  placeholder="+1234567890"
-                  className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream focus:border-gold focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="text-sm text-cream/60 mb-2 block">Deposit Instructions</label>
-                <textarea
-                  value={settings.depositInstructions}
-                  onChange={(e) => setSettings({ ...settings, depositInstructions: e.target.value })}
-                  rows={4}
-                  className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream focus:border-gold focus:outline-none resize-none"
-                />
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-void/50 rounded-xl">
-                <div>
-                  <p className="text-cream font-medium">Require Payment Proof</p>
-                  <p className="text-sm text-cream/50">Users must upload a screenshot</p>
-                </div>
-                <button
-                  onClick={() => setSettings({ ...settings, requireProof: !settings.requireProof })}
-                  className={`w-12 h-6 rounded-full transition-colors relative ${settings.requireProof ? 'bg-profit' : 'bg-white/20'}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${settings.requireProof ? 'left-7' : 'left-1'}`} />
-                </button>
-              </div>
-
-              <button
-                onClick={handleSaveSettings}
-                className="w-full py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors flex items-center justify-center gap-2"
-              >
-                <Save className="w-5 h-5" /> Save Settings
-              </button>
-            </div>
-          </div>
-        )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Add Crypto Modal */}
+      {/* Users Section */}
+      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-white/5">
+          <h2 className="text-lg font-semibold text-cream flex items-center gap-2">
+            <Users className="w-5 h-5 text-electric" />
+            User Accounts
+          </h2>
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search users..."
+                className="pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+              />
+            </div>
+          </div>
+        </div>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="text-xs text-slate-400 border-b border-white/5">
+                <th className="text-left p-4">User</th>
+                <th className="text-right p-4">Spot Balance</th>
+                <th className="text-right p-4">Margin Balance</th>
+                <th className="text-center p-4">KYC</th>
+                <th className="text-center p-4">Status</th>
+                <th className="text-right p-4">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredUsers.map(user => (
+                <tr key={user.id} className="border-b border-white/5 hover:bg-white/5">
+                  <td className="p-4">
+                    <div>
+                      <p className="text-sm font-medium text-cream">{user.name}</p>
+                      <p className="text-xs text-slate-500">{user.email}</p>
+                    </div>
+                  </td>
+                  <td className="p-4 text-right">
+                    <span className="text-sm font-mono text-cream">
+                      ${user.balance.toLocaleString()}
+                    </span>
+                  </td>
+                  <td className="p-4 text-right">
+                    <span className="text-sm font-mono text-cream">
+                      ${user.marginBalance.toLocaleString()}
+                    </span>
+                  </td>
+                  <td className="p-4 text-center">
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      user.kycLevel >= 2
+                        ? 'bg-profit/10 text-profit'
+                        : user.kycLevel === 1
+                        ? 'bg-yellow-500/10 text-yellow-500'
+                        : 'bg-slate-500/10 text-slate-400'
+                    }`}>
+                      Level {user.kycLevel}
+                    </span>
+                  </td>
+                  <td className="p-4 text-center">
+                    <span className={`px-2 py-1 text-xs rounded-full capitalize ${
+                      user.status === 'active'
+                        ? 'bg-profit/10 text-profit'
+                        : user.status === 'pending'
+                        ? 'bg-yellow-500/10 text-yellow-500'
+                        : 'bg-loss/10 text-loss'
+                    }`}>
+                      {user.status}
+                    </span>
+                  </td>
+                  <td className="p-4">
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => {
+                          setSelectedUser(user);
+                          setShowEditModal(true);
+                        }}
+                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                        title="Edit Balance"
+                      >
+                        <Edit className="w-4 h-4 text-slate-400" />
+                      </button>
+                      <button
+                        className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+                        title="View Details"
+                      >
+                        <Eye className="w-4 h-4 text-slate-400" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Edit Balance Modal */}
       <AnimatePresence>
-        {showAddModal === 'crypto' && (
+        {showEditModal && selectedUser && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            onClick={() => setShowAddModal(null)}
           >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
+              initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-charcoal rounded-2xl border border-white/10 p-6 w-full max-w-md"
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-charcoal rounded-2xl border border-white/10 p-6 max-w-md w-full"
             >
-              <h3 className="text-xl font-semibold text-cream mb-4">Add Crypto Wallet</h3>
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-sm text-cream/60 mb-1 block">Symbol</label>
-                    <input
-                      type="text"
-                      value={newCrypto.symbol}
-                      onChange={(e) => setNewCrypto({ ...newCrypto, symbol: e.target.value.toUpperCase() })}
-                      placeholder="BTC"
-                      className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm text-cream/60 mb-1 block">Icon</label>
-                    <input
-                      type="text"
-                      value={newCrypto.icon}
-                      onChange={(e) => setNewCrypto({ ...newCrypto, icon: e.target.value })}
-                      placeholder="₿"
-                      className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-sm text-cream/60 mb-1 block">Name</label>
-                  <input
-                    type="text"
-                    value={newCrypto.name}
-                    onChange={(e) => setNewCrypto({ ...newCrypto, name: e.target.value })}
-                    placeholder="Bitcoin"
-                    className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-cream/60 mb-1 block">Network</label>
-                  <input
-                    type="text"
-                    value={newCrypto.network}
-                    onChange={(e) => setNewCrypto({ ...newCrypto, network: e.target.value })}
-                    placeholder="Bitcoin / ERC-20 / TRC-20"
-                    className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-cream/60 mb-1 block">Wallet Address</label>
-                  <input
-                    type="text"
-                    value={newCrypto.address}
-                    onChange={(e) => setNewCrypto({ ...newCrypto, address: e.target.value })}
-                    placeholder="0x..."
-                    className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream font-mono focus:border-gold focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-cream/60 mb-1 block">Minimum Deposit ($)</label>
-                  <input
-                    type="number"
-                    value={newCrypto.minDeposit}
-                    onChange={(e) => setNewCrypto({ ...newCrypto, minDeposit: parseInt(e.target.value) || 0 })}
-                    className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none"
-                  />
-                </div>
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-semibold text-cream">Edit User Balance</h3>
+                <button
+                  onClick={() => setShowEditModal(false)}
+                  className="p-2 hover:bg-white/10 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
               </div>
-              <div className="flex gap-3 mt-6">
-                <button
-                  onClick={() => setShowAddModal(null)}
-                  className="flex-1 py-2 bg-white/10 text-cream font-medium rounded-lg hover:bg-white/20 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveCrypto}
-                  className="flex-1 py-2 bg-gold text-void font-medium rounded-lg hover:bg-gold/90 transition-colors"
-                >
-                  Add Wallet
-                </button>
+
+              <div className="space-y-4">
+                {/* User Info */}
+                <div className="p-3 bg-white/5 rounded-xl">
+                  <p className="text-sm text-cream font-medium">{selectedUser.name}</p>
+                  <p className="text-xs text-slate-400">{selectedUser.email}</p>
+                  <div className="flex gap-4 mt-2">
+                    <span className="text-xs text-slate-400">
+                      Spot: ${selectedUser.balance.toLocaleString()}
+                    </span>
+                    <span className="text-xs text-slate-400">
+                      Margin: ${selectedUser.marginBalance.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Account Type */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Account Type</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setEditType('spot')}
+                      className={`p-3 rounded-xl border transition-all ${
+                        editType === 'spot'
+                          ? 'border-gold bg-gold/10 text-gold'
+                          : 'border-white/10 text-slate-400 hover:border-white/20'
+                      }`}
+                    >
+                      Spot Account
+                    </button>
+                    <button
+                      onClick={() => setEditType('margin')}
+                      className={`p-3 rounded-xl border transition-all ${
+                        editType === 'margin'
+                          ? 'border-gold bg-gold/10 text-gold'
+                          : 'border-white/10 text-slate-400 hover:border-white/20'
+                      }`}
+                    >
+                      Margin Account
+                    </button>
+                  </div>
+                </div>
+
+                {/* Action Type */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Action</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => setEditAction('add')}
+                      className={`p-2 rounded-lg border transition-all flex items-center justify-center gap-1 ${
+                        editAction === 'add'
+                          ? 'border-profit bg-profit/10 text-profit'
+                          : 'border-white/10 text-slate-400 hover:border-white/20'
+                      }`}
+                    >
+                      <Plus className="w-4 h-4" />
+                      Add
+                    </button>
+                    <button
+                      onClick={() => setEditAction('subtract')}
+                      className={`p-2 rounded-lg border transition-all flex items-center justify-center gap-1 ${
+                        editAction === 'subtract'
+                          ? 'border-loss bg-loss/10 text-loss'
+                          : 'border-white/10 text-slate-400 hover:border-white/20'
+                      }`}
+                    >
+                      <Minus className="w-4 h-4" />
+                      Subtract
+                    </button>
+                    <button
+                      onClick={() => setEditAction('set')}
+                      className={`p-2 rounded-lg border transition-all flex items-center justify-center gap-1 ${
+                        editAction === 'set'
+                          ? 'border-electric bg-electric/10 text-electric'
+                          : 'border-white/10 text-slate-400 hover:border-white/20'
+                      }`}
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                      Set
+                    </button>
+                  </div>
+                </div>
+
+                {/* Amount */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Amount</label>
+                  <div className="relative">
+                    <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <input
+                      type="number"
+                      value={editAmount}
+                      onChange={(e) => setEditAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                </div>
+
+                {/* Note */}
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Note (for audit)</label>
+                  <input
+                    type="text"
+                    value={editNote}
+                    onChange={(e) => setEditNote(e.target.value)}
+                    placeholder="Reason for adjustment..."
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                  />
+                </div>
+
+                {/* Preview */}
+                <div className="p-3 bg-gold/5 border border-gold/20 rounded-xl">
+                  <p className="text-xs text-gold mb-1">Preview</p>
+                  <p className="text-sm text-cream">
+                    {editType === 'spot' ? 'Spot' : 'Margin'} Balance:{' '}
+                    <span className="font-mono">
+                      ${(editType === 'spot' ? selectedUser.balance : selectedUser.marginBalance).toLocaleString()}
+                    </span>
+                    {' → '}
+                    <span className="font-mono text-gold">
+                      ${(() => {
+                        const current = editType === 'spot' ? selectedUser.balance : selectedUser.marginBalance;
+                        const amount = parseFloat(editAmount) || 0;
+                        switch (editAction) {
+                          case 'add': return (current + amount).toLocaleString();
+                          case 'subtract': return Math.max(0, current - amount).toLocaleString();
+                          case 'set': return amount.toLocaleString();
+                          default: return current.toLocaleString();
+                        }
+                      })()}
+                    </span>
+                  </p>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => setShowEditModal(false)}
+                    className="flex-1 py-3 bg-white/5 text-slate-400 font-semibold rounded-xl hover:bg-white/10 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleEditBalance}
+                    disabled={!editAmount}
+                    className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
+                  >
+                    Save Changes
+                  </button>
+                </div>
               </div>
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Reject Deposit Modal */}
+      {/* Add Address Modal */}
       <AnimatePresence>
-        {selectedDeposit && (
+        {showAddressModal && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            onClick={() => setSelectedDeposit(null)}
           >
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
+              initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-charcoal rounded-2xl border border-white/10 p-6 w-full max-w-md"
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-charcoal rounded-2xl border border-white/10 p-6 max-w-md w-full"
             >
-              <h3 className="text-xl font-semibold text-cream mb-4">Reject Deposit</h3>
-              <p className="text-cream/70 mb-4">
-                Are you sure you want to reject this ${selectedDeposit.amount} deposit from {selectedDeposit.userEmail}?
-              </p>
-              <div className="mb-4">
-                <label className="text-sm text-cream/60 mb-2 block">Reason (Optional)</label>
-                <textarea
-                  value={rejectNote}
-                  onChange={(e) => setRejectNote(e.target.value)}
-                  placeholder="Invalid payment proof, incorrect amount, etc."
-                  rows={3}
-                  className="w-full px-3 py-2 bg-void/50 border border-white/10 rounded-lg text-cream focus:border-gold focus:outline-none resize-none"
-                />
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-xl font-semibold text-cream">Add Deposit Address</h3>
+                <button
+                  onClick={() => setShowAddressModal(false)}
+                  className="p-2 hover:bg-white/10 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
               </div>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => { setSelectedDeposit(null); setRejectNote(''); }}
-                  className="flex-1 py-2 bg-white/10 text-cream font-medium rounded-lg hover:bg-white/20 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => handleRejectDeposit(selectedDeposit)}
-                  className="flex-1 py-2 bg-loss text-white font-medium rounded-lg hover:bg-loss/90 transition-colors"
-                >
-                  Reject Deposit
-                </button>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Currency</label>
+                  <input
+                    type="text"
+                    value={newAddress.currency}
+                    onChange={(e) => setNewAddress(prev => ({ ...prev, currency: e.target.value }))}
+                    placeholder="BTC, ETH, USDT..."
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold uppercase"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Network</label>
+                  <input
+                    type="text"
+                    value={newAddress.network}
+                    onChange={(e) => setNewAddress(prev => ({ ...prev, network: e.target.value }))}
+                    placeholder="ERC-20, TRC-20, Bitcoin..."
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Wallet Address</label>
+                  <input
+                    type="text"
+                    value={newAddress.address}
+                    onChange={(e) => setNewAddress(prev => ({ ...prev, address: e.target.value }))}
+                    placeholder="0x..."
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-slate-400 mb-2">Memo (optional)</label>
+                  <input
+                    type="text"
+                    value={newAddress.memo}
+                    onChange={(e) => setNewAddress(prev => ({ ...prev, memo: e.target.value }))}
+                    placeholder="Tag or memo if required..."
+                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    onClick={() => setShowAddressModal(false)}
+                    className="flex-1 py-3 bg-white/5 text-slate-400 font-semibold rounded-xl hover:bg-white/10 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddNewAddress}
+                    disabled={!newAddress.currency || !newAddress.network || !newAddress.address}
+                    className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
+                  >
+                    Add Address
+                  </button>
+                </div>
               </div>
             </motion.div>
           </motion.div>

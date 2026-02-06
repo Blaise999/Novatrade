@@ -87,7 +87,7 @@ export const useAdminAuthStore = create<AdminAuthStore>()(
             id: data.admin.id,
             email: data.admin.email,
             name: data.admin.name || data.admin.first_name || 'Admin',
-            role: data.admin.role as 'super_admin' | 'signal_provider',
+            role: data.admin.role as 'super_admin' | 'admin' | 'signal_provider',
             createdAt: new Date(data.admin.created_at),
             lastLogin: new Date(),
           };
