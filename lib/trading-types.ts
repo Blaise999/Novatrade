@@ -1,7 +1,7 @@
 // ==========================================
 // COMPREHENSIVE TRADING TYPES
 // Implements both Spot (Stock) and Margin (FX/CFD) trading models
-// ==========================================
+// ======================s====================
 
 // ==========================================
 // ACCOUNT TYPES
