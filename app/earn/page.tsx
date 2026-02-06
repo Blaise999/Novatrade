@@ -4,153 +4,52 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
-  Gift,
-  Twitter,
-  MessageCircle,
   Users,
-  CheckCircle,
-  Lock,
-  Clock,
-  Coins,
-  Trophy,
-  Zap,
-  ArrowRight,
-  ExternalLink,
+  Gift,
+  DollarSign,
   Copy,
+  CheckCircle,
   Share2,
+  TrendingUp,
+  Award,
+  ArrowRight,
+  Twitter,
+  Facebook,
+  MessageCircle,
+  Mail,
+  Link as LinkIcon,
   Star,
-  Sparkles,
-  Wallet,
-  Shield
+  Crown
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
 
-// Featured Nova Airdrop
-const novaAirdrop = {
-  id: 'nova-season1',
-  name: 'NOVA Airdrop Season 1',
-  description: 'Claim your free NOVA tokens + chance to win BNB! Pay only $0.10 claim fee.',
-  reward: '10,000,000',
-  currency: 'NOVA',
-  bnbPool: '100 BNB',
-  status: 'live',
-  endsIn: '65 days',
-  claimFee: '$0.10 USDC',
-  participants: 12847,
-  features: [
-    'One-click claim with permit',
-    'No unlimited approvals',
-    '10% chance to win BNB',
-    'Bonus for early adopters',
-  ],
-};
-
-const airdrops = [
-  {
-    id: 'welcome',
-    name: 'Welcome Bonus',
-    description: 'Sign up and verify your account to receive your first airdrop',
-    reward: 100,
-    currency: 'NOVA',
-    status: 'active',
-    endsIn: null,
-    tasks: [
-      { id: 1, name: 'Create Account', completed: false, points: 25 },
-      { id: 2, name: 'Verify Email', completed: false, points: 25 },
-      { id: 3, name: 'Complete KYC', completed: false, points: 50 },
-    ],
-    icon: Gift,
-    color: 'from-gold to-yellow-600',
-  },
-  {
-    id: 'social',
-    name: 'Social Media Campaign',
-    description: 'Follow us on social media and engage with our community',
-    reward: 250,
-    currency: 'NOVA',
-    status: 'active',
-    endsIn: '5 days',
-    tasks: [
-      { id: 1, name: 'Follow on Twitter', completed: false, points: 50, link: 'https://twitter.com' },
-      { id: 2, name: 'Join Telegram Group', completed: false, points: 50, link: 'https://t.me' },
-      { id: 3, name: 'Retweet Pinned Post', completed: false, points: 75, link: 'https://twitter.com' },
-      { id: 4, name: 'Join Discord Server', completed: false, points: 75, link: 'https://discord.gg' },
-    ],
-    icon: Twitter,
-    color: 'from-electric to-blue-600',
-  },
-  {
-    id: 'trading',
-    name: 'First Trade Bonus',
-    description: 'Complete your first trade and earn bonus tokens',
-    reward: 500,
-    currency: 'NOVA',
-    status: 'active',
-    endsIn: '12 days',
-    tasks: [
-      { id: 1, name: 'Deposit $50+', completed: false, points: 150 },
-      { id: 2, name: 'Complete 1st Trade', completed: false, points: 150 },
-      { id: 3, name: 'Trade 5 times', completed: false, points: 200 },
-    ],
-    icon: Zap,
-    color: 'from-profit to-emerald-600',
-  },
-  {
-    id: 'referral',
-    name: 'Referral Airdrop',
-    description: 'Invite friends and earn tokens for each successful referral',
-    reward: 1000,
-    currency: 'NOVA',
-    status: 'active',
-    endsIn: '30 days',
-    tasks: [
-      { id: 1, name: 'Invite 1 Friend', completed: false, points: 100 },
-      { id: 2, name: 'Invite 5 Friends', completed: false, points: 300 },
-      { id: 3, name: 'Invite 10 Friends', completed: false, points: 600 },
-    ],
-    icon: Users,
-    color: 'from-purple-500 to-pink-600',
-  },
-  {
-    id: 'vip',
-    name: 'VIP Exclusive Drop',
-    description: 'Exclusive airdrop for Pro and VIP members only',
-    reward: 5000,
-    currency: 'NOVA',
-    status: 'locked',
-    endsIn: null,
-    tasks: [
-      { id: 1, name: 'Upgrade to Pro/VIP', completed: false, points: 2500 },
-      { id: 2, name: 'Trade $10,000+ volume', completed: false, points: 2500 },
-    ],
-    icon: Trophy,
-    color: 'from-amber-500 to-orange-600',
-    requirement: 'Pro or VIP subscription required',
-  },
+const tiers = [
+  { level: 'Bronze', referrals: 1, commission: 10, bonus: 50, color: 'from-orange-600 to-orange-700' },
+  { level: 'Silver', referrals: 5, commission: 15, bonus: 100, color: 'from-slate-400 to-slate-500' },
+  { level: 'Gold', referrals: 15, commission: 20, bonus: 250, color: 'from-gold to-yellow-600' },
+  { level: 'Platinum', referrals: 50, commission: 25, bonus: 500, color: 'from-cyan-400 to-cyan-500' },
+  { level: 'Diamond', referrals: 100, commission: 30, bonus: 1000, color: 'from-purple-500 to-pink-500' },
 ];
 
-const upcomingAirdrops = [
-  { name: 'Holiday Special Airdrop', date: 'Dec 25, 2025', reward: '2,500 NOVA' },
-  { name: 'New Year Mega Drop', date: 'Jan 1, 2026', reward: '10,000 NOVA' },
-  { name: 'Trading Competition', date: 'Jan 15, 2026', reward: '50,000 NOVA Pool' },
+const leaderboard = [
+  { rank: 1, name: 'CryptoKing_23', referrals: 847, earnings: 42350, avatar: '👑' },
+  { rank: 2, name: 'TradeM***er', referrals: 623, earnings: 31150, avatar: '🥈' },
+  { rank: 3, name: 'Inve***Pro', referrals: 512, earnings: 25600, avatar: '🥉' },
+  { rank: 4, name: 'Bit***nWhale', referrals: 428, earnings: 21400, avatar: '🐋' },
+  { rank: 5, name: 'Nova***ader', referrals: 356, earnings: 17800, avatar: '⭐' },
 ];
 
-export default function AirdropsPage() {
-  const [selectedAirdrop, setSelectedAirdrop] = useState<string | null>(null);
-  const [copiedCode, setCopiedCode] = useState(false);
+export default function ReferralPage() {
+  const [referralCode] = useState('NOVA-XYZ789');
+  const [referralLink] = useState('https://novatrade.com/ref/NOVA-XYZ789');
+  const [copied, setCopied] = useState<'code' | 'link' | null>(null);
 
-  const referralCode = 'NOVA2024XYZ';
-
-  const copyReferralCode = () => {
-    navigator.clipboard.writeText(referralCode);
-    setCopiedCode(true);
-    setTimeout(() => setCopiedCode(false), 2000);
+  const copyToClipboard = (text: string, type: 'code' | 'link') => {
+    navigator.clipboard.writeText(text);
+    setCopied(type);
+    setTimeout(() => setCopied(null), 2000);
   };
-
-  const totalAvailable = airdrops
-    .filter(a => a.status === 'active')
-    .reduce((sum, a) => sum + a.reward, 0);
 
   return (
     <div className="min-h-screen bg-void">
@@ -159,290 +58,216 @@ export default function AirdropsPage() {
       <main className="pt-32 pb-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           {/* Header */}
-          <div className="text-center mb-12">
-            <motion.div
-              initial={{ scale: 0 }}
-              animate={{ scale: 1 }}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-profit/10 border border-profit/20 rounded-full mb-6"
-            >
-              <Sparkles className="w-4 h-4 text-profit" />
-              <span className="text-profit text-sm font-medium">Free Tokens Available!</span>
-            </motion.div>
+          <div className="text-center mb-16">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-profit/10 border border-profit/20 rounded-full mb-6">
+              <Users className="w-4 h-4 text-profit" />
+              <span className="text-profit text-sm font-medium">Earn Together</span>
+            </div>
             
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-display font-bold text-cream mb-6">
-              Claim Your
+              Refer & Earn
               <br />
-              <span className="gradient-text-gold">Free Airdrops</span>
+              <span className="gradient-text-gold">Up to 30% Commission</span>
             </h1>
-            <p className="text-lg text-cream/60 max-w-2xl mx-auto mb-8">
-              Complete simple tasks to earn NOVA tokens. No purchase necessary. 
-              Over {totalAvailable.toLocaleString()} NOVA available right now!
+            <p className="text-lg text-cream/60 max-w-2xl mx-auto">
+              Invite friends to NOVATrADE and earn lifetime commissions on their trading fees. 
+              Plus, they get bonus funds to start trading!
             </p>
-
-            {/* Stats */}
-            <div className="flex flex-wrap items-center justify-center gap-8">
-              <div className="text-center">
-                <p className="text-3xl font-bold text-gold">{totalAvailable.toLocaleString()}</p>
-                <p className="text-sm text-cream/50">NOVA Available</p>
-              </div>
-              <div className="text-center">
-                <p className="text-3xl font-bold text-cream">{airdrops.filter(a => a.status === 'active').length}</p>
-                <p className="text-sm text-cream/50">Active Campaigns</p>
-              </div>
-              <div className="text-center">
-                <p className="text-3xl font-bold text-profit">$2.50</p>
-                <p className="text-sm text-cream/50">NOVA Price</p>
-              </div>
-            </div>
           </div>
 
-          {/* FEATURED: Nova Airdrop Season 1 */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-12"
-          >
-            <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-gold/20 via-charcoal to-profit/20 border border-gold/30 p-1">
-              <div className="absolute inset-0 bg-[url('/grid.svg')] opacity-10" />
-              <div className="relative bg-charcoal/80 rounded-[22px] p-6 md:p-8">
-                <div className="flex flex-col lg:flex-row gap-8">
-                  {/* Left Content */}
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="flex items-center gap-2 px-3 py-1 bg-loss text-white text-xs font-bold rounded-full animate-pulse">
-                        <span className="w-2 h-2 bg-white rounded-full" />
-                        LIVE NOW
-                      </div>
-                      <span className="px-3 py-1 bg-gold/20 text-gold text-xs font-medium rounded-full">
-                        FEATURED
-                      </span>
-                    </div>
-
-                    <h2 className="text-3xl md:text-4xl font-display font-bold text-cream mb-3">
-                      {novaAirdrop.name}
-                    </h2>
-                    <p className="text-lg text-cream/70 mb-6">
-                      {novaAirdrop.description}
-                    </p>
-
-                    {/* Rewards */}
-                    <div className="grid grid-cols-2 gap-4 mb-6">
-                      <div className="p-4 bg-gold/10 rounded-xl border border-gold/20">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Coins className="w-5 h-5 text-gold" />
-                          <span className="text-sm text-cream/70">Token Pool</span>
-                        </div>
-                        <p className="text-2xl font-bold text-gold">{novaAirdrop.reward} NOVA</p>
-                      </div>
-                      <div className="p-4 bg-yellow-500/10 rounded-xl border border-yellow-500/20">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Trophy className="w-5 h-5 text-yellow-500" />
-                          <span className="text-sm text-cream/70">BNB Giveaway</span>
-                        </div>
-                        <p className="text-2xl font-bold text-yellow-500">{novaAirdrop.bnbPool}</p>
-                      </div>
-                    </div>
-
-                    {/* Features */}
-                    <div className="grid grid-cols-2 gap-2 mb-6">
-                      {novaAirdrop.features.map((feature, i) => (
-                        <div key={i} className="flex items-center gap-2 text-sm">
-                          <CheckCircle className="w-4 h-4 text-profit flex-shrink-0" />
-                          <span className="text-cream/70">{feature}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* CTA */}
-                    <Link
-                      href="/earn/airdrops/nova"
-                      className="inline-flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-gold to-yellow-500 text-void font-bold rounded-xl hover:opacity-90 transition-all"
-                    >
-                      <Wallet className="w-5 h-5" />
-                      Claim Now - Only {novaAirdrop.claimFee}
-                      <ArrowRight className="w-5 h-5" />
-                    </Link>
-                  </div>
-
-                  {/* Right Stats */}
-                  <div className="lg:w-72 space-y-4">
-                    <div className="p-4 bg-white/5 rounded-xl">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-cream/50 text-sm">Participants</span>
-                        <Users className="w-4 h-4 text-cream/50" />
-                      </div>
-                      <p className="text-2xl font-bold text-cream">{novaAirdrop.participants.toLocaleString()}</p>
-                    </div>
-                    <div className="p-4 bg-white/5 rounded-xl">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-cream/50 text-sm">Time Remaining</span>
-                        <Clock className="w-4 h-4 text-cream/50" />
-                      </div>
-                      <p className="text-2xl font-bold text-loss">{novaAirdrop.endsIn}</p>
-                    </div>
-                    <div className="p-4 bg-white/5 rounded-xl">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-cream/50 text-sm">Claim Fee</span>
-                        <Shield className="w-4 h-4 text-cream/50" />
-                      </div>
-                      <p className="text-2xl font-bold text-profit">{novaAirdrop.claimFee}</p>
-                      <p className="text-xs text-cream/50">EIP-2612 Permit</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Referral Box */}
-          <div className="mb-12 p-6 bg-gradient-to-r from-purple-500/10 to-pink-500/10 rounded-2xl border border-purple-500/20">
-            <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-4">
-                <div className="w-14 h-14 bg-purple-500/20 rounded-xl flex items-center justify-center">
-                  <Share2 className="w-7 h-7 text-purple-400" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-cream">Share & Earn More</h3>
-                  <p className="text-sm text-cream/60">Earn 100 NOVA for each friend who signs up</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="px-4 py-2 bg-void rounded-lg border border-white/10">
-                  <code className="text-gold font-mono">{referralCode}</code>
-                </div>
-                <button
-                  onClick={copyReferralCode}
-                  className="p-3 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
-                >
-                  {copiedCode ? <CheckCircle className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Other Airdrops Grid */}
-          <h2 className="text-2xl font-bold text-cream mb-6">More Airdrops</h2>
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
-            {airdrops.map((airdrop, index) => (
+          {/* Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
+            {[
+              { label: 'Total Paid Out', value: '$2.4M+', icon: DollarSign },
+              { label: 'Active Referrers', value: '12,500+', icon: Users },
+              { label: 'Avg. Monthly Earnings', value: '$450', icon: TrendingUp },
+              { label: 'Top Earner This Month', value: '$8,200', icon: Crown },
+            ].map((stat, index) => (
               <motion.div
-                key={airdrop.id}
+                key={index}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: index * 0.1 }}
-                className={`relative p-6 rounded-2xl border ${
-                  airdrop.status === 'locked' 
-                    ? 'bg-white/5 border-white/10 opacity-60' 
-                    : 'bg-white/5 border-white/10 hover:border-white/20'
-                } transition-all`}
+                className="p-4 bg-white/5 rounded-xl border border-white/10 text-center"
               >
-                {airdrop.status === 'locked' && (
-                  <div className="absolute top-4 right-4">
-                    <Lock className="w-5 h-5 text-slate-500" />
-                  </div>
-                )}
-
-                <div className={`w-14 h-14 rounded-xl bg-gradient-to-br ${airdrop.color} flex items-center justify-center mb-4`}>
-                  <airdrop.icon className="w-7 h-7 text-white" />
-                </div>
-
-                <h3 className="text-xl font-bold text-cream mb-2">{airdrop.name}</h3>
-                <p className="text-sm text-cream/60 mb-4">{airdrop.description}</p>
-
-                {airdrop.requirement && (
-                  <p className="text-xs text-loss mb-4">{airdrop.requirement}</p>
-                )}
-
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <span className="text-2xl font-bold text-gold">{airdrop.reward.toLocaleString()}</span>
-                    <span className="text-cream/50 ml-2">{airdrop.currency}</span>
-                  </div>
-                  {airdrop.endsIn && (
-                    <div className="flex items-center gap-1 text-sm text-cream/50">
-                      <Clock className="w-4 h-4" />
-                      {airdrop.endsIn}
-                    </div>
-                  )}
-                </div>
-
-                {/* Progress */}
-                <div className="mb-4">
-                  <div className="flex items-center justify-between text-sm mb-2">
-                    <span className="text-cream/50">Progress</span>
-                    <span className="text-cream">
-                      {airdrop.tasks.filter(t => t.completed).length}/{airdrop.tasks.length} tasks
-                    </span>
-                  </div>
-                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                    <div 
-                      className={`h-full bg-gradient-to-r ${airdrop.color}`}
-                      style={{ 
-                        width: `${(airdrop.tasks.filter(t => t.completed).length / airdrop.tasks.length) * 100}%` 
-                      }}
-                    />
-                  </div>
-                </div>
-
-                {/* Tasks Preview */}
-                <div className="space-y-2 mb-4">
-                  {airdrop.tasks.slice(0, 3).map((task) => (
-                    <div key={task.id} className="flex items-center gap-2 text-sm">
-                      {task.completed ? (
-                        <CheckCircle className="w-4 h-4 text-profit" />
-                      ) : (
-                        <div className="w-4 h-4 rounded-full border border-white/20" />
-                      )}
-                      <span className={task.completed ? 'text-cream/50 line-through' : 'text-cream/70'}>
-                        {task.name}
-                      </span>
-                      <span className="ml-auto text-xs text-gold">+{task.points}</span>
-                    </div>
-                  ))}
-                </div>
-
-                <Link
-                  href={airdrop.status === 'locked' ? '/pricing' : '/auth/signup'}
-                  className={`block w-full py-3 text-center font-semibold rounded-xl transition-all ${
-                    airdrop.status === 'locked'
-                      ? 'bg-white/5 text-cream/50 cursor-not-allowed'
-                      : 'bg-white/10 text-cream hover:bg-white/20'
-                  }`}
-                >
-                  {airdrop.status === 'locked' ? 'Upgrade to Unlock' : 'Start Tasks'}
-                </Link>
+                <stat.icon className="w-6 h-6 text-gold mx-auto mb-2" />
+                <p className="text-2xl font-bold text-cream">{stat.value}</p>
+                <p className="text-sm text-cream/50">{stat.label}</p>
               </motion.div>
             ))}
           </div>
 
-          {/* Upcoming Airdrops */}
-          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 mb-16">
-            <div className="flex items-center gap-3 mb-6">
-              <Coins className="w-6 h-6 text-gold" />
-              <h2 className="text-2xl font-bold text-cream">Upcoming Airdrops</h2>
-            </div>
-            <div className="grid md:grid-cols-3 gap-4">
-              {upcomingAirdrops.map((airdrop, index) => (
-                <div key={index} className="p-4 bg-white/5 rounded-xl border border-white/10">
-                  <div className="flex items-center gap-2 text-sm text-cream/50 mb-2">
-                    <Clock className="w-4 h-4" />
-                    {airdrop.date}
+          {/* Referral Box */}
+          <div className="bg-gradient-to-r from-gold/10 to-profit/10 rounded-2xl border border-gold/20 p-8 mb-12">
+            <div className="grid md:grid-cols-2 gap-8">
+              <div>
+                <h2 className="text-2xl font-bold text-cream mb-4">Your Referral Link</h2>
+                <p className="text-cream/60 mb-6">
+                  Share your unique link with friends. When they sign up and trade, you both earn rewards!
+                </p>
+                
+                {/* Referral Link */}
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-cream/50 mb-2">Your Referral Link</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={referralLink}
+                        readOnly
+                        className="flex-1 px-4 py-3 bg-void border border-white/10 rounded-xl text-cream text-sm font-mono"
+                      />
+                      <button
+                        onClick={() => copyToClipboard(referralLink, 'link')}
+                        className="p-3 bg-gold text-void rounded-xl hover:bg-gold/90 transition-colors"
+                      >
+                        {copied === 'link' ? <CheckCircle className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
+                      </button>
+                    </div>
                   </div>
-                  <h3 className="text-cream font-medium mb-1">{airdrop.name}</h3>
-                  <p className="text-gold font-bold">{airdrop.reward}</p>
+
+                  <div>
+                    <label className="block text-sm text-cream/50 mb-2">Referral Code</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={referralCode}
+                        readOnly
+                        className="flex-1 px-4 py-3 bg-void border border-white/10 rounded-xl text-gold text-lg font-mono font-bold"
+                      />
+                      <button
+                        onClick={() => copyToClipboard(referralCode, 'code')}
+                        className="p-3 bg-white/10 text-cream rounded-xl hover:bg-white/20 transition-colors"
+                      >
+                        {copied === 'code' ? <CheckCircle className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
+                      </button>
+                    </div>
+                  </div>
                 </div>
+
+                {/* Share Buttons */}
+                <div className="flex items-center gap-3 mt-6">
+                  <span className="text-sm text-cream/50">Share:</span>
+                  {[
+                    { icon: Twitter, color: 'hover:bg-blue-500/20 hover:text-blue-400' },
+                    { icon: Facebook, color: 'hover:bg-blue-600/20 hover:text-blue-500' },
+                    { icon: MessageCircle, color: 'hover:bg-green-500/20 hover:text-green-400' },
+                    { icon: Mail, color: 'hover:bg-red-500/20 hover:text-red-400' },
+                  ].map((social, i) => (
+                    <button
+                      key={i}
+                      className={`p-2 bg-white/5 rounded-lg text-cream/50 transition-colors ${social.color}`}
+                    >
+                      <social.icon className="w-5 h-5" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-void/50 rounded-xl p-6">
+                <h3 className="text-lg font-semibold text-cream mb-4">Rewards Breakdown</h3>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <Gift className="w-5 h-5 text-profit" />
+                      <span className="text-cream">Friend's Signup Bonus</span>
+                    </div>
+                    <span className="text-profit font-bold">$100</span>
+                  </div>
+                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <DollarSign className="w-5 h-5 text-gold" />
+                      <span className="text-cream">Your Referral Bonus</span>
+                    </div>
+                    <span className="text-gold font-bold">$50+</span>
+                  </div>
+                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <TrendingUp className="w-5 h-5 text-electric" />
+                      <span className="text-cream">Lifetime Commission</span>
+                    </div>
+                    <span className="text-electric font-bold">10-30%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Tiers */}
+          <div className="mb-16">
+            <h2 className="text-2xl font-bold text-cream mb-8 text-center">Commission Tiers</h2>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              {tiers.map((tier, index) => (
+                <motion.div
+                  key={tier.level}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.1 }}
+                  className="p-4 bg-white/5 rounded-xl border border-white/10 text-center"
+                >
+                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${tier.color} flex items-center justify-center mx-auto mb-3`}>
+                    <Star className="w-6 h-6 text-white" />
+                  </div>
+                  <h3 className="text-cream font-bold mb-1">{tier.level}</h3>
+                  <p className="text-xs text-cream/50 mb-3">{tier.referrals}+ referrals</p>
+                  <div className="space-y-1">
+                    <p className="text-profit font-bold">{tier.commission}% Commission</p>
+                    <p className="text-xs text-gold">${tier.bonus} bonus/referral</p>
+                  </div>
+                </motion.div>
               ))}
+            </div>
+          </div>
+
+          {/* Leaderboard */}
+          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 mb-16">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-3">
+                <Award className="w-6 h-6 text-gold" />
+                <h2 className="text-xl font-bold text-cream">Top Referrers This Month</h2>
+              </div>
+              <span className="text-sm text-cream/50">Win $5,000 bonus!</span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="text-left p-3 text-cream/50 font-medium">Rank</th>
+                    <th className="text-left p-3 text-cream/50 font-medium">User</th>
+                    <th className="text-right p-3 text-cream/50 font-medium">Referrals</th>
+                    <th className="text-right p-3 text-cream/50 font-medium">Earnings</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {leaderboard.map((user) => (
+                    <tr key={user.rank} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                      <td className="p-3">
+                        <span className={`text-2xl ${user.rank <= 3 ? '' : 'text-cream/50'}`}>
+                          {user.avatar}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <span className="text-cream font-medium">{user.name}</span>
+                      </td>
+                      <td className="p-3 text-right text-cream">{user.referrals.toLocaleString()}</td>
+                      <td className="p-3 text-right text-profit font-bold">${user.earnings.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
           {/* How It Works */}
           <div className="text-center">
-            <h2 className="text-2xl font-bold text-cream mb-8">How Airdrops Work</h2>
-            <div className="grid md:grid-cols-4 gap-6">
+            <h2 className="text-2xl font-bold text-cream mb-8">How It Works</h2>
+            <div className="grid md:grid-cols-4 gap-6 max-w-4xl mx-auto">
               {[
-                { step: 1, title: 'Sign Up', description: 'Create your free account', icon: Users },
-                { step: 2, title: 'Complete Tasks', description: 'Follow social & trading tasks', icon: CheckCircle },
-                { step: 3, title: 'Earn Tokens', description: 'Get NOVA tokens credited', icon: Coins },
-                { step: 4, title: 'Trade or Withdraw', description: 'Use tokens or cash out', icon: Zap },
+                { step: 1, title: 'Share Link', description: 'Share your unique referral link with friends', icon: Share2 },
+                { step: 2, title: 'They Sign Up', description: 'Friends create account using your link', icon: Users },
+                { step: 3, title: 'They Trade', description: 'They get bonus and start trading', icon: TrendingUp },
+                { step: 4, title: 'You Earn', description: 'Earn commission on every trade forever', icon: DollarSign },
               ].map((item) => (
                 <div key={item.step} className="text-center">
                   <div className="w-16 h-16 bg-gold/10 border border-gold/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
@@ -459,10 +284,10 @@ export default function AirdropsPage() {
           {/* CTA */}
           <div className="text-center mt-16">
             <Link
-              href="/earn/airdrops/nova"
+              href="/auth/signup"
               className="inline-flex items-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
             >
-              Claim Nova Airdrop Now
+              Start Earning Now
               <ArrowRight className="w-5 h-5" />
             </Link>
           </div>

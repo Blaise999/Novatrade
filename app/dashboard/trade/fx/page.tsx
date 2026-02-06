@@ -64,8 +64,8 @@ const standardForexAssets: FXAsset[] = (marketAssets as any[])
 // Educational pairs for admin control
 const educationalPairs: FXAsset[] = [
   { id: 'nova-usd', symbol: 'NOVA/USD', name: 'NOVA Token / US Dollar', price: 1.25, change24h: 2.5, type: 'forex' },
-  { id: 'learn-usd', symbol: 'LEARN/USD', name: 'Learning Environment', price: 0.85, change24h: -1.2, type: 'forex' },
   { id: 'demo-usd', symbol: 'DEMO/USD', name: 'Demo Trading Pair', price: 2.0, change24h: 0.8, type: 'forex' },
+  { id: 'trd-usd', symbol: 'TRD/USD', name: 'TRD Token / US Dollar', price: 0.85, change24h: -1.2, type: 'forex' },
 ];
 
 // Leverage options for forex
@@ -82,7 +82,7 @@ const currencyFlags: Record<string, string> = {
   CHF: '🇨🇭',
   NZD: '🇳🇿',
   NOVA: '🌟',
-  LEARN: '📚',
+  TRD: '📈',
   DEMO: '🎮',
 };
 
@@ -102,7 +102,7 @@ export default function FXTradingPage() {
   } = useTradingAccountStore();
 
   // User store for balance refresh
-  const { refreshUser } = useStore();
+  const { refreshUser, user } = useStore();
 
   // Admin session store (typed mismatch fix)
   const adminSession = useAdminSessionStore() as any;
@@ -165,8 +165,11 @@ export default function FXTradingPage() {
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartDimensions, setChartDimensions] = useState({ width: 300, height: 250 });
 
-  // Check if user can trade based on tier
-  const canTrade = canPerformAction(currentTier as any, 'trade' as any);
+  // User balance (admin-set balance counts as deposit)
+  const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
+
+  // Check if user can trade — tier-based OR if admin has set a balance
+  const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
   const isEducationalPair = isAdminControlledPair(selectedAsset.symbol);
 
   // Filter positions for this market (typed mismatch fix)
@@ -358,8 +361,8 @@ export default function FXTradingPage() {
     setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
   };
 
-  // Margin metrics
-  const accountBalance = Number(marginAccount?.balance ?? 0);
+  // Margin metrics — use user balance as fallback (admin-edited balance counts)
+  const accountBalance = Number(marginAccount?.balance ?? 0) || userBalance;
   const usedMargin = forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0);
   const unrealizedPnL = forexPositions.reduce((sum, pos) => sum + Number((pos as any).unrealizedPnL ?? 0), 0);
   const equity = accountBalance + unrealizedPnL;
@@ -775,7 +778,7 @@ export default function FXTradingPage() {
               </div>
             </div>
 
-            {accountBalance === 0 && (
+            {accountBalance === 0 && userBalance === 0 && (
               <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
                 <p className="text-xs text-yellow-500">💡 Your balance is $0. Make a deposit to start trading.</p>
               </div>

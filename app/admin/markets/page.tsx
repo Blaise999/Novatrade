@@ -1,9 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
+  TrendingDown,
   Play,
   Pause,
   CandlestickChart,
@@ -13,15 +14,36 @@ import {
   X,
   BookOpen,
   Edit3,
+  Clock,
+  Database,
+  Wifi,
+  WifiOff,
+  Sliders,
+  BarChart3,
+  History,
+  Send,
+  Trash2,
+  RefreshCw,
+  Eye,
 } from 'lucide-react';
-import { useAdminMarketStore, CustomPair } from '@/lib/admin-markets';
+import { useAdminMarketStore, CustomPair, OHLCCandle } from '@/lib/admin-markets';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+
+interface LiveCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  startTime: Date;
+}
 
 const patternOptions = [
-  { id: 'bull-flag', name: 'Bull Flag', description: 'Strong move up, consolidation, breakout' },
-  { id: 'head-shoulders', name: 'Head & Shoulders', description: 'Reversal pattern with breakdown' },
-  { id: 'double-bottom', name: 'Double Bottom', description: 'Support test and rally' },
-  { id: 'breakout-up', name: 'Bullish Breakout', description: 'Consolidation then upward break' },
-  { id: 'breakout-down', name: 'Bearish Breakout', description: 'Consolidation then downward break' },
+  { id: 'bull-flag', name: 'Bull Flag', description: 'Strong move up, consolidation, breakout', icon: '📈' },
+  { id: 'head-shoulders', name: 'Head & Shoulders', description: 'Reversal pattern with breakdown', icon: '🏔️' },
+  { id: 'double-bottom', name: 'Double Bottom', description: 'Support test and rally', icon: '📉' },
+  { id: 'breakout-up', name: 'Bullish Breakout', description: 'Consolidation then upward break', icon: '🚀' },
+  { id: 'breakout-down', name: 'Bearish Breakout', description: 'Consolidation then downward break', icon: '💥' },
 ];
 
 export default function AdminMarketsPage() {
@@ -34,6 +56,7 @@ export default function AdminMarketsPage() {
     pauseTrading,
     resumeTrading,
     addCandle,
+    clearCandles,
     generateBullFlag,
     generateHeadAndShoulders,
     generateDoubleBottom,
@@ -41,129 +64,161 @@ export default function AdminMarketsPage() {
   } = useAdminMarketStore();
 
   const [selectedPair, setSelectedPair] = useState<CustomPair>(customPairs[0]);
-  const [showPriceModal, setShowPriceModal] = useState(false);
-  const [showPatternModal, setShowPatternModal] = useState(false);
-  const [showCandleModal, setShowCandleModal] = useState(false);
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [supabaseConnected, setSupabaseConnected] = useState(false);
+  const [activeTab, setActiveTab] = useState<'slider' | 'candles' | 'history'>('slider');
 
-  // New price inputs
-  const [newBid, setNewBid] = useState('');
-  const [newAsk, setNewAsk] = useState('');
+  const [sliderValue, setSliderValue] = useState(0);
+  const [targetPrice, setTargetPrice] = useState('');
 
-  // New candle inputs
+  const [liveCandle, setLiveCandle] = useState<LiveCandle | null>(null);
+  const [candleInterval, setCandleInterval] = useState(5);
+  const [autoCandleEnabled, setAutoCandleEnabled] = useState(true);
+  const candleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastCandleCloseRef = useRef<Date>(new Date());
+
+  const [seedEnabled, setSeedEnabled] = useState(false);
+  const [selectedPattern, setSelectedPattern] = useState(patternOptions[0].id);
+  const [patternBasePrice, setPatternBasePrice] = useState('');
+
   const [candleOpen, setCandleOpen] = useState('');
   const [candleHigh, setCandleHigh] = useState('');
   const [candleLow, setCandleLow] = useState('');
   const [candleClose, setCandleClose] = useState('');
-  const [candleVolume, setCandleVolume] = useState('1000');
-
-  // Selected pattern
-  const [selectedPattern, setSelectedPattern] = useState(patternOptions[0].id);
-  const [patternBasePrice, setPatternBasePrice] = useState('1.0000');
 
   const currentPrice = currentPrices[selectedPair.id];
   const pairCandles = candles[selectedPair.id] || [];
   const isTradingPaused = isPaused[selectedPair.id] || false;
 
-  // ✅ FIX: CustomPair has no `spread`. Derive it from currentPrices, fallback to 0.0002
   const effectiveSpread =
     currentPrice && typeof currentPrice.ask === 'number' && typeof currentPrice.bid === 'number'
       ? Math.max(currentPrice.ask - currentPrice.bid, 0)
       : 0.0002;
+
+  useEffect(() => {
+    if (isSupabaseConfigured()) setSupabaseConnected(true);
+  }, []);
+
+  const pushPriceToSupabase = useCallback(async (pairId: string, bid: number, ask: number) => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      await supabase.from('custom_pairs').upsert({
+        symbol: pairId, current_price: bid, spread: ask - bid,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'symbol' });
+    } catch (err) { console.error('Push price error:', err); }
+  }, []);
+
+  const pushCandleToSupabase = useCallback(async (pairId: string, candle: Omit<OHLCCandle, 'id'>) => {
+    if (!isSupabaseConfigured()) return;
+    try {
+      await supabase.from('custom_candles').insert({
+        pair_symbol: pairId, timestamp: candle.timestamp.toISOString(),
+        open_price: candle.open, high_price: candle.high, low_price: candle.low, close_price: candle.close,
+        volume: candle.volume, timeframe: `${candleInterval}m`,
+      });
+    } catch (err) { console.error('Push candle error:', err); }
+  }, [candleInterval]);
+
+  // Update live candle when price changes
+  useEffect(() => {
+    if (!autoCandleEnabled || !currentPrice) return;
+    if (!liveCandle) {
+      const now = new Date();
+      setLiveCandle({
+        open: currentPrice.bid, high: currentPrice.bid, low: currentPrice.bid,
+        close: currentPrice.bid, volume: 1000, startTime: now,
+      });
+      lastCandleCloseRef.current = now;
+    } else {
+      setLiveCandle(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          high: Math.max(prev.high, currentPrice.bid),
+          low: Math.min(prev.low, currentPrice.bid),
+          close: currentPrice.bid,
+          volume: prev.volume + Math.random() * 500,
+        };
+      });
+    }
+  }, [currentPrice?.bid, autoCandleEnabled]);
+
+  // Timer to close candles at interval
+  useEffect(() => {
+    if (!autoCandleEnabled) {
+      if (candleTimerRef.current) clearInterval(candleTimerRef.current);
+      return;
+    }
+    candleTimerRef.current = setInterval(() => {
+      const now = new Date();
+      const elapsed = (now.getTime() - lastCandleCloseRef.current.getTime()) / 60000;
+      if (elapsed >= candleInterval && liveCandle) {
+        const closedCandle: Omit<OHLCCandle, 'id'> = {
+          timestamp: liveCandle.startTime,
+          open: liveCandle.open, high: liveCandle.high,
+          low: liveCandle.low, close: liveCandle.close,
+          volume: liveCandle.volume,
+        };
+        addCandle(selectedPair.id, closedCandle);
+        pushCandleToSupabase(selectedPair.id, closedCandle);
+        const newStart = new Date();
+        lastCandleCloseRef.current = newStart;
+        setLiveCandle({
+          open: liveCandle.close, high: liveCandle.close, low: liveCandle.close,
+          close: liveCandle.close, volume: 0, startTime: newStart,
+        });
+      }
+    }, 5000);
+    return () => { if (candleTimerRef.current) clearInterval(candleTimerRef.current); };
+  }, [autoCandleEnabled, candleInterval, liveCandle, selectedPair.id, addCandle, pushCandleToSupabase]);
+
+  useEffect(() => {
+    setLiveCandle(null);
+    lastCandleCloseRef.current = new Date();
+  }, [selectedPair.id]);
 
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message });
     setTimeout(() => setNotification(null), 3000);
   };
 
-  const handleSetPrice = () => {
-    const bid = parseFloat(newBid);
-    const ask = parseFloat(newAsk);
-
-    if (isNaN(bid) || isNaN(ask) || bid <= 0 || ask <= 0) {
-      showNotification('error', 'Invalid price values');
-      return;
-    }
-    if (ask <= bid) {
-      showNotification('error', 'Ask must be greater than Bid');
-      return;
-    }
-
-    setCurrentPrice(selectedPair.id, bid, ask);
-    showNotification('success', `Price updated to ${bid.toFixed(5)} / ${ask.toFixed(5)}`);
-    setShowPriceModal(false);
-    setNewBid('');
-    setNewAsk('');
+  const handleSetTargetPrice = () => {
+    const price = parseFloat(targetPrice);
+    if (isNaN(price) || price <= 0) { showNotification('error', 'Invalid target price'); return; }
+    const spread = effectiveSpread;
+    setCurrentPrice(selectedPair.id, price, price + spread);
+    pushPriceToSupabase(selectedPair.id, price, price + spread);
+    showNotification('success', `Price set to $${price.toFixed(5)}`);
+    setTargetPrice('');
   };
 
-  const handleAddCandle = () => {
-    const open = parseFloat(candleOpen);
-    const high = parseFloat(candleHigh);
-    const low = parseFloat(candleLow);
-    const close = parseFloat(candleClose);
-    const volume = parseFloat(candleVolume);
-
-    if ([open, high, low, close].some(isNaN) || [open, high, low, close].some((v) => v <= 0)) {
-      showNotification('error', 'Invalid candle values');
-      return;
-    }
-    if (high < Math.max(open, close) || low > Math.min(open, close)) {
-      showNotification('error', 'High must be >= max(open,close), Low must be <= min(open,close)');
-      return;
-    }
-
-    // ✅ FIX 1: Remove `pairId` from the candle payload (your type doesn’t have it)
-    addCandle(selectedPair.id, {
-      timestamp: new Date(),
-      open,
-      high,
-      low,
-      close,
-      volume,
-
-    });
-
-    // ✅ FIX 2: Use derived spread, not selectedPair.spread
-    setCurrentPrice(selectedPair.id, close, close + effectiveSpread);
-
-    showNotification('success', 'Candle added successfully');
-    setShowCandleModal(false);
-    setCandleOpen('');
-    setCandleHigh('');
-    setCandleLow('');
-    setCandleClose('');
+  const handleSliderMove = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setSliderValue(val);
+    const basePrice = currentPrice?.bid || selectedPair.basePrice;
+    const newPrice = basePrice * (1 + val / 100);
+    const spread = effectiveSpread;
+    setCurrentPrice(selectedPair.id, newPrice, newPrice + spread);
+    pushPriceToSupabase(selectedPair.id, newPrice, newPrice + spread);
   };
 
-  const handleGeneratePattern = () => {
-    const basePrice = parseFloat(patternBasePrice);
-    if (isNaN(basePrice) || basePrice <= 0) {
-      showNotification('error', 'Invalid base price');
-      return;
-    }
+  const quickPriceAdjust = (direction: 'up' | 'down', pips: number) => {
+    const current = currentPrice?.bid || selectedPair.basePrice;
+    const change = direction === 'up' ? pips * 0.0001 : -(pips * 0.0001);
+    const newPrice = current + change;
+    setCurrentPrice(selectedPair.id, newPrice, newPrice + effectiveSpread);
+    pushPriceToSupabase(selectedPair.id, newPrice, newPrice + effectiveSpread);
+    showNotification('success', `${direction === 'up' ? '+' : '-'}${pips} pips`);
+  };
 
-    switch (selectedPattern) {
-      case 'bull-flag':
-        generateBullFlag(selectedPair.id, basePrice);
-        break;
-      case 'head-shoulders':
-        generateHeadAndShoulders(selectedPair.id, basePrice);
-        break;
-      case 'double-bottom':
-        generateDoubleBottom(selectedPair.id, basePrice);
-        break;
-      case 'breakout-up':
-        generateBreakout(selectedPair.id, basePrice, 'up');
-        break;
-      case 'breakout-down':
-        generateBreakout(selectedPair.id, basePrice, 'down');
-        break;
-    }
-
-    showNotification(
-      'success',
-      `Generated ${patternOptions.find((p) => p.id === selectedPattern)?.name} pattern`
-    );
-    setShowPatternModal(false);
+  const bigPriceMove = (direction: 'up' | 'down', percent: number) => {
+    const current = currentPrice?.bid || selectedPair.basePrice;
+    const change = direction === 'up' ? current * (percent / 100) : -(current * (percent / 100));
+    const newPrice = current + change;
+    setCurrentPrice(selectedPair.id, newPrice, newPrice + effectiveSpread);
+    pushPriceToSupabase(selectedPair.id, newPrice, newPrice + effectiveSpread);
+    showNotification('success', `${direction === 'up' ? '+' : '-'}${percent}% move applied`);
   };
 
   const toggleTrading = () => {
@@ -176,489 +231,329 @@ export default function AdminMarketsPage() {
     }
   };
 
-  const quickPriceAdjust = (direction: 'up' | 'down', amount: number) => {
-    const current = currentPrice?.bid || 1;
-    const change = direction === 'up' ? amount : -amount;
-    const newBidPrice = current + change;
-
-    // ✅ FIX: use derived spread
-    setCurrentPrice(selectedPair.id, newBidPrice, newBidPrice + effectiveSpread);
-
-    showNotification(
-      'success',
-      `Price adjusted ${direction === 'up' ? '+' : ''}${(change * 10000).toFixed(1)} pips`
-    );
+  const handleSeedHistory = () => {
+    if (!seedEnabled) { showNotification('error', 'Enable history seeding first'); return; }
+    const basePrice = parseFloat(patternBasePrice) || currentPrice?.bid || selectedPair.basePrice;
+    switch (selectedPattern) {
+      case 'bull-flag': generateBullFlag(selectedPair.id, basePrice); break;
+      case 'head-shoulders': generateHeadAndShoulders(selectedPair.id, basePrice); break;
+      case 'double-bottom': generateDoubleBottom(selectedPair.id, basePrice); break;
+      case 'breakout-up': generateBreakout(selectedPair.id, basePrice, 'up'); break;
+      case 'breakout-down': generateBreakout(selectedPair.id, basePrice, 'down'); break;
+    }
+    showNotification('success', `Seeded ${patternOptions.find(p => p.id === selectedPattern)?.name} pattern`);
   };
 
+  const handleClearHistory = () => {
+    clearCandles(selectedPair.id);
+    showNotification('success', `Cleared candle history for ${selectedPair.symbol}`);
+  };
+
+  const handleAddCandle = () => {
+    const o = parseFloat(candleOpen), h = parseFloat(candleHigh), l = parseFloat(candleLow), c = parseFloat(candleClose);
+    if ([o, h, l, c].some(isNaN) || [o, h, l, c].some(v => v <= 0)) { showNotification('error', 'Invalid values'); return; }
+    const nc: Omit<OHLCCandle, 'id'> = { timestamp: new Date(), open: o, high: h, low: l, close: c, volume: 1000 + Math.random() * 5000 };
+    addCandle(selectedPair.id, nc);
+    pushCandleToSupabase(selectedPair.id, nc);
+    setCurrentPrice(selectedPair.id, c, c + effectiveSpread);
+    pushPriceToSupabase(selectedPair.id, c, c + effectiveSpread);
+    showNotification('success', 'Candle added');
+    setCandleOpen(''); setCandleHigh(''); setCandleLow(''); setCandleClose('');
+  };
+
+  const [timeRemaining, setTimeRemaining] = useState('--:--');
+  useEffect(() => {
+    if (!autoCandleEnabled || !liveCandle) return;
+    const timer = setInterval(() => {
+      const elapsed = (Date.now() - liveCandle.startTime.getTime()) / 1000;
+      const remaining = Math.max(0, candleInterval * 60 - elapsed);
+      const mins = Math.floor(remaining / 60);
+      const secs = Math.floor(remaining % 60);
+      setTimeRemaining(`${mins}:${secs.toString().padStart(2, '0')}`);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [autoCandleEnabled, liveCandle, candleInterval]);
+
   return (
-    <div className="p-4 lg:p-6 max-w-7xl mx-auto">
+    <div className="p-4 lg:p-6 max-w-7xl mx-auto space-y-6">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-display font-bold text-cream">Educational Markets Control</h1>
-        <p className="text-slate-400 mt-1">Manage custom pairs for student education</p>
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-cream">Market Control Panel</h1>
+          <p className="text-slate-400 mt-1">Full admin control — prices, candles, history</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium ${supabaseConnected ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'}`}>
+            {supabaseConnected ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+            {supabaseConnected ? 'Supabase Live' : 'Local Only'}
+          </div>
+          {autoCandleEnabled && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gold/10 text-gold rounded-lg text-xs font-medium">
+              <Clock className="w-3.5 h-3.5" />
+              Next candle: {timeRemaining}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Pair Selector */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {customPairs.map((pair) => {
           const price = currentPrices[pair.id];
           const paused = isPaused[pair.id];
-
+          const spread = price ? Math.max(price.ask - price.bid, 0) : 0.0002;
           return (
-            <button
-              key={pair.id}
-              onClick={() => setSelectedPair(pair)}
-              className={`p-4 rounded-2xl border text-left transition-all ${
-                selectedPair.id === pair.id
-                  ? 'bg-purple-500/20 border-purple-500/50'
-                  : 'bg-white/5 border-white/10 hover:border-white/20'
-              }`}
-            >
+            <button key={pair.id} onClick={() => { setSelectedPair(pair); setSliderValue(0); }}
+              className={`p-4 rounded-2xl border text-left transition-all ${selectedPair.id === pair.id ? 'bg-gold/10 border-gold/40 ring-1 ring-gold/20' : 'bg-white/5 border-white/10 hover:border-white/20'}`}>
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-2xl">📚</span>
-                  <span className="font-semibold text-cream">{pair.symbol}</span>
+                  <span className="text-2xl">{pair.symbol === 'NOVA/USD' ? '🌟' : pair.symbol === 'DEMO/USD' ? '🎮' : '📈'}</span>
+                  <span className="font-bold text-cream">{pair.symbol}</span>
                 </div>
                 {paused && <span className="px-2 py-0.5 bg-loss/20 text-loss text-xs rounded">PAUSED</span>}
               </div>
-              <p className="text-sm text-cream/50">{pair.name}</p>
+              <p className="text-xs text-cream/50">{pair.name}</p>
               {price && (
-                <p className="text-lg font-mono text-cream mt-2">
-                  {price.bid.toFixed(5)} / {price.ask.toFixed(5)}
-                </p>
+                <div className="mt-2">
+                  <p className="text-xl font-mono text-cream font-bold">${price.bid.toFixed(5)}</p>
+                  <p className="text-xs text-cream/40">Ask: ${price.ask.toFixed(5)} • Spread: {(spread * 10000).toFixed(1)} pips</p>
+                </div>
               )}
             </button>
           );
         })}
       </div>
 
-      {/* Selected Pair Controls */}
-      <div className="grid lg:grid-cols-2 gap-6">
-        {/* Price Control Panel */}
-        <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-purple-500/20 rounded-xl flex items-center justify-center">
-                <TrendingUp className="w-5 h-5 text-purple-400" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-cream">{selectedPair.symbol}</h2>
-                <p className="text-sm text-cream/50">Price Control</p>
-              </div>
-            </div>
-            <button
-              onClick={toggleTrading}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium transition-colors ${
-                isTradingPaused ? 'bg-profit text-void hover:bg-profit/90' : 'bg-loss text-white hover:bg-loss/90'
-              }`}
-            >
-              {isTradingPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-              {isTradingPaused ? 'Resume' : 'Pause'}
-            </button>
-          </div>
-
-          {/* Current Price Display */}
-          <div className="p-4 bg-charcoal rounded-xl mb-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="text-center">
-                <p className="text-xs text-cream/50 mb-1">Bid Price</p>
-                <p className="text-2xl font-mono text-loss">{currentPrice?.bid.toFixed(5) || '—'}</p>
-              </div>
-              <div className="text-center">
-                <p className="text-xs text-cream/50 mb-1">Ask Price</p>
-                <p className="text-2xl font-mono text-profit">{currentPrice?.ask.toFixed(5) || '—'}</p>
-              </div>
-            </div>
-            <div className="mt-3 pt-3 border-t border-white/10 text-center">
-              <p className="text-xs text-cream/50">Spread: {(effectiveSpread * 10000).toFixed(1)} pips</p>
-            </div>
-          </div>
-
-          {/* Quick Price Adjustments */}
-          <div className="mb-4">
-            <p className="text-xs text-cream/50 mb-2">Quick Adjust (pips)</p>
-            <div className="grid grid-cols-4 gap-2">
-              {[1, 5, 10, 25].map((pips) => (
-                <div key={pips} className="flex gap-1">
-                  <button
-                    onClick={() => quickPriceAdjust('down', pips * 0.0001)}
-                    className="flex-1 py-2 bg-loss/20 text-loss text-sm font-medium rounded-lg hover:bg-loss/30"
-                  >
-                    -{pips}
-                  </button>
-                  <button
-                    onClick={() => quickPriceAdjust('up', pips * 0.0001)}
-                    className="flex-1 py-2 bg-profit/20 text-profit text-sm font-medium rounded-lg hover:bg-profit/30"
-                  >
-                    +{pips}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              onClick={() => {
-                setNewBid(currentPrice?.bid.toFixed(5) || '');
-                setNewAsk(currentPrice?.ask.toFixed(5) || '');
-                setShowPriceModal(true);
-              }}
-              className="flex items-center justify-center gap-2 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90"
-            >
-              <Edit3 className="w-4 h-4" />
-              Set Price
-            </button>
-            <button
-              onClick={() => {
-                const mid = currentPrice ? (currentPrice.bid + currentPrice.ask) / 2 : 1;
-
-                setCandleOpen(mid.toFixed(5));
-                setCandleHigh((mid + 0.001).toFixed(5));
-                setCandleLow((mid - 0.001).toFixed(5));
-                setCandleClose(mid.toFixed(5));
-                setShowCandleModal(true);
-              }}
-              className="flex items-center justify-center gap-2 py-3 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20"
-            >
-              <CandlestickChart className="w-4 h-4" />
-              Add Candle
-            </button>
-          </div>
-        </div>
-
-        {/* Pattern Generator */}
-        <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 bg-gold/20 rounded-xl flex items-center justify-center">
-              <BookOpen className="w-5 h-5 text-gold" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-cream">Pattern Generator</h2>
-              <p className="text-sm text-cream/50">Create educational chart patterns</p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            {patternOptions.map((pattern) => (
-              <button
-                key={pattern.id}
-                onClick={() => {
-                  setSelectedPattern(pattern.id);
-                  setPatternBasePrice((currentPrice?.bid || 1).toFixed(4));
-                  setShowPatternModal(true);
-                }}
-                className="w-full p-4 bg-charcoal rounded-xl border border-white/10 text-left hover:border-gold/30 transition-colors"
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="font-medium text-cream">{pattern.name}</p>
-                    <p className="text-sm text-cream/50">{pattern.description}</p>
-                  </div>
-                  <Zap className="w-5 h-5 text-gold" />
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Tabs */}
+      <div className="flex gap-2 border-b border-white/10 pb-0">
+        {([
+          { id: 'slider', label: 'Price Stick', icon: Sliders },
+          { id: 'candles', label: 'Candle Builder', icon: CandlestickChart },
+          { id: 'history', label: 'Seed History', icon: History },
+        ] as const).map((tab) => (
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-all ${activeTab === tab.id ? 'border-gold text-gold' : 'border-transparent text-slate-400 hover:text-cream'}`}>
+            <tab.icon className="w-4 h-4" />{tab.label}
+          </button>
+        ))}
       </div>
 
-      {/* Recent Candles */}
-      <div className="mt-6 bg-white/5 rounded-2xl border border-white/10 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold text-cream">Recent Candles ({pairCandles.length})</h2>
-          <button className="text-sm text-gold hover:text-gold/80">View All</button>
-        </div>
-
-        {pairCandles.length === 0 ? (
-          <div className="text-center py-8 text-cream/50">
-            <CandlestickChart className="w-8 h-8 mx-auto mb-2 opacity-50" />
-            <p>No candles yet. Add candles or generate a pattern.</p>
+      {/* SLIDER TAB */}
+      {activeTab === 'slider' && (
+        <div className="grid lg:grid-cols-2 gap-6">
+          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gold/20 rounded-xl flex items-center justify-center"><Sliders className="w-5 h-5 text-gold" /></div>
+                <div><h2 className="text-lg font-semibold text-cream">Price Stick</h2><p className="text-xs text-cream/50">Drag to move price in real-time</p></div>
+              </div>
+              <button onClick={toggleTrading} className={`flex items-center gap-2 px-4 py-2 rounded-xl font-medium transition-colors ${isTradingPaused ? 'bg-profit text-void' : 'bg-loss text-white'}`}>
+                {isTradingPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
+                {isTradingPaused ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+            {/* Price Display */}
+            <div className="p-5 bg-charcoal rounded-xl">
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div className="text-center"><p className="text-xs text-cream/50 mb-1">Bid</p><p className="text-3xl font-mono text-loss font-bold">{currentPrice?.bid.toFixed(5) || '—'}</p></div>
+                <div className="text-center"><p className="text-xs text-cream/50 mb-1">Ask</p><p className="text-3xl font-mono text-profit font-bold">{currentPrice?.ask.toFixed(5) || '—'}</p></div>
+              </div>
+              <div className="pt-3 border-t border-white/10 text-center"><p className="text-xs text-cream/50">Spread: {(effectiveSpread * 10000).toFixed(1)} pips</p></div>
+            </div>
+            {/* Slider */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between"><p className="text-sm text-cream/60">Adjustment Slider</p><p className="text-sm text-gold font-mono">{sliderValue > 0 ? '+' : ''}{sliderValue.toFixed(2)}%</p></div>
+              <input type="range" min="-5" max="5" step="0.01" value={sliderValue} onChange={handleSliderMove}
+                onMouseUp={() => setSliderValue(0)} onTouchEnd={() => setSliderValue(0)}
+                className="w-full h-3 appearance-none bg-gradient-to-r from-loss via-white/20 to-profit rounded-full cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:bg-gold [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:cursor-grab [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white/50" />
+              <div className="flex justify-between text-xs text-cream/30"><span>-5%</span><span>0</span><span>+5%</span></div>
+            </div>
+            {/* Target Price */}
+            <div>
+              <p className="text-sm text-cream/60 mb-2">Target Price (exact)</p>
+              <div className="flex gap-2">
+                <input type="number" step="0.00001" value={targetPrice} onChange={(e) => setTargetPrice(e.target.value)} placeholder={currentPrice?.bid.toFixed(5) || '1.00000'}
+                  className="flex-1 px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold" />
+                <button onClick={handleSetTargetPrice} className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90"><Send className="w-5 h-5" /></button>
+              </div>
+            </div>
+            {/* Quick Pips */}
+            <div>
+              <p className="text-xs text-cream/50 mb-2">Quick Pips</p>
+              <div className="grid grid-cols-4 gap-2">
+                {[1, 5, 10, 25, 50, 100, 250, 500].map((pips) => (
+                  <div key={pips} className="flex gap-1">
+                    <button onClick={() => quickPriceAdjust('down', pips)} className="flex-1 py-2 bg-loss/20 text-loss text-xs font-bold rounded-lg hover:bg-loss/30">-{pips}</button>
+                    <button onClick={() => quickPriceAdjust('up', pips)} className="flex-1 py-2 bg-profit/20 text-profit text-xs font-bold rounded-lg hover:bg-profit/30">+{pips}</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {/* Big Moves */}
+            <div>
+              <p className="text-xs text-cream/50 mb-2">Big Moves (%)</p>
+              <div className="grid grid-cols-3 gap-2">
+                {[1, 2, 5, 10, 15, 25].map((pct) => (
+                  <div key={pct} className="flex gap-1">
+                    <button onClick={() => bigPriceMove('down', pct)} className="flex-1 py-2 bg-loss/10 text-loss text-xs font-bold rounded-lg hover:bg-loss/20">-{pct}%</button>
+                    <button onClick={() => bigPriceMove('up', pct)} className="flex-1 py-2 bg-profit/10 text-profit text-xs font-bold rounded-lg hover:bg-profit/20">+{pct}%</button>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-cream/50 border-b border-white/10">
-                  <th className="text-left pb-3">Time</th>
-                  <th className="text-right pb-3">Open</th>
-                  <th className="text-right pb-3">High</th>
-                  <th className="text-right pb-3">Low</th>
-                  <th className="text-right pb-3">Close</th>
-                  <th className="text-right pb-3">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pairCandles
-                  .slice(-10)
-                  .reverse()
-                  .map((candle: any) => {
+          {/* Right Column */}
+          <div className="space-y-6">
+            {/* Auto Candle */}
+            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 bg-electric/20 rounded-xl flex items-center justify-center"><BarChart3 className="w-5 h-5 text-electric" /></div>
+                <div><h2 className="text-lg font-semibold text-cream">Auto Candle Builder</h2><p className="text-xs text-cream/50">Saves OHLC every {candleInterval}m from your moves</p></div>
+              </div>
+              <div className="flex items-center justify-between p-4 bg-charcoal rounded-xl mb-4">
+                <div><p className="text-sm text-cream font-medium">Auto-save candles</p><p className="text-xs text-cream/50">Records price movements as candles</p></div>
+                <button onClick={() => setAutoCandleEnabled(!autoCandleEnabled)} className={`w-14 h-7 rounded-full transition-colors relative ${autoCandleEnabled ? 'bg-profit' : 'bg-white/20'}`}>
+                  <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${autoCandleEnabled ? 'left-8' : 'left-1'}`} />
+                </button>
+              </div>
+              <div className="mb-4">
+                <p className="text-xs text-cream/50 mb-2">Candle Interval</p>
+                <div className="flex gap-2">
+                  {[1, 3, 5, 15, 30].map((mins) => (
+                    <button key={mins} onClick={() => setCandleInterval(mins)}
+                      className={`flex-1 py-2 rounded-lg text-xs font-bold transition-colors ${candleInterval === mins ? 'bg-gold text-void' : 'bg-white/5 text-cream/60 hover:text-cream'}`}>{mins}m</button>
+                  ))}
+                </div>
+              </div>
+              {liveCandle && autoCandleEnabled && (
+                <div className="p-4 bg-void/50 rounded-xl border border-electric/20">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs text-electric font-medium flex items-center gap-1"><span className="w-2 h-2 bg-electric rounded-full animate-pulse" />Building Candle...</p>
+                    <p className="text-xs text-cream/50">{timeRemaining} left</p>
+                  </div>
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    <div><p className="text-[10px] text-cream/40">O</p><p className="text-sm font-mono text-cream">{liveCandle.open.toFixed(4)}</p></div>
+                    <div><p className="text-[10px] text-profit">H</p><p className="text-sm font-mono text-profit">{liveCandle.high.toFixed(4)}</p></div>
+                    <div><p className="text-[10px] text-loss">L</p><p className="text-sm font-mono text-loss">{liveCandle.low.toFixed(4)}</p></div>
+                    <div><p className="text-[10px] text-cream/40">C</p><p className="text-sm font-mono text-cream">{liveCandle.close.toFixed(4)}</p></div>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Recent Candles */}
+            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-cream">Saved Candles ({pairCandles.length})</h3>
+                <button onClick={handleClearHistory} className="text-xs text-loss hover:text-loss/80 flex items-center gap-1"><Trash2 className="w-3 h-3" /> Clear</button>
+              </div>
+              {pairCandles.length === 0 ? (
+                <div className="text-center py-6 text-cream/30"><CandlestickChart className="w-6 h-6 mx-auto mb-2" /><p className="text-xs">No candles yet</p></div>
+              ) : (
+                <div className="space-y-1 max-h-64 overflow-y-auto">
+                  {pairCandles.slice(-8).reverse().map((candle: any) => {
                     const isGreen = candle.close >= candle.open;
                     return (
-                      <tr key={candle.id} className="border-b border-white/5">
-                        <td className="py-2 text-cream/70">{new Date(candle.timestamp).toLocaleTimeString()}</td>
-                        <td className="py-2 text-right font-mono text-cream">{candle.open.toFixed(5)}</td>
-                        <td className="py-2 text-right font-mono text-profit">{candle.high.toFixed(5)}</td>
-                        <td className="py-2 text-right font-mono text-loss">{candle.low.toFixed(5)}</td>
-                        <td className="py-2 text-right font-mono text-cream">{candle.close.toFixed(5)}</td>
-                        <td className="py-2 text-right">
-                          <span
-                            className={`px-2 py-0.5 rounded text-xs ${
-                              isGreen ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                            }`}
-                          >
-                            {isGreen ? 'BULL' : 'BEAR'}
-                          </span>
-                        </td>
-                      </tr>
+                      <div key={candle.id} className="flex items-center justify-between text-xs py-1.5 border-b border-white/5">
+                        <span className="text-cream/50 w-16">{new Date(candle.timestamp).toLocaleTimeString()}</span>
+                        <span className="font-mono text-cream">O:{candle.open.toFixed(4)}</span>
+                        <span className="font-mono text-profit">H:{candle.high.toFixed(4)}</span>
+                        <span className="font-mono text-loss">L:{candle.low.toFixed(4)}</span>
+                        <span className="font-mono text-cream">C:{candle.close.toFixed(4)}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${isGreen ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>{isGreen ? '▲' : '▼'}</span>
+                      </div>
                     );
                   })}
-              </tbody>
-            </table>
+                </div>
+              )}
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Set Price Modal */}
-      <AnimatePresence>
-        {showPriceModal && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowPriceModal(false)}
-              className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-obsidian rounded-2xl p-6 border border-gold/20 z-50"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream">Set Price</h3>
-                <button onClick={() => setShowPriceModal(false)}>
-                  <X className="w-5 h-5 text-cream/50" />
-                </button>
+      {/* CANDLES TAB */}
+      {activeTab === 'candles' && (
+        <div className="max-w-2xl mx-auto bg-white/5 rounded-2xl border border-white/10 p-6">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 bg-purple-500/20 rounded-xl flex items-center justify-center"><CandlestickChart className="w-5 h-5 text-purple-400" /></div>
+            <div><h2 className="text-lg font-semibold text-cream">Manual Candle Builder</h2><p className="text-sm text-cream/50">Add individual candles for precise control</p></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mb-6">
+            {[
+              { label: 'Open', value: candleOpen, setter: setCandleOpen, color: 'focus:border-cream' },
+              { label: 'High', value: candleHigh, setter: setCandleHigh, color: 'focus:border-profit' },
+              { label: 'Low', value: candleLow, setter: setCandleLow, color: 'focus:border-loss' },
+              { label: 'Close', value: candleClose, setter: setCandleClose, color: 'focus:border-gold' },
+            ].map(({ label, value, setter, color }) => (
+              <div key={label}><label className="block text-sm text-cream/50 mb-2">{label}</label>
+                <input type="number" step="0.00001" value={value} onChange={(e) => setter(e.target.value)} placeholder={currentPrice?.bid.toFixed(5) || '1.00000'}
+                  className={`w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none ${color}`} />
               </div>
+            ))}
+          </div>
+          <button onClick={() => {
+            if (!candleOpen) {
+              const mid = currentPrice ? (currentPrice.bid + currentPrice.ask) / 2 : 1;
+              setCandleOpen(mid.toFixed(5)); setCandleHigh((mid + 0.001).toFixed(5)); setCandleLow((mid - 0.001).toFixed(5)); setCandleClose(mid.toFixed(5));
+            }
+          }} className="w-full py-2.5 mb-3 bg-white/5 text-cream/60 text-sm rounded-xl hover:bg-white/10">Fill with current price</button>
+          <button onClick={handleAddCandle} className="w-full py-3 bg-profit text-void font-semibold rounded-xl hover:bg-profit/90">Add Candle to Chart</button>
+        </div>
+      )}
 
-              <div className="space-y-4 mb-6">
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">Bid Price</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={newBid}
-                    onChange={(e) => setNewBid(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
-                    placeholder="1.00000"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">Ask Price</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={newAsk}
-                    onChange={(e) => setNewAsk(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
-                    placeholder="1.00020"
-                  />
-                </div>
+      {/* HISTORY TAB */}
+      {activeTab === 'history' && (
+        <div className="max-w-3xl mx-auto space-y-6">
+          <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="w-5 h-5 text-yellow-500" />
+                <div><p className="text-cream font-medium">History Seeding</p><p className="text-xs text-yellow-500/80">Adds 30-50 candles to create chart patterns. Only seed if you want history.</p></div>
               </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowPriceModal(false)}
-                  className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSetPrice}
-                  className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90"
-                >
-                  Set Price
-                </button>
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Add Candle Modal */}
-      <AnimatePresence>
-        {showCandleModal && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowCandleModal(false)}
-              className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-obsidian rounded-2xl p-6 border border-gold/20 z-50"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream">Add Candle</h3>
-                <button onClick={() => setShowCandleModal(false)}>
-                  <X className="w-5 h-5 text-cream/50" />
-                </button>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">Open</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={candleOpen}
-                    onChange={(e) => setCandleOpen(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">High</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={candleHigh}
-                    onChange={(e) => setCandleHigh(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-profit"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">Low</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={candleLow}
-                    onChange={(e) => setCandleLow(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-loss"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-cream/50 mb-2">Close</label>
-                  <input
-                    type="number"
-                    step="0.00001"
-                    value={candleClose}
-                    onChange={(e) => setCandleClose(e.target.value)}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
-                  />
+              <button onClick={() => setSeedEnabled(!seedEnabled)} className={`w-14 h-7 rounded-full transition-colors relative ${seedEnabled ? 'bg-yellow-500' : 'bg-white/20'}`}>
+                <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${seedEnabled ? 'left-8' : 'left-1'}`} />
+              </button>
+            </div>
+          </div>
+          {seedEnabled ? (
+            <>
+              <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+                <h3 className="text-lg font-semibold text-cream mb-4">Select Pattern</h3>
+                <div className="space-y-3">
+                  {patternOptions.map((pattern) => (
+                    <button key={pattern.id} onClick={() => setSelectedPattern(pattern.id)}
+                      className={`w-full p-4 rounded-xl border text-left transition-all ${selectedPattern === pattern.id ? 'bg-gold/10 border-gold/40' : 'bg-charcoal border-white/10 hover:border-gold/20'}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3"><span className="text-2xl">{pattern.icon}</span><div><p className="font-medium text-cream">{pattern.name}</p><p className="text-sm text-cream/50">{pattern.description}</p></div></div>
+                        {selectedPattern === pattern.id && <CheckCircle className="w-5 h-5 text-gold" />}
+                      </div>
+                    </button>
+                  ))}
                 </div>
               </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowCandleModal(false)}
-                  className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleAddCandle}
-                  className="flex-1 py-3 bg-profit text-void font-semibold rounded-xl hover:bg-profit/90"
-                >
-                  Add Candle
-                </button>
+              <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+                <div className="mb-4"><label className="block text-sm text-cream/50 mb-2">Base Price</label>
+                  <input type="number" step="0.0001" value={patternBasePrice} onChange={(e) => setPatternBasePrice(e.target.value)}
+                    placeholder={(currentPrice?.bid || selectedPair.basePrice).toFixed(4)}
+                    className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold" />
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleClearHistory} className="flex-1 py-3 bg-loss/20 text-loss font-semibold rounded-xl hover:bg-loss/30 flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Clear History</button>
+                  <button onClick={handleSeedHistory} className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 flex items-center justify-center gap-2"><Database className="w-4 h-4" /> Seed Pattern</button>
+                </div>
               </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Generate Pattern Modal */}
-      <AnimatePresence>
-        {showPatternModal && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowPatternModal(false)}
-              className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-obsidian rounded-2xl p-6 border border-gold/20 z-50"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream">Generate Pattern</h3>
-                <button onClick={() => setShowPatternModal(false)}>
-                  <X className="w-5 h-5 text-cream/50" />
-                </button>
-              </div>
-
-              <div className="p-4 bg-gold/10 border border-gold/20 rounded-xl mb-4">
-                <p className="font-medium text-cream">{patternOptions.find((p) => p.id === selectedPattern)?.name}</p>
-                <p className="text-sm text-cream/50">
-                  {patternOptions.find((p) => p.id === selectedPattern)?.description}
-                </p>
-              </div>
-
-              <div className="mb-6">
-                <label className="block text-sm text-cream/50 mb-2">Base Price</label>
-                <input
-                  type="number"
-                  step="0.0001"
-                  value={patternBasePrice}
-                  onChange={(e) => setPatternBasePrice(e.target.value)}
-                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
-                />
-                <p className="text-xs text-cream/40 mt-2">Pattern will be generated around this price level</p>
-              </div>
-
-              <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl mb-6 flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-yellow-500/80">
-                  This will add 30-50 candles to create the pattern. Current price will be updated.
-                </p>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowPatternModal(false)}
-                  className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleGeneratePattern}
-                  className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90"
-                >
-                  Generate
-                </button>
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+            </>
+          ) : (
+            <div className="text-center py-12 text-cream/30"><History className="w-12 h-12 mx-auto mb-3" /><p>Enable seeding above to create chart patterns</p><p className="text-sm mt-1">History is optional — only seed if needed</p></div>
+          )}
+        </div>
+      )}
 
       {/* Notification */}
       <AnimatePresence>
         {notification && (
-          <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className={`fixed bottom-8 left-1/2 -translate-x-1/2 px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50 ${
-              notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'
-            }`}
-          >
-            {notification.type === 'success' ? (
-              <CheckCircle className="w-5 h-5" />
-            ) : (
-              <AlertTriangle className="w-5 h-5" />
-            )}
+          <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }}
+            className={`fixed bottom-8 left-1/2 -translate-x-1/2 px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50 ${notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'}`}>
+            {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
             <span className="font-medium">{notification.message}</span>
           </motion.div>
         )}

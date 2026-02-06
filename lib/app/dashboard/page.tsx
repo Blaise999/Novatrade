@@ -1,484 +1,560 @@
 'use client';
 
 import { useState } from 'react';
+import { motion } from 'framer-motion';
 import Link from 'next/link';
-import Image from 'next/image';
-import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Users,
-  TrendingUp,
-  Trophy,
+  User,
   Shield,
-  Star,
+  Bell,
+  Palette,
+  Globe,
+  Smartphone,
   CheckCircle,
-  Copy,
   ChevronRight,
-  Search,
-  Filter,
-  X,
-  AlertTriangle,
-  Wallet,
-  Target,
-  Clock,
-  BarChart3,
-  Zap
+  Eye,
+  EyeOff,
+  LogOut,
+  AlertCircle,
 } from 'lucide-react';
-import { topTraders } from '@/lib/data';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { Trader } from '@/lib/types';
 
-// Risk level colors
-const riskColors: Record<number, { bg: string; text: string; label: string }> = {
-  1: { bg: 'bg-profit/10', text: 'text-profit', label: 'Low' },
-  2: { bg: 'bg-green-500/10', text: 'text-green-400', label: 'Low-Med' },
-  3: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', label: 'Medium' },
-  4: { bg: 'bg-orange-500/10', text: 'text-orange-400', label: 'Med-High' },
-  5: { bg: 'bg-loss/10', text: 'text-loss', label: 'High' },
-};
+const tabs = [
+  { id: 'profile', label: 'Profile', icon: User },
+  { id: 'security', label: 'Security', icon: Shield },
+  { id: 'notifications', label: 'Notifications', icon: Bell },
+  { id: 'preferences', label: 'Preferences', icon: Palette },
+] as const;
 
-export default function CopyTradingPage() {
-  const { user } = useStore();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedFilter, setSelectedFilter] = useState<'all' | 'crypto' | 'forex' | 'stocks'>('all');
-  const [sortBy, setSortBy] = useState<'return' | 'winRate' | 'followers'>('return');
-  const [selectedTrader, setSelectedTrader] = useState<Trader | null>(null);
-  const [copyAmount, setCopyAmount] = useState('100');
-  const [showCopyModal, setShowCopyModal] = useState(false);
-  const [copiedTraders, setCopiedTraders] = useState<string[]>([]);
+type TabId = (typeof tabs)[number]['id'];
 
-  const filteredTraders = topTraders
-    .filter(trader => {
-      const matchesSearch = trader.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        trader.assets.some(a => a.toLowerCase().includes(searchQuery.toLowerCase()));
-      
-      if (selectedFilter === 'all') return matchesSearch;
-      
-      const assetTypeMap: Record<string, string[]> = {
-        crypto: ['BTC', 'ETH', 'SOL', 'XRP'],
-        forex: ['EUR/USD', 'GBP/USD', 'USD/JPY'],
-        stocks: ['AAPL', 'NVDA', 'TSLA']
-      };
-      
-      return matchesSearch && trader.assets.some(a => assetTypeMap[selectedFilter]?.includes(a));
-    })
-    .sort((a, b) => {
-      switch (sortBy) {
-        case 'return': return b.totalReturn - a.totalReturn;
-        case 'winRate': return b.winRate - a.winRate;
-        case 'followers': return b.followers - a.followers;
-        default: return 0;
-      }
-    });
+export default function SettingsPage() {
+  const { user, logout } = useStore();
+  const [activeTab, setActiveTab] = useState<TabId>('profile');
+  const [showPassword, setShowPassword] = useState(false);
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
 
-  const handleCopyTrader = () => {
-    if (!selectedTrader || !user) return;
-    
-    const amount = parseFloat(copyAmount);
-    const userBalance = user.balance || 0;
-    if (amount > userBalance) return;
-    
-    // Note: Balance deduction should be handled by backend API
-    // This is just UI state for now
-    setCopiedTraders([...copiedTraders, selectedTrader.id]);
-    setShowCopyModal(false);
-    setSelectedTrader(null);
-  };
+  // ✅ KYC status matches your store type:
+  // "none" | "pending" | "verified" | "rejected" | undefined
+  const kycStatus = user?.kycStatus ?? 'none';
+  const isVerified = kycStatus === 'verified';
+  const isPending = kycStatus === 'pending';
+  const isRejected = kycStatus === 'rejected';
 
-  const openCopyModal = (trader: Trader) => {
-    setSelectedTrader(trader);
-    setShowCopyModal(true);
-  };
+  // Notification settings
+  const [notifications, setNotifications] = useState({
+    tradeAlerts: true,
+    priceAlerts: true,
+    copyTradeUpdates: true,
+    promotions: false,
+    newsletter: false,
+    smsAlerts: false,
+  });
+
+  // Preferences
+  const [preferences, setPreferences] = useState({
+    theme: 'dark',
+    language: 'en',
+    timezone: 'UTC',
+    defaultAmount: 100,
+    defaultDuration: 60,
+    soundEffects: true,
+    confirmTrades: true,
+  });
+
+  const avatarLetter =
+    user?.firstName?.[0] ??
+    user?.email?.[0]?.toUpperCase() ??
+    'U';
 
   return (
-    <div className="p-4 lg:p-6 max-w-7xl mx-auto">
+    <div className="p-4 lg:p-6 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-display font-bold text-cream">Copy Trading</h1>
-        <p className="text-slate-400 mt-1">
-          Automatically copy trades from top-performing traders
-        </p>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="grid sm:grid-cols-4 gap-4 mb-6">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gold/10 rounded-lg flex items-center justify-center">
-              <Users className="w-5 h-5 text-gold" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Active Traders</p>
-              <p className="text-xl font-bold text-cream">2,847</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-profit/10 rounded-lg flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-profit" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Avg. Return</p>
-              <p className="text-xl font-bold text-profit">+127%</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-electric/10 rounded-lg flex items-center justify-center">
-              <Trophy className="w-5 h-5 text-electric" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Top Win Rate</p>
-              <p className="text-xl font-bold text-cream">85.7%</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-500/10 rounded-lg flex items-center justify-center">
-              <Copy className="w-5 h-5 text-purple-400" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">You&apos;re Copying</p>
-              <p className="text-xl font-bold text-cream">{copiedTraders.length}</p>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-
-      {/* Search and Filters */}
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search traders or assets..."
-            className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-          />
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-cream">Settings</h1>
+          <p className="text-slate-400 mt-1">Manage your account and preferences</p>
         </div>
 
-        <div className="flex gap-2">
-          {(['all', 'crypto', 'forex', 'stocks'] as const).map((filter) => (
-            <button
-              key={filter}
-              onClick={() => setSelectedFilter(filter)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium capitalize transition-all ${
-                selectedFilter === filter
-                  ? 'bg-gold text-void'
-                  : 'bg-white/5 text-slate-400 hover:bg-white/10'
-              }`}
-            >
-              {filter}
-            </button>
-          ))}
-        </div>
-
-        <select
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as any)}
-          className="px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-cream focus:outline-none focus:border-gold"
+        <button
+          onClick={logout}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-cream/80 hover:text-cream transition-colors"
         >
-          <option value="return">Highest Return</option>
-          <option value="winRate">Best Win Rate</option>
-          <option value="followers">Most Popular</option>
-        </select>
+          <LogOut className="w-4 h-4" />
+          Sign out
+        </button>
       </div>
 
-      {/* Traders Grid */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredTraders.map((trader, index) => {
-          const risk = riskColors[trader.riskScore] || riskColors[3];
-          const isCopying = copiedTraders.includes(trader.id);
-          
-          return (
+      <div className="flex flex-col lg:flex-row gap-6">
+        {/* Tabs */}
+        <div className="lg:w-56 flex-shrink-0">
+          <nav className="flex lg:flex-col gap-2">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
+                  activeTab === tab.id
+                    ? 'bg-gold/10 text-gold'
+                    : 'text-slate-400 hover:bg-white/5 hover:text-cream'
+                }`}
+              >
+                <tab.icon className="w-5 h-5" />
+                <span className="hidden sm:inline">{tab.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1">
+          {activeTab === 'profile' && (
             <motion.div
-              key={trader.id}
-              initial={{ opacity: 0, y: 20 }}
+              initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.05 }}
-              className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden hover:border-white/10 transition-all"
+              className="space-y-6"
             >
-              {/* Header */}
-              <div className="p-4 border-b border-white/5">
-                <div className="flex items-start gap-3">
-                  <div className="relative">
-                    <Image
-                      src={trader.avatar}
-                      alt={trader.name}
-                      width={48}
-                      height={48}
-                      className="w-12 h-12 rounded-xl object-cover"
+              {/* Profile Picture */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Profile Picture</h2>
+                <div className="flex items-center gap-4">
+                  <div className="w-20 h-20 bg-gradient-to-br from-electric to-gold rounded-2xl flex items-center justify-center text-void text-2xl font-bold">
+                    {avatarLetter}
+                  </div>
+                  <div className="space-y-2">
+                    <button className="px-4 py-2 bg-gold text-void text-sm font-medium rounded-lg hover:bg-gold/90 transition-colors">
+                      Upload Photo
+                    </button>
+                    <p className="text-xs text-slate-500">JPG, PNG or GIF. Max 2MB</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Personal Info */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Personal Information</h2>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">First Name</label>
+                    <input
+                      type="text"
+                      defaultValue={user?.firstName || ''}
+                      placeholder="Enter first name"
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
                     />
-                    {trader.verified && (
-                      <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-electric rounded-full flex items-center justify-center">
-                        <CheckCircle className="w-3 h-3 text-void" />
-                      </div>
-                    )}
                   </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-semibold text-cream">{trader.name}</h3>
-                      {trader.verified && (
-                        <span className="text-xs px-2 py-0.5 bg-electric/10 text-electric rounded-full">
-                          Verified
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{trader.bio}</p>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Last Name</label>
+                    <input
+                      type="text"
+                      defaultValue={user?.lastName || ''}
+                      placeholder="Enter last name"
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Email</label>
+                    <input
+                      type="email"
+                      defaultValue={user?.email || ''}
+                      disabled
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-slate-500 cursor-not-allowed"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Phone</label>
+                    <input
+                      type="tel"
+                      defaultValue={user?.phone || ''}
+                      placeholder="Enter phone number"
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
+                    />
                   </div>
                 </div>
+                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
+                  Save Changes
+                </button>
               </div>
 
-              {/* Stats */}
-              <div className="p-4 grid grid-cols-3 gap-4">
-                <div>
-                  <p className="text-xs text-slate-500">Total Return</p>
-                  <p className="text-lg font-bold text-profit">
-                    +{trader.totalReturn.toFixed(1)}%
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">Win Rate</p>
-                  <p className="text-lg font-bold text-cream">{trader.winRate}%</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">Followers</p>
-                  <p className="text-lg font-bold text-cream">
-                    {(trader.followers / 1000).toFixed(1)}K
-                  </p>
-                </div>
-              </div>
-
-              {/* Assets & Risk */}
-              <div className="px-4 pb-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex flex-wrap gap-1">
-                    {trader.assets.slice(0, 3).map((asset) => (
-                      <span
-                        key={asset}
-                        className="text-xs px-2 py-1 bg-white/5 text-slate-400 rounded"
-                      >
-                        {asset}
-                      </span>
-                    ))}
-                    {trader.assets.length > 3 && (
-                      <span className="text-xs px-2 py-1 bg-white/5 text-slate-500 rounded">
-                        +{trader.assets.length - 3}
-                      </span>
-                    )}
+              {/* KYC Status */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-semibold text-cream">Verification Status</h2>
+                    <p className="text-sm text-slate-400 mt-1">Complete KYC to unlock all features</p>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded ${risk.bg} ${risk.text}`}>
-                    {risk.label} Risk
+
+                  <span
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                      isVerified
+                        ? 'bg-profit/10 text-profit'
+                        : isPending
+                        ? 'bg-yellow-500/10 text-yellow-500'
+                        : isRejected
+                        ? 'bg-loss/10 text-loss'
+                        : 'bg-slate-500/10 text-slate-400'
+                    }`}
+                  >
+                    {isVerified
+                      ? 'Verified'
+                      : isPending
+                      ? 'In Review'
+                      : isRejected
+                      ? 'Rejected'
+                      : 'Not Verified'}
                   </span>
                 </div>
 
-                {/* Actions */}
-                {isCopying ? (
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 py-2.5 bg-profit/10 text-profit text-sm font-medium rounded-lg text-center">
-                      ✓ Copying
-                    </div>
-                    <button className="p-2.5 bg-white/5 hover:bg-white/10 rounded-lg transition-colors">
-                      <BarChart3 className="w-5 h-5 text-slate-400" />
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => openCopyModal(trader)}
-                    className="w-full py-2.5 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-lg hover:shadow-lg hover:shadow-gold/20 transition-all flex items-center justify-center gap-2"
+                {!isVerified && (
+                  <Link
+                    href="/kyc"
+                    className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-electric/10 text-electric text-sm font-medium rounded-lg hover:bg-electric/20 transition-colors"
                   >
-                    <Copy className="w-4 h-4" />
-                    Copy Trader
-                  </button>
+                    Complete Verification
+                    <ChevronRight className="w-4 h-4" />
+                  </Link>
+                )}
+
+                {isRejected && (
+                  <div className="mt-4 p-3 bg-loss/10 border border-loss/20 rounded-xl flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-loss mt-0.5" />
+                    <p className="text-sm text-loss/90">
+                      Your verification was rejected. Please re-submit your documents.
+                    </p>
+                  </div>
                 )}
               </div>
             </motion.div>
-          );
-        })}
-      </div>
+          )}
 
-      {/* Copy Modal */}
-      <AnimatePresence>
-        {showCopyModal && selectedTrader && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            onClick={() => setShowCopyModal(false)}
-          >
+          {activeTab === 'security' && (
             <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-charcoal rounded-2xl border border-white/10 w-full max-w-md overflow-hidden"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
             >
-              {/* Modal Header */}
-              <div className="p-5 border-b border-white/5">
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <Image
-                      src={selectedTrader.avatar}
-                      alt={selectedTrader.name}
-                      width={48}
-                      height={48}
-                      className="w-12 h-12 rounded-xl object-cover"
+              {/* Change Password */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Change Password</h2>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Current Password</label>
+                    <div className="relative">
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        placeholder="Enter current password"
+                        className="w-full px-4 py-3 pr-12 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500"
+                      >
+                        {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">New Password</label>
+                    <input
+                      type="password"
+                      placeholder="Enter new password"
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
                     />
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Confirm New Password</label>
+                    <input
+                      type="password"
+                      placeholder="Confirm new password"
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                </div>
+                <button className="mt-4 px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-colors">
+                  Update Password
+                </button>
+              </div>
+
+              {/* Two-Factor Auth */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center">
+                      <Smartphone className="w-5 h-5 text-electric" />
+                    </div>
                     <div>
-                      <h3 className="text-lg font-semibold text-cream">{selectedTrader.name}</h3>
-                      <p className="text-sm text-profit">+{selectedTrader.totalReturn}% return</p>
+                      <h2 className="text-lg font-semibold text-cream">Two-Factor Authentication</h2>
+                      <p className="text-sm text-slate-400">Add an extra layer of security</p>
                     </div>
                   </div>
                   <button
-                    onClick={() => setShowCopyModal(false)}
-                    className="p-2 hover:bg-white/5 rounded-lg transition-colors"
+                    type="button"
+                    onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
+                    className={`relative w-14 h-7 rounded-full transition-colors ${
+                      twoFactorEnabled ? 'bg-profit' : 'bg-white/10'
+                    }`}
                   >
-                    <X className="w-5 h-5 text-slate-400" />
+                    <span
+                      className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform ${
+                        twoFactorEnabled ? 'left-8' : 'left-1'
+                      }`}
+                    />
                   </button>
                 </div>
-              </div>
-
-              {/* Modal Content */}
-              <div className="p-5 space-y-4">
-                {/* Stats Row */}
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <Target className="w-5 h-5 text-gold mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Win Rate</p>
-                    <p className="text-sm font-bold text-cream">{selectedTrader.winRate}%</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <BarChart3 className="w-5 h-5 text-electric mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Trades</p>
-                    <p className="text-sm font-bold text-cream">{selectedTrader.trades.toLocaleString()}</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <Users className="w-5 h-5 text-profit mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Copiers</p>
-                    <p className="text-sm font-bold text-cream">{(selectedTrader.followers / 1000).toFixed(1)}K</p>
-                  </div>
-                </div>
-
-                {/* Copy Amount */}
-                <div>
-                  <label className="text-sm text-slate-400 mb-2 block">
-                    Copy Amount (USD)
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">$</span>
-                    <input
-                      type="number"
-                      value={copyAmount}
-                      onChange={(e) => setCopyAmount(e.target.value)}
-                      className="w-full pl-8 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-lg font-semibold text-cream focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div className="flex gap-2 mt-2">
-                    {[50, 100, 250, 500].map((amt) => (
-                      <button
-                        key={amt}
-                        onClick={() => setCopyAmount(amt.toString())}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                          copyAmount === amt.toString()
-                            ? 'bg-gold text-void'
-                            : 'bg-white/5 text-slate-400 hover:bg-white/10'
-                        }`}
-                      >
-                        ${amt}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Risk Warning */}
-                <div className="p-3 bg-yellow-500/10 rounded-xl border border-yellow-500/20">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
-                    <div className="text-xs text-yellow-200">
-                      <p className="font-medium">Risk Disclosure</p>
-                      <p className="text-yellow-200/80 mt-1">
-                        Past performance doesn&apos;t guarantee future results. Only copy with funds you can afford to lose.
-                      </p>
+                {twoFactorEnabled && (
+                  <div className="p-4 bg-profit/10 rounded-xl border border-profit/20">
+                    <div className="flex items-center gap-2 text-profit text-sm">
+                      <CheckCircle className="w-4 h-4" />
+                      Two-factor authentication is enabled
                     </div>
                   </div>
-                </div>
-
-                {/* Balance Check */}
-                {user && parseFloat(copyAmount) > (user.balance || 0) && (
-                  <div className="p-3 bg-loss/10 rounded-xl border border-loss/20 text-center">
-                    <p className="text-sm text-loss mb-2">
-                      Insufficient balance. Available: ${(user.balance || 0).toLocaleString()}
-                    </p>
-                    <Link
-                      href="/dashboard/wallet"
-                      className="inline-flex items-center gap-2 text-sm text-gold hover:text-gold/80 font-medium"
-                    >
-                      <Wallet className="w-4 h-4" />
-                      Deposit Funds
-                    </Link>
-                  </div>
                 )}
+              </div>
 
-                {/* Copy Button */}
-                <button
-                  onClick={handleCopyTrader}
-                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || !!(user && parseFloat(copyAmount) > (user.balance || 0))}
-
-                  className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  <Copy className="w-5 h-5" />
-                  Start Copying with ${copyAmount}
+              {/* Active Sessions */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Active Sessions</h2>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-profit/10 rounded-lg flex items-center justify-center">
+                        <Globe className="w-5 h-5 text-profit" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-cream">Chrome on Windows</p>
+                        <p className="text-xs text-slate-500">Current session</p>
+                      </div>
+                    </div>
+                    <span className="text-xs text-profit">Active now</span>
+                  </div>
+                  <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center">
+                        <Smartphone className="w-5 h-5 text-slate-400" />
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-cream">Safari on iPhone</p>
+                        <p className="text-xs text-slate-500">Last active 2 hours ago</p>
+                      </div>
+                    </div>
+                    <button className="text-xs text-loss hover:text-loss/80 transition-colors">
+                      Revoke
+                    </button>
+                  </div>
+                </div>
+                <button className="mt-4 text-sm text-loss hover:text-loss/80 transition-colors">
+                  Sign out all other sessions
                 </button>
               </div>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          )}
 
-      {/* How It Works */}
-      <div className="mt-8 p-6 bg-gradient-to-r from-gold/5 to-electric/5 rounded-2xl border border-gold/10">
-        <h2 className="text-lg font-semibold text-cream mb-4">How Copy Trading Works</h2>
-        <div className="grid sm:grid-cols-4 gap-6">
-          {[
-            { icon: Search, title: 'Find Traders', desc: 'Browse top performers by return, win rate, or strategy' },
-            { icon: Copy, title: 'Start Copying', desc: 'Set your investment amount and start automatically copying' },
-            { icon: Zap, title: 'Auto Execute', desc: 'Their trades are replicated in your account in real-time' },
-            { icon: TrendingUp, title: 'Earn Together', desc: 'When they profit, you profit proportionally' },
-          ].map((step, i) => (
-            <div key={i} className="text-center">
-              <div className="w-12 h-12 bg-gold/10 rounded-xl flex items-center justify-center mx-auto mb-3">
-                <step.icon className="w-6 h-6 text-gold" />
+          {activeTab === 'notifications' && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
+            >
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Email Notifications</h2>
+                <div className="space-y-4">
+                  {[
+                    { key: 'tradeAlerts', label: 'Trade Alerts', desc: 'Get notified when trades are executed' },
+                    { key: 'priceAlerts', label: 'Price Alerts', desc: 'Receive alerts when prices hit your targets' },
+                    { key: 'copyTradeUpdates', label: 'Copy Trading Updates', desc: 'Updates from traders you follow' },
+                    { key: 'promotions', label: 'Promotions', desc: 'Special offers and bonuses' },
+                    { key: 'newsletter', label: 'Newsletter', desc: 'Weekly market updates and analysis' },
+                  ].map((item) => (
+                    <div key={item.key} className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-cream">{item.label}</p>
+                        <p className="text-xs text-slate-500">{item.desc}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNotifications({
+                            ...notifications,
+                            [item.key]: !notifications[item.key as keyof typeof notifications],
+                          })
+                        }
+                        className={`relative w-12 h-6 rounded-full transition-colors ${
+                          notifications[item.key as keyof typeof notifications] ? 'bg-profit' : 'bg-white/10'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                            notifications[item.key as keyof typeof notifications] ? 'left-7' : 'left-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <h3 className="text-sm font-medium text-cream mb-1">{step.title}</h3>
-              <p className="text-xs text-slate-500">{step.desc}</p>
-            </div>
-          ))}
+
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">SMS Notifications</h2>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-cream">SMS Alerts</p>
+                    <p className="text-xs text-slate-500">Receive critical alerts via SMS</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setNotifications({ ...notifications, smsAlerts: !notifications.smsAlerts })}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${
+                      notifications.smsAlerts ? 'bg-profit' : 'bg-white/10'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                        notifications.smsAlerts ? 'left-7' : 'left-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'preferences' && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-6"
+            >
+              {/* Trading Preferences */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Trading Preferences</h2>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Default Trade Amount</label>
+                    <select
+                      value={preferences.defaultAmount}
+                      onChange={(e) => setPreferences({ ...preferences, defaultAmount: parseInt(e.target.value) })}
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+                    >
+                      <option value="10">$10</option>
+                      <option value="25">$25</option>
+                      <option value="50">$50</option>
+                      <option value="100">$100</option>
+                      <option value="250">$250</option>
+                      <option value="500">$500</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Default Duration</label>
+                    <select
+                      value={preferences.defaultDuration}
+                      onChange={(e) => setPreferences({ ...preferences, defaultDuration: parseInt(e.target.value) })}
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+                    >
+                      <option value="30">30 seconds</option>
+                      <option value="60">1 minute</option>
+                      <option value="120">2 minutes</option>
+                      <option value="300">5 minutes</option>
+                      <option value="900">15 minutes</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-cream">Sound Effects</p>
+                      <p className="text-xs text-slate-500">Play sounds on trade execution</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPreferences({ ...preferences, soundEffects: !preferences.soundEffects })}
+                      className={`relative w-12 h-6 rounded-full transition-colors ${
+                        preferences.soundEffects ? 'bg-profit' : 'bg-white/10'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                          preferences.soundEffects ? 'left-7' : 'left-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-cream">Confirm Trades</p>
+                      <p className="text-xs text-slate-500">Show confirmation before executing</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPreferences({ ...preferences, confirmTrades: !preferences.confirmTrades })}
+                      className={`relative w-12 h-6 rounded-full transition-colors ${
+                        preferences.confirmTrades ? 'bg-profit' : 'bg-white/10'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
+                          preferences.confirmTrades ? 'left-7' : 'left-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Display Preferences */}
+              <div className="bg-white/5 rounded-2xl border border-white/5 p-6">
+                <h2 className="text-lg font-semibold text-cream mb-4">Display</h2>
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Language</label>
+                    <select
+                      value={preferences.language}
+                      onChange={(e) => setPreferences({ ...preferences, language: e.target.value })}
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+                    >
+                      <option value="en">English</option>
+                      <option value="es">Español</option>
+                      <option value="pt">Português</option>
+                      <option value="fr">Français</option>
+                      <option value="de">Deutsch</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm text-slate-400 mb-2 block">Timezone</label>
+                    <select
+                      value={preferences.timezone}
+                      onChange={(e) => setPreferences({ ...preferences, timezone: e.target.value })}
+                      className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+                    >
+                      <option value="UTC">UTC</option>
+                      <option value="EST">Eastern Time (EST)</option>
+                      <option value="PST">Pacific Time (PST)</option>
+                      <option value="GMT">GMT</option>
+                      <option value="CET">Central European Time</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Danger Zone */}
+              <div className="bg-loss/5 rounded-2xl border border-loss/20 p-6">
+                <h2 className="text-lg font-semibold text-loss mb-2">Danger Zone</h2>
+                <p className="text-sm text-slate-400 mb-4">
+                  These actions are irreversible. Please proceed with caution.
+                </p>
+                <div className="flex flex-wrap gap-3">
+                  <button className="px-4 py-2 bg-white/5 text-cream text-sm font-medium rounded-lg hover:bg-white/10 transition-colors">
+                    Download Data
+                  </button>
+                  <button className="px-4 py-2 bg-loss/10 text-loss text-sm font-medium rounded-lg hover:bg-loss/20 transition-colors">
+                    Delete Account
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
         </div>
       </div>
     </div>

@@ -11,8 +11,8 @@ import { persist } from 'zustand/middleware';
 // The 3 admin-controlled educational pairs
 export const ADMIN_CONTROLLED_PAIRS = [
   'NOVA/USD',   // Custom educational pair
-  'LEARN/USD', // Learning environment pair
-  'DEMO/USD',  // Demo trading pair
+  'DEMO/USD',   // Demo trading pair
+  'TRD/USD',    // Trading practice pair
 ] as const;
 
 export type AdminControlledPair = typeof ADMIN_CONTROLLED_PAIRS[number];
@@ -70,17 +70,6 @@ const initialCustomPairs: CustomPair[] = [
     isActive: true,
   },
   {
-    id: 'LEARN/USD',
-    symbol: 'LEARN/USD',
-    name: 'LEARN Token / US Dollar',
-    description: 'Practice pair for chart pattern recognition',
-    basePrice: 0.8500,
-    pipSize: 0.0001,
-    leverageMax: 50,
-    spreadPips: 3,
-    isActive: true,
-  },
-  {
     id: 'DEMO/USD',
     symbol: 'DEMO/USD',
     name: 'DEMO Token / US Dollar',
@@ -89,6 +78,17 @@ const initialCustomPairs: CustomPair[] = [
     pipSize: 0.0001,
     leverageMax: 200,
     spreadPips: 1,
+    isActive: true,
+  },
+  {
+    id: 'TRD/USD',
+    symbol: 'TRD/USD',
+    name: 'TRD Token / US Dollar',
+    description: 'Trading practice pair for signal sessions',
+    basePrice: 0.8500,
+    pipSize: 0.0001,
+    leverageMax: 100,
+    spreadPips: 2,
     isActive: true,
   },
 ];
@@ -587,8 +587,8 @@ function getBasePrice(symbol: string): number {
     'USD/CHF': 0.8950,
     'NZD/USD': 0.6150,
     'NOVA/USD': 1.2500,
-    'LEARN/USD': 0.8500,
     'DEMO/USD': 2.0000,
+    'TRD/USD': 0.8500,
   };
   return prices[symbol] || 1.0000;
 }

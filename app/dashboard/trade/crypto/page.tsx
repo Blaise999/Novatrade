@@ -62,6 +62,21 @@ const cryptoAssets: CryptoAsset[] = [
   { id: 'avax', symbol: 'AVAX', name: 'Avalanche', price: 35.67, change24h: -2.34, marketCap: '$13B', volume24h: '$567M', icon: '🔺' },
   { id: 'dot', symbol: 'DOT', name: 'Polkadot', price: 7.89, change24h: 0.56, marketCap: '$10B', volume24h: '$234M', icon: '●' },
   { id: 'link', symbol: 'LINK', name: 'Chainlink', price: 14.56, change24h: 1.89, marketCap: '$8B', volume24h: '$345M', icon: '⬡' },
+  { id: 'matic', symbol: 'MATIC', name: 'Polygon', price: 0.5678, change24h: 4.22, marketCap: '$5.2B', volume24h: '$450M', icon: '⬣' },
+  { id: 'uni', symbol: 'UNI', name: 'Uniswap', price: 12.34, change24h: 4.76, marketCap: '$7.4B', volume24h: '$320M', icon: '🦄' },
+  { id: 'ltc', symbol: 'LTC', name: 'Litecoin', price: 95.67, change24h: 2.50, marketCap: '$7.1B', volume24h: '$680M', icon: 'Ł' },
+  { id: 'atom', symbol: 'ATOM', name: 'Cosmos', price: 9.45, change24h: 3.05, marketCap: '$3.6B', volume24h: '$280M', icon: '⚛' },
+  { id: 'near', symbol: 'NEAR', name: 'NEAR Protocol', price: 5.23, change24h: 6.96, marketCap: '$5.8B', volume24h: '$410M', icon: '◈' },
+  { id: 'apt', symbol: 'APT', name: 'Aptos', price: 8.67, change24h: 5.47, marketCap: '$3.9B', volume24h: '$290M', icon: '⬡' },
+  { id: 'sui', symbol: 'SUI', name: 'Sui', price: 1.87, change24h: 6.86, marketCap: '$5.4B', volume24h: '$520M', icon: '💧' },
+  { id: 'arb', symbol: 'ARB', name: 'Arbitrum', price: 1.12, change24h: 4.67, marketCap: '$4.2B', volume24h: '$380M', icon: '🔵' },
+  { id: 'op', symbol: 'OP', name: 'Optimism', price: 2.34, change24h: 4.93, marketCap: '$3.1B', volume24h: '$310M', icon: '🔴' },
+  { id: 'fil', symbol: 'FIL', name: 'Filecoin', price: 5.78, change24h: 4.14, marketCap: '$3.2B', volume24h: '$240M', icon: '📁' },
+  { id: 'pepe', symbol: 'PEPE', name: 'Pepe', price: 0.00001245, change24h: 7.71, marketCap: '$5.2B', volume24h: '$1.8B', icon: '🐸' },
+  { id: 'shib', symbol: 'SHIB', name: 'Shiba Inu', price: 0.00002456, change24h: 5.27, marketCap: '$14.4B', volume24h: '$920M', icon: '🐕' },
+  { id: 'trx', symbol: 'TRX', name: 'TRON', price: 0.1234, change24h: 1.56, marketCap: '$10.8B', volume24h: '$345M', icon: '♦' },
+  { id: 'ton', symbol: 'TON', name: 'Toncoin', price: 5.89, change24h: 3.12, marketCap: '$14.5B', volume24h: '$180M', icon: '💎' },
+  { id: 'icp', symbol: 'ICP', name: 'Internet Computer', price: 12.45, change24h: 2.89, marketCap: '$5.8B', volume24h: '$120M', icon: '∞' },
 ];
 
 // ============================================
@@ -380,10 +395,12 @@ export default function CryptoTradingPage() {
   useEffect(() => {
     if (user?.id && !account) {
       initializeAccount(user.id, user.balance);
-    } else if (user?.balance !== undefined) {
+    } else if (user?.balance !== undefined && account) {
       syncCashFromUser(user.balance);
     }
-  }, [user, account]);
+    // Only re-run when user ID or balance actually changes, not the whole object
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?.balance, !!account]);
 
   // Calculate quantity from amount
   useEffect(() => {

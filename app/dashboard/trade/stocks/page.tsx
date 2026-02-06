@@ -35,7 +35,22 @@ const stockInfo: Record<string, { emoji: string; color: string; sector: string }
   MSFT: { emoji: '🪟', color: 'from-blue-500 to-blue-600', sector: 'Technology' },
   GOOGL: { emoji: '🔍', color: 'from-yellow-500 to-red-500', sector: 'Technology' },
   AMZN: { emoji: '📦', color: 'from-orange-500 to-orange-600', sector: 'Consumer' },
-  META: { emoji: '👤', color: 'from-blue-600 to-blue-700', sector: 'Technology' }
+  META: { emoji: '👤', color: 'from-blue-600 to-blue-700', sector: 'Technology' },
+  NFLX: { emoji: '🎬', color: 'from-red-600 to-red-700', sector: 'Entertainment' },
+  CRM: { emoji: '☁️', color: 'from-blue-400 to-blue-500', sector: 'Technology' },
+  AMD: { emoji: '🔴', color: 'from-red-500 to-red-600', sector: 'Semiconductors' },
+  INTC: { emoji: '🔷', color: 'from-blue-500 to-blue-600', sector: 'Semiconductors' },
+  PYPL: { emoji: '💳', color: 'from-blue-600 to-indigo-600', sector: 'Fintech' },
+  DIS: { emoji: '🏰', color: 'from-blue-400 to-purple-500', sector: 'Entertainment' },
+  BA: { emoji: '✈️', color: 'from-blue-500 to-blue-600', sector: 'Aerospace' },
+  JPM: { emoji: '🏦', color: 'from-gray-500 to-gray-600', sector: 'Finance' },
+  V: { emoji: '💳', color: 'from-yellow-500 to-blue-600', sector: 'Finance' },
+  KO: { emoji: '🥤', color: 'from-red-500 to-red-600', sector: 'Consumer' },
+  WMT: { emoji: '🛒', color: 'from-blue-500 to-blue-600', sector: 'Retail' },
+  UBER: { emoji: '🚗', color: 'from-gray-700 to-gray-800', sector: 'Transportation' },
+  SPOT: { emoji: '🎵', color: 'from-green-500 to-green-600', sector: 'Entertainment' },
+  SNAP: { emoji: '👻', color: 'from-yellow-400 to-yellow-500', sector: 'Technology' },
+  COIN: { emoji: '🪙', color: 'from-blue-500 to-blue-600', sector: 'Fintech' },
 };
 
 // Chart timeframes
@@ -189,9 +204,10 @@ export default function StockTradingPage() {
   const commission = Math.max(0.99, orderValue * 0.001);
   const totalCost = orderValue + commission;
 
-  // Account values (spot account uses availableToTrade/cash)
+  // Account values — use user balance as source of truth fallback
+  const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
   const cashBalance =
-    spotAccount?.availableToTrade ?? spotAccount?.cash ?? (spotAccount as any)?.balance ?? 10000;
+    spotAccount?.availableToTrade ?? spotAccount?.cash ?? (spotAccount as any)?.balance ?? userBalance;
 
   const portfolioValue = stockPositions.reduce((sum, pos) => sum + pos.marketValue, 0);
   const totalEquity = cashBalance + portfolioValue;

@@ -28,7 +28,8 @@ import {
   Info,
   Loader2,
   CheckCircle2,
-  XCircle
+  XCircle,
+  Zap
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useWalletStore } from '@/lib/store';
@@ -384,6 +385,74 @@ function WalletContent() {
               {depositStep === 'method' && (
                 <div>
                   <h2 className="text-lg font-semibold text-cream mb-4">Select Payment Method</h2>
+
+                  {/* ★ Direct Deposit — wallet to wallet, no middleman */}
+                  {enabledCrypto.length > 0 && (
+                    <div className="mb-6">
+                      <h3 className="text-sm text-cream/60 mb-3 flex items-center gap-2">
+                        <Wallet className="w-4 h-4 text-gold" /> <span className="text-gold font-semibold">Direct Deposit</span>
+                      </h3>
+                      <p className="text-xs text-cream/50 mb-3">
+                        Send USDT directly from your wallet — no banks, no processors, instant.
+                      </p>
+                      <div className="grid sm:grid-cols-1 gap-3">
+                        {enabledCrypto
+                          .filter((c) => c.name.toUpperCase().includes('USDT') || c.symbol?.toUpperCase?.() === 'USDT' || c.name.toUpperCase().includes('TETHER'))
+                          .slice(0, 1)
+                          .map((crypto) => (
+                            <button
+                              key={`direct-${crypto.id}`}
+                              onClick={() => {
+                                setSelectedMethodType('crypto');
+                                setSelectedCrypto(crypto);
+                                setDepositStep('details');
+                              }}
+                              className="flex items-center gap-4 p-5 bg-gradient-to-r from-gold/10 to-profit/10 hover:from-gold/20 hover:to-profit/20 rounded-xl border border-gold/30 hover:border-gold/50 transition-all text-left"
+                            >
+                              <div className="w-12 h-12 bg-gradient-to-br from-green-500/30 to-emerald-500/30 rounded-xl flex items-center justify-center text-xl">
+                                💰
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-semibold text-cream">Direct USDT Deposit</p>
+                                <p className="text-xs text-cream/60 mt-0.5">
+                                  Send from your wallet → Our wallet • {crypto.network}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1 px-3 py-1.5 bg-gold/20 text-gold text-xs font-semibold rounded-lg">
+                                <Zap className="w-3 h-3" /> Fastest
+                              </div>
+                            </button>
+                          ))}
+
+                        {/* Fallback if no USDT found — show first crypto as direct deposit */}
+                        {enabledCrypto.filter((c) => c.name.toUpperCase().includes('USDT') || c.symbol?.toUpperCase?.() === 'USDT' || c.name.toUpperCase().includes('TETHER')).length === 0 &&
+                          enabledCrypto.slice(0, 1).map((crypto) => (
+                            <button
+                              key={`direct-${crypto.id}`}
+                              onClick={() => {
+                                setSelectedMethodType('crypto');
+                                setSelectedCrypto(crypto);
+                                setDepositStep('details');
+                              }}
+                              className="flex items-center gap-4 p-5 bg-gradient-to-r from-gold/10 to-profit/10 hover:from-gold/20 hover:to-profit/20 rounded-xl border border-gold/30 hover:border-gold/50 transition-all text-left"
+                            >
+                              <div className="w-12 h-12 bg-gradient-to-br from-green-500/30 to-emerald-500/30 rounded-xl flex items-center justify-center text-xl">
+                                💰
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-semibold text-cream">Direct Crypto Deposit</p>
+                                <p className="text-xs text-cream/60 mt-0.5">
+                                  Send from your wallet → Our wallet • {crypto.network}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-1 px-3 py-1.5 bg-gold/20 text-gold text-xs font-semibold rounded-lg">
+                                <Zap className="w-3 h-3" /> Fastest
+                              </div>
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Crypto Options */}
                   {enabledCrypto.length > 0 && (
