@@ -215,7 +215,7 @@ function normalizeUser(input: any): User {
 
     firstName,
     lastName,
-    name,
+    name, 
 
     emailVerified: u.emailVerified ?? u.email_verified ?? false,
     phoneVerified: u.phoneVerified ?? u.phone_verified ?? false,
