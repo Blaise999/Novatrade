@@ -3,10 +3,12 @@
  *
  * GET  /api/bots/keys?action=list           — admin: list all keys
  * GET  /api/bots/keys?action=check&userId=x — user: check their bot access
- * POST /api/bots/keys  { action: 'generate', botType, adminId, notes }  — admin: generate key
- * POST /api/bots/keys  { action: 'redeem', key, userId }               — user: activate key
- * PATCH /api/bots/keys { keyId, action: 'revoke' }                     — admin: revoke key
+ * POST /api/bots/keys  { action: 'generate', botType, adminId, notes, count }  — admin: generate key(s)
+ * POST /api/bots/keys  { action: 'redeem', key, userId }                       — user: activate key
+ * PATCH /api/bots/keys { keyId, action: 'revoke' }                             — admin: revoke key
  */
+
+export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
@@ -40,11 +42,15 @@ export async function GET(request: NextRequest) {
 
     // --- User: check their bot access ---
     if (action === 'check' && userId) {
-      const { data: access } = await supabaseAdmin
+      const { data: access, error } = await supabaseAdmin
         .from('user_bot_access')
         .select('*')
         .eq('user_id', userId)
         .eq('is_active', true);
+
+      if (error) {
+        return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      }
 
       const dcaActive = (access ?? []).some((a: any) => a.bot_type === 'dca');
       const gridActive = (access ?? []).some((a: any) => a.bot_type === 'grid');
@@ -90,46 +96,31 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action } = body;
 
-    // --- Admin: generate new key ---
+    // --- Admin: generate new key(s) ---
     if (action === 'generate') {
       const { botType, adminId, notes, count } = body;
 
       if (!botType || !['dca', 'grid'].includes(botType)) {
-        return NextResponse.json({ success: false, error: 'botType must be dca or grid' }, { status: 400 });
+        return NextResponse.json(
+          { success: false, error: 'botType must be dca or grid' },
+          { status: 400 },
+        );
       }
 
       const numKeys = Math.min(count || 1, 50); // max 50 at a time
       const generatedKeys: any[] = [];
 
       for (let i = 0; i < numKeys; i++) {
-        let key: string;
-        let attempts = 0;
+        let created: any = null;
 
-        // Ensure uniqueness
-        do {
-          key = generateActivationKey(botType);
-          attempts++;
-        } while (attempts < 10);
+        // Try up to 10 times (handles unique collisions safely)
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const key = generateActivationKey(botType);
 
-        const { data: newKey, error } = await supabaseAdmin
-          .from('bot_activation_keys')
-          .insert({
-            activation_key: key,
-            bot_type: botType,
-            status: 'unused',
-            generated_by: adminId || 'admin',
-            notes: notes || null,
-          })
-          .select()
-          .single();
-
-        if (error) {
-          // Key collision — retry with different key
-          const retryKey = generateActivationKey(botType) + crypto.randomBytes(1).toString('hex').toUpperCase();
-          const { data: retryData } = await supabaseAdmin
+          const { data, error } = await supabaseAdmin
             .from('bot_activation_keys')
             .insert({
-              activation_key: retryKey,
+              activation_key: key,
               bot_type: botType,
               status: 'unused',
               generated_by: adminId || 'admin',
@@ -137,10 +128,21 @@ export async function POST(request: NextRequest) {
             })
             .select()
             .single();
-          if (retryData) generatedKeys.push(retryData);
-        } else if (newKey) {
-          generatedKeys.push(newKey);
+
+          if (!error && data) {
+            created = data;
+            break;
+          }
+
+          // Unique violation (Postgres): retry
+          const code = (error as any)?.code;
+          if (code === '23505') continue;
+
+          // Other error: stop and surface it
+          throw new Error((error as any)?.message || 'Failed to generate key');
         }
+
+        if (created) generatedKeys.push(created);
       }
 
       return NextResponse.json({
@@ -155,11 +157,13 @@ export async function POST(request: NextRequest) {
       const { key, userId } = body;
 
       if (!key || !userId) {
-        return NextResponse.json({ success: false, error: 'key and userId required' }, { status: 400 });
+        return NextResponse.json(
+          { success: false, error: 'key and userId required' },
+          { status: 400 },
+        );
       }
 
-      // Normalize key
-      const normalizedKey = key.trim().toUpperCase();
+      const normalizedKey = String(key).trim().toUpperCase();
 
       // Find the key
       const { data: keyRecord, error: findErr } = await supabaseAdmin
@@ -169,21 +173,30 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (findErr || !keyRecord) {
-        return NextResponse.json({ success: false, error: 'Invalid activation key. Please check and try again.' }, { status: 404 });
+        return NextResponse.json(
+          { success: false, error: 'Invalid activation key. Please check and try again.' },
+          { status: 404 },
+        );
       }
 
       if (keyRecord.status === 'active') {
-        return NextResponse.json({ success: false, error: 'This key has already been used.' }, { status: 400 });
+        return NextResponse.json(
+          { success: false, error: 'This key has already been used.' },
+          { status: 400 },
+        );
       }
 
       if (keyRecord.status === 'revoked') {
-        return NextResponse.json({ success: false, error: 'This key has been revoked.' }, { status: 400 });
+        return NextResponse.json(
+          { success: false, error: 'This key has been revoked.' },
+          { status: 400 },
+        );
       }
 
       const botType = keyRecord.bot_type;
 
       // Check if user already has this bot type
-      const { data: existingAccess } = await supabaseAdmin
+      const { data: existingAccess, error: accessCheckErr } = await supabaseAdmin
         .from('user_bot_access')
         .select('id')
         .eq('user_id', userId)
@@ -191,11 +204,21 @@ export async function POST(request: NextRequest) {
         .eq('is_active', true)
         .maybeSingle();
 
+      if (accessCheckErr) {
+        return NextResponse.json(
+          { success: false, error: accessCheckErr.message },
+          { status: 500 },
+        );
+      }
+
       if (existingAccess) {
-        return NextResponse.json({
-          success: false,
-          error: `You already have ${botType.toUpperCase()} bot access activated.`,
-        }, { status: 400 });
+        return NextResponse.json(
+          {
+            success: false,
+            error: `You already have ${String(botType).toUpperCase()} bot access activated.`,
+          },
+          { status: 400 },
+        );
       }
 
       // Get user email for record-keeping
@@ -205,9 +228,9 @@ export async function POST(request: NextRequest) {
         .eq('id', userId)
         .maybeSingle();
 
-      // Lock the key to this user
+      // ✅ Atomic activate: only succeeds if status still 'unused'
       const now = new Date().toISOString();
-      const { error: updateErr } = await supabaseAdmin
+      const { data: updatedKey, error: updateErr } = await supabaseAdmin
         .from('bot_activation_keys')
         .update({
           status: 'active',
@@ -215,14 +238,27 @@ export async function POST(request: NextRequest) {
           user_email: userRecord?.email || null,
           activated_at: now,
         })
-        .eq('id', keyRecord.id);
+        .eq('id', keyRecord.id)
+        .eq('status', 'unused')
+        .select('id,status')
+        .maybeSingle();
 
       if (updateErr) {
-        return NextResponse.json({ success: false, error: 'Failed to activate key' }, { status: 500 });
+        return NextResponse.json(
+          { success: false, error: 'Failed to activate key' },
+          { status: 500 },
+        );
+      }
+
+      if (!updatedKey) {
+        return NextResponse.json(
+          { success: false, error: 'This key has already been used or revoked.' },
+          { status: 400 },
+        );
       }
 
       // Grant bot access
-      const { error: accessErr } = await supabaseAdmin
+      const { error: accessErr2 } = await supabaseAdmin
         .from('user_bot_access')
         .insert({
           user_id: userId,
@@ -231,21 +267,31 @@ export async function POST(request: NextRequest) {
           is_active: true,
         });
 
-      if (accessErr) {
-        console.error('[BotKeys] access grant error:', accessErr);
+      if (accessErr2) {
+        console.error('[BotKeys] access grant error:', accessErr2);
       }
 
-      // Log activity
-      await supabaseAdmin.from('bot_activity_log').insert({
-        bot_id: keyRecord.id,
-        action: 'key_redeemed',
-        details: { key: normalizedKey, botType, userId },
-      }).catch(() => {});
+      // ✅ Log activity (no .catch on builder)
+      try {
+        const { error: logErr } = await supabaseAdmin
+          .from('bot_activity_log')
+          .insert({
+            bot_id: keyRecord.id,
+            action: 'key_redeemed',
+            details: { key: normalizedKey, botType, userId },
+          });
+
+        if (logErr) console.warn('[BotKeys] activity log error:', logErr);
+      } catch (e) {
+        console.warn('[BotKeys] activity log exception:', e);
+      }
 
       return NextResponse.json({
         success: true,
         botType,
-        message: `${botType.toUpperCase()} bot activated successfully! You can now create and run ${botType.toUpperCase()} bots.`,
+        message: `${String(botType).toUpperCase()} bot activated successfully! You can now create and run ${String(
+          botType,
+        ).toUpperCase()} bots.`,
       });
     }
 
@@ -268,28 +314,36 @@ export async function PATCH(request: NextRequest) {
     }
 
     if (action === 'revoke') {
-      const { data: keyRecord } = await supabaseAdmin
+      const { data: keyRecord, error: findErr } = await supabaseAdmin
         .from('bot_activation_keys')
         .select('*')
         .eq('id', keyId)
         .single();
 
-      if (!keyRecord) {
+      if (findErr || !keyRecord) {
         return NextResponse.json({ success: false, error: 'Key not found' }, { status: 404 });
       }
 
       // Revoke the key
-      await supabaseAdmin
+      const { error: revokeErr } = await supabaseAdmin
         .from('bot_activation_keys')
         .update({ status: 'revoked', revoked_at: new Date().toISOString() })
         .eq('id', keyId);
 
+      if (revokeErr) {
+        return NextResponse.json({ success: false, error: revokeErr.message }, { status: 500 });
+      }
+
       // If it was active, also revoke user's bot access
       if (keyRecord.status === 'active' && keyRecord.user_id) {
-        await supabaseAdmin
+        const { error: accessRevokeErr } = await supabaseAdmin
           .from('user_bot_access')
           .update({ is_active: false })
           .eq('activation_key_id', keyId);
+
+        if (accessRevokeErr) {
+          console.error('[BotKeys] access revoke error:', accessRevokeErr);
+        }
       }
 
       return NextResponse.json({ success: true });
