@@ -56,7 +56,7 @@ CREATE TABLE trading_tiers (
   max_leverage INTEGER DEFAULT 10,
   spread_discount DECIMAL(5,2) DEFAULT 0, -- percentage off spread
   daily_signals INTEGER DEFAULT 0,
-  copy_trading_access BOOLEAN DEFAULT false,
+  dca_grid_access BOOLEAN DEFAULT false,
   bot_access BOOLEAN DEFAULT false,
   priority_support BOOLEAN DEFAULT false,
   account_manager BOOLEAN DEFAULT false,
@@ -72,10 +72,10 @@ CREATE TABLE trading_tiers (
 );
 
 -- Insert default tiers
-INSERT INTO trading_tiers (id, name, price, description, max_leverage, spread_discount, daily_signals, copy_trading_access, bot_access, priority_support, account_manager, vip_webinars, custom_strategies, max_position_size, max_daily_trades, features) VALUES
+INSERT INTO trading_tiers (id, name, price, description, max_leverage, spread_discount, daily_signals, dca_grid_access, bot_access, priority_support, account_manager, vip_webinars, custom_strategies, max_position_size, max_daily_trades, features) VALUES
 ('basic', 'Basic', 0, 'Free access to learn and practice', 10, 0, 0, false, false, false, false, false, false, 1000, 10, '{"demo_account": true, "basic_charts": true, "educational_content": true}'),
 ('tier1', 'Starter', 500, 'Begin your trading journey', 50, 10, 3, false, false, false, false, false, false, 5000, 25, '{"live_trading": true, "basic_signals": true, "email_support": true}'),
-('tier2', 'Trader', 1000, 'For serious traders', 100, 20, 10, true, false, true, false, false, false, 25000, 50, '{"copy_trading": true, "advanced_charts": true, "chat_support": true}'),
+('tier2', 'Trader', 1000, 'For serious traders', 100, 20, 10, true, false, true, false, false, false, 25000, 50, '{"dca_grid_bots": true, "advanced_charts": true, "chat_support": true}'),
 ('tier3', 'Professional', 3000, 'Professional trading tools', 200, 35, 25, true, true, true, true, true, false, 100000, 100, '{"trading_bots": true, "account_manager": true, "vip_signals": true}'),
 ('tier4', 'Elite', 5000, 'Ultimate trading experience', 500, 50, 999, true, true, true, true, true, true, NULL, NULL, '{"unlimited_everything": true, "custom_strategies": true, "private_channel": true}');
 

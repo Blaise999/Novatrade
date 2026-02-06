@@ -45,7 +45,6 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState({
     tradeAlerts: true,
     priceAlerts: true,
-    copyTradeUpdates: true,
     promotions: false,
     newsletter: false,
     smsAlerts: false,
@@ -362,7 +361,6 @@ export default function SettingsPage() {
                   {[
                     { key: 'tradeAlerts', label: 'Trade Alerts', desc: 'Get notified when trades are executed' },
                     { key: 'priceAlerts', label: 'Price Alerts', desc: 'Receive alerts when prices hit your targets' },
-                    { key: 'copyTradeUpdates', label: 'Copy Trading Updates', desc: 'Updates from traders you follow' },
                     { key: 'promotions', label: 'Promotions', desc: 'Special offers and bonuses' },
                     { key: 'newsletter', label: 'Newsletter', desc: 'Weekly market updates and analysis' },
                   ].map((item) => (

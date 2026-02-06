@@ -225,21 +225,7 @@ export interface Transaction {
   description?: string;
 }
 
-// Copy Trading Types
-export interface CopySettings {
-  traderId: string;
-  maxAmount: number;
-  copyRatio: number;
-  stopLoss?: number;
-  maxOpenTrades?: number;
-  copyNewTradesOnly: boolean;
-}
 
-export interface CopiedTrade extends Trade {
-  originalTradeId: string;
-  traderId: string;
-  traderName: string;
-}
 
 // Notification Types
 export interface Notification {

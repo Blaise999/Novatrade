@@ -46,8 +46,6 @@ const navigation = [
     ]
   },
   { 
-    name: 'Copy Trading', 
-    href: '/dashboard/copy-trading', 
     icon: Copy 
   },
   { 

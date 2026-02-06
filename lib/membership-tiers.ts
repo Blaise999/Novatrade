@@ -6,7 +6,7 @@ import { persist } from 'zustand/middleware';
 // ============================================
 // Basic: FREE - View markets, demo trading, no live trading
 // Tier 1: $500 - Start live trading
-// Tier 2: $1,000 - Advanced features + copy trading  
+// Tier 2: $1,000 - Advanced features + DCA & Grid Bots  
 // Tier 3: $3,000 - Professional tools + coaching
 // Tier 4: $5,000 - VIP Elite access + everything
 // ============================================
@@ -32,7 +32,7 @@ export interface TierConfig {
   
   // Features
   signalsPerDay: number;
-  copyTrading: boolean;
+  dcaGridBots: boolean;
   tradingBots: boolean;
   aiAssistant: boolean;
   customIndicators: boolean;
@@ -72,7 +72,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
     maxPositions: 0,
     spreadDiscount: 0,
     signalsPerDay: 0,
-    copyTrading: false,
+    dcaGridBots: false,
     tradingBots: false,
     aiAssistant: false,
     customIndicators: false,
@@ -107,7 +107,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
     maxPositions: 10,
     spreadDiscount: 0,
     signalsPerDay: 3,
-    copyTrading: false,
+    dcaGridBots: false,
     tradingBots: false,
     aiAssistant: false,
     customIndicators: false,
@@ -131,7 +131,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
       'Everything in Starter',
       'Up to 1:100 leverage',
       '10 pro signals/day',
-      '✓ Copy trading access',
+      '✓ DCA & Grid Bots access',
       'Priority chat support',
       '25 open positions max',
       'All trading pairs',
@@ -143,7 +143,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
     maxPositions: 25,
     spreadDiscount: 20,
     signalsPerDay: 10,
-    copyTrading: true,
+    dcaGridBots: true,
     tradingBots: false,
     aiAssistant: false,
     customIndicators: false,
@@ -181,7 +181,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
     maxPositions: 50,
     spreadDiscount: 35,
     signalsPerDay: 25,
-    copyTrading: true,
+    dcaGridBots: true,
     tradingBots: true,
     aiAssistant: true,
     customIndicators: true,
@@ -221,7 +221,7 @@ export const TIER_CONFIG: Record<MembershipTier, TierConfig> = {
     maxPositions: -1, // unlimited
     spreadDiscount: 50,
     signalsPerDay: 999, // unlimited
-    copyTrading: true,
+    dcaGridBots: true,
     tradingBots: true,
     aiAssistant: true,
     customIndicators: true,
@@ -256,14 +256,14 @@ export function getUpgradeCost(currentTier: MembershipTier, targetTier: Membersh
 // Check if action is allowed for tier
 export function canPerformAction(
   tier: MembershipTier,
-  action: 'trade' | 'copyTrade' | 'useBots' | 'useAI' | 'customIndicators'
+  action: 'trade' | 'useDcaGrid' | 'useBots' | 'useAI' | 'customIndicators'
 ): boolean {
   const config = TIER_CONFIG[tier];
   switch (action) {
     case 'trade':
       return config.tradingAccess;
-    case 'copyTrade':
-      return config.copyTrading;
+    case 'useDcaGrid':
+      return config.dcaGridBots;
     case 'useBots':
       return config.tradingBots;
     case 'useAI':

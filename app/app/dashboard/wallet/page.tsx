@@ -50,7 +50,6 @@ const botInfo: Record<string, { name: string; min: number }> = {
   'dca-bot': { name: 'DCA Bot', min: 50 },
   'arbitrage-bot': { name: 'Arbitrage Bot', min: 500 },
   'momentum-bot': { name: 'Momentum Bot', min: 250 },
-  'copy-bot': { name: 'Copy Trading Bot', min: 100 },
   'ai-bot': { name: 'AI Trading Bot', min: 1000 }
 };
 

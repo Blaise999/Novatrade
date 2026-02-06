@@ -325,3 +325,23 @@ input[type="password"]:focus {
     opacity: 0;
   }
 }
+
+/* Bot form inputs */
+.input-dark {
+  width: 100%;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 0.75rem;
+  padding: 0.625rem 0.875rem;
+  color: #f5f0e8;
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.input-dark:focus {
+  border-color: #6366f1;
+}
+.input-dark option {
+  background: #0f1118;
+  color: #f5f0e8;
+}

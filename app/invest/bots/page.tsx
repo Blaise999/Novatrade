@@ -73,17 +73,18 @@ const bots = [
   {
     id: 'dca',
     name: 'DCA Master',
-    description: 'Dollar-cost averaging bot for long-term wealth building',
-    monthlyReturn: '8-15%',
+    description: 'Dollar-cost averaging with safety orders for systematic long-term accumulation',
+    monthlyReturn: 'Varies',
     riskLevel: 'Low',
     winRate: 85,
     trades: 30,
-    minCapital: 250,
+    minCapital: 100,
     status: 'active',
     icon: Clock,
     color: 'from-purple-500 to-pink-600',
-    features: ['Auto-accumulation', 'Market timing', 'Portfolio rebalancing'],
+    features: ['Scheduled auto-buys', 'Safety orders (dip-buying)', 'Trailing take profit', 'Custom frequency & sizing'],
     free: false,
+    contactRequired: true,
   },
   {
     id: 'arbitrage',
@@ -104,17 +105,18 @@ const bots = [
   {
     id: 'grid',
     name: 'Grid Warrior',
-    description: 'Grid trading strategy for ranging markets',
-    monthlyReturn: '10-20%',
+    description: 'Automated buy-low sell-high grid strategy — profits from price oscillation',
+    monthlyReturn: 'Varies',
     riskLevel: 'Medium',
     winRate: 70,
     trades: 200,
-    minCapital: 500,
+    minCapital: 200,
     status: 'active',
     icon: Settings,
     color: 'from-orange-500 to-red-600',
-    features: ['Auto grid setup', 'Range detection', 'Profit optimization'],
+    features: ['Arithmetic & Geometric grids', 'Long/Short/Neutral strategy', 'Auto order cycling', 'Custom grid count & range'],
     free: false,
+    contactRequired: true,
   },
 ];
 
@@ -131,6 +133,10 @@ export default function BotsPage() {
   const [selectedRisk, setSelectedRisk] = useState<string | null>(null);
 
   const handleActivateBot = (botId: string) => {
+    if (botId === 'dca' || botId === 'grid') {
+      router.push(`/invest/bots/contact?bot=${botId}`);
+      return;
+    }
     if (isAuthenticated) {
       router.push(`/dashboard/wallet?bot=${botId}`);
     } else {
@@ -278,13 +284,24 @@ export default function BotsPage() {
                 <button
                   onClick={() => handleActivateBot(bot.id)}
                   className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
-                    bot.free
-                      ? 'bg-profit text-void hover:bg-profit/90'
-                      : 'bg-gold text-void hover:bg-gold/90'
+                    bot.contactRequired
+                      ? 'bg-electric text-white hover:bg-electric/90'
+                      : bot.free
+                        ? 'bg-profit text-void hover:bg-profit/90'
+                        : 'bg-gold text-void hover:bg-gold/90'
                   }`}
                 >
-                  <Play className="w-4 h-4" />
-                  Activate Bot
+                  {bot.contactRequired ? (
+                    <>
+                      <ArrowRight className="w-4 h-4" />
+                      Learn More & Contact Us
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4" />
+                      Activate Bot
+                    </>
+                  )}
                 </button>
               </motion.div>
             ))}

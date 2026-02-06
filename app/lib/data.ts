@@ -1020,7 +1020,7 @@ export const features: Feature[] = [
   },
   {
     id: 'copy',
-    title: 'Copy Trading',
+    title: 'Trading Bots',
     description: 'Automatically replicate trades from top performers. Set your risk, we handle the rest.',
     icon: 'users',
   },
@@ -1032,7 +1032,7 @@ export const testimonials: Testimonial[] = [
     name: 'Michael Torres',
     role: 'Day Trader',
     avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=200&h=200&fit=crop',
-    content: 'NOVATrADE completely transformed my trading. The copy trading feature let me learn from professionals while earning. Incredible platform.',
+    content: 'NOVATrADE completely transformed my trading. The automated DCA bot let me learn from professionals while earning. Incredible platform.',
     profit: 34500,
     rating: 5,
   },

@@ -52,8 +52,8 @@ const faqs = [
         a: 'NOVATrADE offers over 200+ assets including cryptocurrencies (BTC, ETH, SOL, etc.), forex pairs (EUR/USD, GBP/USD, etc.), stocks (AAPL, TSLA, NVDA, etc.), and commodities (Gold, Silver, Oil).'
       },
       {
-        q: 'How does copy trading work?',
-        a: 'Copy trading allows you to automatically replicate the trades of successful traders. You choose a trader to copy, set your investment amount, and our system will execute the same trades proportionally in your account.'
+        q: 'How do the trading bots work?',
+        a: 'Our DCA and Grid bots automate proven strategies. Contact us to learn more.'
       },
     ]
   },

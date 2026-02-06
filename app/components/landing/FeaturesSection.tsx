@@ -23,8 +23,8 @@ const features = [
     stat: '5K+', statLabel: 'Stocks',
   },
   {
-    icon: Users, title: 'Copy Trading', desc: 'One-click copy top performers. Auto-replicate their trades in real time.',
-    href: '/dashboard/copy-trading', gradient: 'from-purple-500/20 to-purple-500/5', accent: 'text-purple-400',
+    icon: Users, title: 'DCA & Grid Bots', desc: 'One-click copy top performers. Auto-replicate their trades in real time.',
+    href: '/invest/bots', gradient: 'from-purple-500/20 to-purple-500/5', accent: 'text-purple-400',
     stat: '2,847', statLabel: 'Traders',
   },
   {

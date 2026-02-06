@@ -25,7 +25,7 @@ import {
   Bitcoin,
   DollarSign,
   BarChart3,
-  Copy
+  Bot
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore, useNotificationStore } from '@/lib/store';
@@ -48,9 +48,9 @@ const navigation = [
     ]
   },
   { 
-    name: 'Copy Trading', 
-    href: '/dashboard/copy-trading', 
-    icon: Copy 
+    name: 'Trading Bots', 
+    href: '/dashboard/bots', 
+    icon: Bot 
   },
   { 
     name: 'Portfolio', 

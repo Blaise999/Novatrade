@@ -112,7 +112,7 @@ export default function CTASection() {
               </div>
               <div className="flex items-center gap-2 text-cream/70">
                 <Users className="w-5 h-5 text-electric" />
-                <span>Free copy trading</span>
+                <span>Automated trading bots</span>
               </div>
             </div>
 

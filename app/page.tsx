@@ -5,7 +5,6 @@ import HeroSection from '@/components/landing/HeroSection';
 import StatsSection, { TrustBar } from '@/components/landing/StatsSection';
 import MarketPreview from '@/components/landing/MarketPreview';
 import FeaturesSection from '@/components/landing/FeaturesSection';
-import CopyTradingPreview from '@/components/landing/CopyTradingPreview';
 import EarnInvestPreview from '@/components/landing/EarnInvestPreview';
 import PricingPreview from '@/components/landing/PricingPreview';
 import { TestimonialsSection, HowItWorksSection, CTASection } from '@/components/landing/Sections';
@@ -20,7 +19,6 @@ export default function LandingPage() {
       <StatsSection />
       <MarketPreview />
       <FeaturesSection />
-      <CopyTradingPreview />
       <EarnInvestPreview />
       <HowItWorksSection />
       <PricingPreview />

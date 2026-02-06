@@ -10,7 +10,6 @@ const cols = [
       { name: 'Cryptocurrency', href: '/dashboard/trade/crypto' },
       { name: 'Forex', href: '/dashboard/trade/fx' },
       { name: 'Stocks', href: '/dashboard/trade/stocks' },
-      { name: 'Copy Trading', href: '/dashboard/copy-trading' },
       { name: 'Markets', href: '/markets' },
     ],
   },
