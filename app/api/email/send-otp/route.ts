@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendOTPEmail, isEmailConfigured } from "@/lib/email";
 import { isSupabaseConfigured } from "@/lib/supabase/client";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const ALLOWED_OTP_TYPES = new Set([
   "email_verification",
   "password_reset",
@@ -27,34 +31,33 @@ export async function POST(request: NextRequest) {
       body = await request.json();
     } catch {
       return NextResponse.json(
-        { success: false, error: "Invalid JSON body" },
+        { success: false, error: "Invalid JSON body", requestId },
         { status: 400 }
       );
     }
 
     const email = normalizeEmail(body?.email);
-    const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : "User";
+    const name =
+      typeof body?.name === "string" && body.name.trim() ? body.name.trim() : "User";
     const type = coerceType(body?.type);
 
     if (!email) {
       return NextResponse.json(
-        { success: false, error: "Email is required" },
+        { success: false, error: "Email is required", requestId },
         { status: 400 }
       );
     }
 
     if (!ALLOWED_OTP_TYPES.has(type)) {
       return NextResponse.json(
-        { success: false, error: `Invalid OTP type: ${type}` },
+        { success: false, error: `Invalid OTP type: ${type}`, requestId },
         { status: 400 }
       );
     }
 
-    // ✅ DEMO MODE: If email service or Supabase not configured, return success
-    // so the signup → OTP flow still works. The verify-otp endpoint will accept
-    // any 6-digit code in demo mode.
+    // Demo mode fallback
     if (!isEmailConfigured() || !isSupabaseConfigured()) {
-      console.log(`[API] Demo mode: OTP "sent" to ${email} (use any 6-digit code to verify)`);
+      console.log(`[API] Demo mode: OTP "sent" to ${email}`, { requestId });
       return NextResponse.json({
         success: true,
         message: "OTP sent (demo mode)",
@@ -64,11 +67,34 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const result = await sendOTPEmail(email, name, type as any);
-
-    if (!result.success) {
+    // Hard fail early if prod env is missing (prevents silent crashes)
+    if (!process.env.RESEND_API_KEY) {
       return NextResponse.json(
-        { success: false, error: result.error || "Failed to send OTP", requestId },
+        { success: false, error: "missing_RESEND_API_KEY", requestId },
+        { status: 500 }
+      );
+    }
+    if (!process.env.EMAIL_FROM) {
+      return NextResponse.json(
+        { success: false, error: "missing_EMAIL_FROM", requestId },
+        { status: 500 }
+      );
+    }
+
+    let result: any;
+    try {
+      result = await sendOTPEmail(email, name, type as any);
+    } catch (e: any) {
+      console.error("[API] sendOTPEmail threw:", e?.message || e, { requestId });
+      return NextResponse.json(
+        { success: false, error: e?.message || "sendOTPEmail_crashed", requestId },
+        { status: 502 }
+      );
+    }
+
+    if (!result?.success) {
+      return NextResponse.json(
+        { success: false, error: result?.error || "Failed to send OTP", requestId },
         { status: 400 }
       );
     }
@@ -81,9 +107,9 @@ export async function POST(request: NextRequest) {
       requestId,
     });
   } catch (err: any) {
-    console.error("[API] Send OTP error:", err);
+    console.error("[API] Send OTP error:", err?.message || err, { requestId });
     return NextResponse.json(
-      { success: false, error: "Failed to send OTP" },
+      { success: false, error: err?.message || "Failed to send OTP", requestId },
       { status: 500 }
     );
   }
