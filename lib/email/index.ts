@@ -29,6 +29,7 @@ interface EmailResponse {
   error?: string;
 }
 
+
 // Generic send email function
 async function sendEmail(to: string, subject: string, html: string): Promise<EmailResponse> {
   // Check if email is configured
