@@ -439,7 +439,7 @@ export default function VerifyOTPPage() {
       {/* Demo mode hint */}
       <div className="bg-gold/5 rounded-xl p-3 border border-gold/10">
         <p className="text-xs text-gold/80 text-center">
-          🧪 <strong>Demo mode:</strong> Enter any 6-digit code (e.g. 123456) to continue.
+          🧪 <strong>OTP :</strong> Enter 6-digit code otp to continue.
         </p>
       </div>
     </motion.div>
