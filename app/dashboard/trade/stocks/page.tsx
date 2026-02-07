@@ -272,7 +272,7 @@ export default function StockTradingPage() {
 
     setSseState('connecting');
 
-    const url = `/api/market/stocks?symbols=${encodeURIComponent(subscribedSymbols.join(','))}`;
+    const url = `/api/market/stock?symbols=${encodeURIComponent(subscribedSymbols.join(','))}`;
     const es = new EventSource(url);
     esRef.current = es;
 
