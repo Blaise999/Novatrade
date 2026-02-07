@@ -3,13 +3,14 @@
 /**
  * ✅ NOVATRADE SINGLE STORE ENTRYPOINT (FULL BACK-COMPAT)
  *
- * Put this file at the path your imports resolve to:
- *   import { useAuthStore } from "@/lib/store";
+ * This file MUST be at: /lib/store.ts
+ * Your imports:
+ *   import { useAuthStore, useUIStore, useWalletStore, useKYCStore, useNotificationStore } from "@/lib/store";
  *
- * This clears:
- * - missing hook exports (useAuthStore/useUIStore/useNotificationStore/useWalletStore/useKYCStore/useTradingStore)
- * - missing legacy fields (otpEmail/otpName/otpPassword/redirectUrl, setUser, unreadCount, mobileMenuOpen, isConnected, etc)
- * - User shape mismatches (name, emailVerified, kycLevel, walletConnected, balance object, createdAt Date, extra props)
+ * This provides:
+ * - useAuthStore (alias of useStore)
+ * - useUIStore, useNotificationStore, useWalletStore, useKYCStore, useTradingStore, useAdminStore
+ * - legacy fields: otpEmail/otpName/otpPassword/redirectUrl, unreadCount, mobileMenuOpen, isConnected, etc.
  */
 
 import { create } from 'zustand';
@@ -77,13 +78,15 @@ export interface User {
   role?: 'user' | 'admin' | string;
   tier?: 'basic' | 'starter' | 'pro' | 'elite' | 'vip' | string;
 
+  // common profile fields some pages use
+  phone?: string;
+  avatarUrl?: string;
+
   /**
-   * ✅ Important:
-   * Your newer app uses numeric user.balance in many places.
-   * Some legacy pages create balance as an object: { available, bonus, ... }.
-   *
-   * To keep runtime stable, we store user.balance as a NUMBER (available),
-   * and also store user.balanceDetails as the OBJECT.
+   * Some pages expect numeric user.balance,
+   * others used an object. We store:
+   * - user.balance as number (available)
+   * - user.balanceDetails as object
    */
   balance?: any; // number or object accepted
   balanceDetails?: Balance;
@@ -96,7 +99,7 @@ export interface User {
 
   createdAt?: string | Date;
 
-  // ✅ prevents future TS “unknown prop” errors (TS2353)
+  // allow unknown props (prevents TS2353 in UI)
   [key: string]: any;
 }
 
@@ -210,12 +213,15 @@ function normalizeUser(input: any): User {
       : Number(details.bonus ?? u.balance_bonus ?? 0) || 0;
 
   return {
+    // keep any unknown props first (legacy)
+    ...u,
+
     id: String(u.id ?? ''),
     email,
 
     firstName,
     lastName,
-    name, 
+    name,
 
     emailVerified: u.emailVerified ?? u.email_verified ?? false,
     phoneVerified: u.phoneVerified ?? u.phone_verified ?? false,
@@ -223,10 +229,10 @@ function normalizeUser(input: any): User {
     kycStatus: u.kycStatus ?? u.kyc_status ?? 'not_started',
     kycLevel: u.kycLevel ?? u.kyc_level ?? 0,
 
-  walletConnected:
-  u.walletConnected ??
-  u.wallet_connected ??
-  Boolean(u.walletAddress ?? u.wallet_address),
+    walletConnected:
+      u.walletConnected ??
+      u.wallet_connected ??
+      Boolean(u.walletAddress ?? u.wallet_address),
 
     walletAddress: u.walletAddress ?? u.wallet_address ?? undefined,
 
@@ -236,9 +242,9 @@ function normalizeUser(input: any): User {
     role: u.role ?? 'user',
     tier: u.tier ?? 'basic',
 
-    // ✅ store numeric for app stability
+    // ✅ stable numeric balance for app
     balance: availableNum,
-    // ✅ also keep full object for legacy pages
+    // ✅ keep object too
     balanceDetails: details,
 
     bonusBalance,
@@ -248,8 +254,6 @@ function normalizeUser(input: any): User {
     isActive: u.isActive ?? u.is_active ?? true,
 
     createdAt: u.createdAt ?? u.created_at ?? new Date().toISOString(),
-
-    ...u, // keep any extra legacy props
   };
 }
 
@@ -285,7 +289,7 @@ interface AuthStore {
   isLoading: boolean;
   error: string | null;
 
-  // ✅ back-compat (OTP screens store temp signup details here)
+  // legacy OTP temp fields
   otpEmail: string;
   otpName: string;
   otpPassword: string;
@@ -296,7 +300,6 @@ interface AuthStore {
   setOtpPassword: (password: string | null) => void;
   setRedirectUrl: (url: string | null) => void;
 
-  // ✅ back-compat (some pages call setUser directly with legacy objects)
   setUser: (user: any) => void;
 
   deposits: Deposit[];
@@ -384,14 +387,7 @@ export const useStore = create<AuthStore>((set, get) => ({
         localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: normalizeUser(userWithoutPw), isAuthenticated: true });
-        
-        // ✅ Respect registration status for proper redirect
-        const regStatus = userWithoutPw.registrationStatus || 'complete';
-        const redirect = regStatus === 'pending_kyc' ? '/kyc'
-          : regStatus === 'pending_wallet' ? '/connect-wallet'
-          : regStatus === 'pending_verification' ? '/auth/verify-otp'
-          : '/dashboard';
-        return { success: true, redirect };
+        return { success: true, redirect: '/dashboard' };
       }
 
       const authRes = await withTimeout(
@@ -507,7 +503,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'pending_kyc',
+          registrationStatus: 'complete',
           isActive: true,
           createdAt: new Date().toISOString(),
         });
@@ -542,7 +538,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: false, error: 'Signup failed' };
       }
 
-      // OTP flow may handle profile creation later
       return { success: true };
     } catch (err: any) {
       const msg = err?.message || 'Signup failed';
@@ -566,7 +561,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         trades: [],
         paymentMethods: [],
         error: null,
-
         otpEmail: '',
         otpName: '',
         otpPassword: '',
@@ -742,7 +736,7 @@ export const useStore = create<AuthStore>((set, get) => ({
       }
 
       if (data) set({ user: dbRowToUser(data) });
-      else
+      else {
         set({
           user: normalizeUser({
             ...user,
@@ -750,6 +744,7 @@ export const useStore = create<AuthStore>((set, get) => ({
             registrationStatus: nextRegistrationStatus,
           }),
         });
+      }
 
       return true;
     } catch (e: any) {
@@ -836,9 +831,10 @@ export const useStore = create<AuthStore>((set, get) => ({
         createdAt: t.created_at,
         closedAt: t.closed_at || undefined,
       }));
+
       set({ trades });
 
-      // keep trading store legacy fields in sync (safe)
+      // keep trading legacy arrays in sync
       useTradingStore.setState({
         tradeHistory: trades,
         activeTrades: trades.filter((x) => x.status === 'open'),
@@ -1089,7 +1085,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 }));
 
 // ============================================
-// UI STORE (mobileMenuOpen + toggleMobileMenu back-compat)
+// UI STORE
 // ============================================
 type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -1139,7 +1135,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
 }));
 
 // ============================================
-// NOTIFICATION STORE (unreadCount back-compat)
+// NOTIFICATION STORE
 // ============================================
 export type AppNotificationType = 'info' | 'success' | 'warning' | 'error';
 
@@ -1157,8 +1153,7 @@ interface NotificationStore {
   unreadCount: number;
 
   addNotification: (
-    n: Omit<AppNotification, 'id' | 'createdAt' | 'read'> &
-      Partial<Pick<AppNotification, 'read'>>
+    n: Omit<AppNotification, 'id' | 'createdAt' | 'read'> & Partial<Pick<AppNotification, 'read'>>
   ) => string;
 
   markRead: (id: string) => void;
@@ -1203,7 +1198,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
 }));
 
 // ============================================
-// WALLET STORE (isConnected back-compat)
+// WALLET STORE
 // ============================================
 interface WalletStore {
   connected: boolean;
@@ -1241,7 +1236,7 @@ export const useWalletStore = create<WalletStore>((set, get) => ({
 }));
 
 // ============================================
-// KYC STORE (currentStep/isSubmitting/setSubmitting back-compat)
+// KYC STORE
 // ============================================
 export interface KycFormData {
   firstName?: string;
@@ -1307,7 +1302,7 @@ export const useKYCStore = create<KYCStore>((set, get) => ({
 }));
 
 // ============================================
-// TRADING STORE (tradeHistory/activeTrades back-compat)
+// TRADING STORE
 // ============================================
 type MarketType = 'fx' | 'crypto' | 'stocks';
 
@@ -1436,7 +1431,11 @@ if (typeof window !== 'undefined' && isSupabaseConfigured()) {
 }
 
 // ============================================
-// ✅ BACK-COMPAT EXPORTS (Fix missing hook exports)
+// ✅ REQUIRED EXPORTS FOR YOUR APP IMPORTS
 // ============================================
+
+// main auth store alias
 export const useAuthStore = useStore;
+
+// also export supabase helpers (some files expect these from store)
 export { supabase, isSupabaseConfigured };

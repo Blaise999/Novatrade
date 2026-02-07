@@ -1,15 +1,15 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { AnimatePresence, motion } from 'framer-motion';
-import type { LucideIcon } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
   LayoutDashboard,
   LineChart,
   Wallet,
+  Users,
   Settings,
   Bell,
   Search,
@@ -25,103 +25,79 @@ import {
   Bitcoin,
   DollarSign,
   BarChart3,
-  Bot,
+  Bot
 } from 'lucide-react';
-
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore, useNotificationStore } from '@/lib/store';
 import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
 import SupportWidget from '@/components/SupportWidget';
 
-type NavChild = {
-  name: string;
-  href: string;
-  icon: LucideIcon;
-};
-
-type NavItem = {
-  name: string;
-  icon: LucideIcon;
-  href?: string;
-  children?: NavChild[];
-};
-
-const navigation: NavItem[] = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  {
-    name: 'Trade',
+const navigation = [
+  { 
+    name: 'Dashboard', 
+    href: '/dashboard', 
+    icon: LayoutDashboard 
+  },
+  { 
+    name: 'Trade', 
     icon: LineChart,
     children: [
       { name: 'Cryptocurrency', href: '/dashboard/trade/crypto', icon: Bitcoin },
       { name: 'Forex', href: '/dashboard/trade/fx', icon: DollarSign },
       { name: 'Stocks', href: '/dashboard/trade/stocks', icon: BarChart3 },
-    ],
+    ]
   },
-  { name: 'Trading Bots', href: '/dashboard/bots', icon: Bot },
-  { name: 'Portfolio', href: '/dashboard/portfolio', icon: BarChart3 },
-  { name: 'Wallet', href: '/dashboard/wallet', icon: Wallet },
-  { name: 'History', href: '/dashboard/history', icon: History },
+  { 
+    name: 'Trading Bots', 
+    href: '/dashboard/bots', 
+    icon: Bot 
+  },
+  { 
+    name: 'Portfolio', 
+    href: '/dashboard/portfolio', 
+    icon: BarChart3 
+  },
+  { 
+    name: 'Wallet', 
+    href: '/dashboard/wallet', 
+    icon: Wallet 
+  },
+  { 
+    name: 'History', 
+    href: '/dashboard/history', 
+    icon: History 
+  },
 ];
 
-const bottomNav: NavChild[] = [
+const bottomNav = [
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
   { name: 'Help', href: '/dashboard/help', icon: HelpCircle },
 ];
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   const pathname = usePathname();
   const router = useRouter();
-
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
   const { unreadCount } = useNotificationStore();
-
-  const { balance } = useUnifiedBalance();
-
+  
+  // 🔥 Initialize all trading accounts with user's balance
+  const { balance, isInitialized } = useUnifiedBalance();
+  
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  // ✅ Mount gate (prevents SSR/client mismatch)
-  const [mounted, setMounted] = useState(false);
-
-  // ✅ Zustand persist hydration gate (works even if persist is absent)
-  const [storeHydrated, setStoreHydrated] = useState<boolean>(() => {
-    const persist = (useStore as any).persist;
-    return persist?.hasHydrated?.() ?? true;
-  });
-
+  // Redirect if not authenticated
   useEffect(() => {
-    setMounted(true);
-
-    const persist = (useStore as any).persist;
-    if (!persist) return;
-
-    if (persist.hasHydrated?.()) setStoreHydrated(true);
-
-    const unsub = persist.onFinishHydration?.(() => setStoreHydrated(true));
-    return () => {
-      if (typeof unsub === 'function') unsub();
-    };
-  }, []);
-
-  // ✅ Stable formatters (avoid toLocaleString(undefined) mismatch)
-  const moneyFmt = useMemo(
-    () =>
-      new Intl.NumberFormat('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }),
-    []
-  );
-
-  const intFmt = useMemo(() => new Intl.NumberFormat('en-US'), []);
-
-  // Redirect if not authenticated (only after mounted + hydrated)
-  useEffect(() => {
-    if (!mounted || !storeHydrated) return;
-    if (!isLoading && !isAuthenticated) router.push('/auth/login');
-  }, [mounted, storeHydrated, isLoading, isAuthenticated, router]);
+    if (!isLoading && !isAuthenticated) {
+      router.push('/auth/login');
+    }
+  }, [isLoading, isAuthenticated, router]);
 
   const handleLogout = async () => {
     await logout();
@@ -129,17 +105,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   const isActive = (href: string) => pathname === href;
-  const isChildActive = (children?: NavChild[]) =>
-    Array.isArray(children) ? children.some((c) => pathname === c.href) : false;
-
-  // ✅ Hard gate: don’t render unstable markup
-  if (!mounted || !storeHydrated) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <div className="animate-spin w-8 h-8 border-2 border-gold border-t-transparent rounded-full" />
-      </div>
-    );
-  }
+  const isChildActive = (children: any[]) => children?.some(child => pathname === child.href);
 
   if (isLoading || !user) {
     return (
@@ -152,11 +118,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <div className="min-h-screen bg-void flex">
       {/* Desktop Sidebar */}
-      <aside
-        className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
-          sidebarOpen ? 'w-64' : 'w-20'
-        }`}
-      >
+      <aside className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
+        sidebarOpen ? 'w-64' : 'w-20'
+      }`}>
         {/* Logo */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
           <Link href="/dashboard" className="flex items-center gap-2">
@@ -164,7 +128,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <TrendingUp className="w-6 h-6 text-void" />
             </div>
             {sidebarOpen && (
-              <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-xl font-display font-bold text-cream">
+              <motion.span
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-xl font-display font-bold text-cream"
+              >
                 NOVA<span className="text-gold">TRADE</span>
               </motion.span>
             )}
@@ -190,13 +158,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       {sidebarOpen && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                          <ChevronDown
-                            className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
-                          />
+                          <ChevronDown className={`w-4 h-4 transition-transform ${
+                            expandedMenu === item.name ? 'rotate-180' : ''
+                          }`} />
                         </>
                       )}
                     </button>
-
+                    
                     <AnimatePresence>
                       {sidebarOpen && expandedMenu === item.name && (
                         <motion.ul
@@ -226,15 +194,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   </div>
                 ) : (
                   <Link
-                    href={item.href!}
+                    href={item.href}
                     className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                      isActive(item.href!)
+                      isActive(item.href)
                         ? 'bg-gold/10 text-gold'
                         : 'text-slate-400 hover:text-cream hover:bg-white/5'
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
-                    {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
+                    {sidebarOpen && (
+                      <span className="text-sm font-medium">{item.name}</span>
+                    )}
                   </Link>
                 )}
               </li>
@@ -256,7 +226,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
-                  {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
+                  {sidebarOpen && (
+                    <span className="text-sm font-medium">{item.name}</span>
+                  )}
                 </Link>
               </li>
             ))}
@@ -290,6 +262,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               exit={{ x: -280 }}
               className="lg:hidden fixed inset-y-0 left-0 w-72 bg-obsidian border-r border-white/5 z-50 flex flex-col"
             >
+              {/* Mobile Logo */}
               <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
                 <Link href="/dashboard" className="flex items-center gap-2">
                   <div className="w-10 h-10 bg-gradient-to-br from-gold to-gold/60 rounded-xl flex items-center justify-center">
@@ -304,6 +277,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </button>
               </div>
 
+              {/* Mobile Navigation */}
               <nav className="flex-1 overflow-y-auto py-4 px-3">
                 <ul className="space-y-1">
                   {navigation.map((item) => (
@@ -320,11 +294,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                           >
                             <item.icon className="w-5 h-5" />
                             <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                            <ChevronDown
-                              className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
-                            />
+                            <ChevronDown className={`w-4 h-4 transition-transform ${
+                              expandedMenu === item.name ? 'rotate-180' : ''
+                            }`} />
                           </button>
-
+                          
                           <AnimatePresence>
                             {expandedMenu === item.name && (
                               <motion.ul
@@ -355,10 +329,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         </div>
                       ) : (
                         <Link
-                          href={item.href!}
+                          href={item.href}
                           onClick={toggleMobileMenu}
                           className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                            isActive(item.href!)
+                            isActive(item.href)
                               ? 'bg-gold/10 text-gold'
                               : 'text-slate-400 hover:text-cream hover:bg-white/5'
                           }`}
@@ -377,19 +351,21 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </AnimatePresence>
 
       {/* Main Content */}
-      <div
-        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
-          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
-        }`}
-      >
+      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
+        sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
+      }`}>
         {/* Top Header */}
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           {/* Left */}
           <div className="flex items-center gap-4">
-            <button onClick={toggleMobileMenu} className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors">
+            <button
+              onClick={toggleMobileMenu}
+              className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors"
+            >
               <Menu className="w-6 h-6" />
             </button>
-
+            
+            {/* Search */}
             <div className="hidden sm:flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <Search className="w-4 h-4 text-slate-500" />
               <input
@@ -407,8 +383,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${moneyFmt.format(balance.total)}
-                {balance.bonus > 0 && <span className="text-profit text-xs ml-1">+${intFmt.format(balance.bonus)}</span>}
+                ${balance.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {balance.bonus > 0 && (
+                  <span className="text-profit text-xs ml-1">+${balance.bonus.toLocaleString()}</span>
+                )}
               </p>
             </div>
 
@@ -475,7 +453,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     className="absolute right-0 mt-2 w-56 bg-charcoal border border-white/10 rounded-xl shadow-2xl overflow-hidden"
                   >
                     <div className="p-3 border-b border-white/5">
-                      <p className="text-sm font-medium text-cream">{user.firstName || user.email.split('@')[0]}</p>
+                      <p className="text-sm font-medium text-cream">
+                        {user.firstName || user.email.split('@')[0]}
+                      </p>
                       <p className="text-xs text-slate-500">{user.email}</p>
                       {user.walletAddress && (
                         <div className="flex items-center gap-1.5 mt-1.5">
@@ -486,7 +466,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         </div>
                       )}
                     </div>
-
                     <div className="py-2">
                       <Link
                         href="/dashboard/settings"
@@ -513,7 +492,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         Settings
                       </Link>
                     </div>
-
                     <div className="border-t border-white/5 py-2">
                       <button
                         onClick={handleLogout}
@@ -531,11 +509,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 p-4 lg:p-6">{children}</main>
+        <main className="flex-1 p-4 lg:p-6">
+          {children}
+        </main>
       </div>
 
-      {/* Support Widget (client only) */}
-      {mounted && <SupportWidget />}
+      {/* Support Widget */}
+      <SupportWidget />
     </div>
   );
 }

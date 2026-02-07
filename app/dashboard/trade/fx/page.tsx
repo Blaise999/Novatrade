@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Link from 'next/link';
 import {
@@ -92,6 +92,50 @@ const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
 // Mobile tabs
 type MobileTab = 'chart' | 'trade' | 'positions';
 
+// ==============================
+// FAST + TOLERANT MARKET PARSING
+// ==============================
+const toFiniteNumber = (v: unknown): number | null => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+const normalizePriceMap = (raw: unknown): Record<string, number> => {
+  if (!raw || typeof raw !== 'object') return {};
+  const obj = raw as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const k of Object.keys(obj)) {
+    const n = toFiniteNumber(obj[k]);
+    if (n !== null) out[String(k)] = n; // keep original key shape (EUR/USD etc.)
+  }
+  return out;
+};
+
+const normalizeCandles = (raw: unknown): Candle[] => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((c: any) => {
+      const open = toFiniteNumber(c?.open);
+      const high = toFiniteNumber(c?.high);
+      const low = toFiniteNumber(c?.low);
+      const close = toFiniteNumber(c?.close);
+      if (open === null || high === null || low === null || close === null) return null;
+
+      return {
+        id: String(c?.id ?? crypto.randomUUID()),
+        pairId: String(c?.pairId ?? c?.symbol ?? ''),
+        timestamp: c?.timestamp ? new Date(c.timestamp) : new Date(),
+        open,
+        high,
+        low,
+        close,
+        volume: toFiniteNumber(c?.volume) ?? 0,
+        isSimulated: !!c?.isSimulated,
+      } as Candle;
+    })
+    .filter(Boolean) as Candle[];
+};
+
 export default function FXTradingPage() {
   const {
     marginAccount,
@@ -133,16 +177,27 @@ export default function FXTradingPage() {
   const adminPrices = (adminMarket?.currentPrices ?? {}) as Record<string, { bid: number; ask: number }>;
   const isPaused = !!adminMarket?.isPaused;
 
-  // State
+  // ======================
+  // STATE
+  // ======================
   const [selectedAsset, setSelectedAsset] = useState<FXAsset>(() => {
     return standardForexAssets[0] ?? educationalPairs[0];
   });
+
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [favorites, setFavorites] = useState<string[]>(['EUR/USD', 'GBP/USD', 'USD/JPY']);
   const [searchQuery, setSearchQuery] = useState('');
   const [chartTimeframe, setChartTimeframe] = useState<(typeof timeframes)[number]>('15m');
   const [chartType, setChartType] = useState<'candle' | 'line'>('candle');
+
+  // candles + cache
   const [chartCandles, setChartCandles] = useState<Candle[]>([]);
+  const candleCacheRef = useRef<Map<string, Candle[]>>(new Map());
+
+  // Live prices (for header + list)
+  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
+  const [bidPrice, setBidPrice] = useState(selectedAsset.price);
+  const [askPrice, setAskPrice] = useState(selectedAsset.price * 1.0001);
 
   // Trading state
   const [tradeDirection, setTradeDirection] = useState<'buy' | 'sell'>('buy');
@@ -151,51 +206,67 @@ export default function FXTradingPage() {
   const [stopLoss, setStopLoss] = useState<number | null>(null);
   const [takeProfit, setTakeProfit] = useState<number | null>(null);
 
-  // Price state
-  const [bidPrice, setBidPrice] = useState(selectedAsset.price);
-  const [askPrice, setAskPrice] = useState(selectedAsset.price * 1.0001);
-
   // UI state
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [positionToClose, setPositionToClose] = useState<MarginPosition | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('chart');
 
-  // Refs
-  const chartRef = useRef<HTMLDivElement>(null);
-  const [chartDimensions, setChartDimensions] = useState({ width: 300, height: 250 });
+  // Refs (to avoid interval re-creating + stale closures)
+  const selectedSymbolRef = useRef<string>(selectedAsset.symbol);
+  const bidRef = useRef<number>(bidPrice);
+  const askRef = useRef<number>(askPrice);
+  const positionsRef = useRef<MarginPosition[]>(marginPositions);
+  const adminPricesRef = useRef(adminPrices);
+  const pausedRef = useRef<boolean>(isPaused);
+  const livePricesRef = useRef<Record<string, number>>({});
+
+  useEffect(() => { selectedSymbolRef.current = selectedAsset.symbol; }, [selectedAsset.symbol]);
+  useEffect(() => { bidRef.current = bidPrice; }, [bidPrice]);
+  useEffect(() => { askRef.current = askPrice; }, [askPrice]);
+  useEffect(() => { positionsRef.current = marginPositions; }, [marginPositions]);
+  useEffect(() => { adminPricesRef.current = adminPrices; }, [adminPrices]);
+  useEffect(() => { pausedRef.current = isPaused; }, [isPaused]);
+  useEffect(() => { livePricesRef.current = livePrices; }, [livePrices]);
 
   // User balance (admin-set balance counts as deposit)
   const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
 
-  // Check if user can trade — tier-based OR if admin has set a balance
+  // Tier gating: tier-based OR if admin has set a balance
   const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
-  const isEducationalPair = isAdminControlledPair(selectedAsset.symbol);
+
+  const isEducationalPair = useMemo(() => isAdminControlledPair(selectedAsset.symbol), [selectedAsset.symbol]);
 
   // Filter positions for this market (typed mismatch fix)
-  const forexPositions = marginPositions.filter((p) => {
-    const t = (p as any).assetType ?? (p as any).marketType ?? (p as any).type ?? (p as any).market;
-    return t === 'forex';
-  });
+  const forexPositions = useMemo(() => {
+    return marginPositions.filter((p) => {
+      const t = (p as any).assetType ?? (p as any).marketType ?? (p as any).type ?? (p as any).market;
+      return t === 'forex';
+    });
+  }, [marginPositions]);
 
-  // Update chart dimensions with ResizeObserver for better mobile support
+  // ======================
+  // RESIZE (FAST)
+  // ======================
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [chartDimensions, setChartDimensions] = useState({ width: 300, height: 250 });
+
   useEffect(() => {
-    const updateDimensions = () => {
-      if (chartRef.current) {
-        const rect = chartRef.current.getBoundingClientRect();
-        const width = Math.max(rect.width || 300, 280);
-        const height = Math.max(rect.height || 250, 200);
-        setChartDimensions({ width, height });
-      }
+    const update = () => {
+      if (!chartRef.current) return;
+      const rect = chartRef.current.getBoundingClientRect();
+      const width = Math.max(rect.width || 300, 280);
+      const height = Math.max(rect.height || 250, 200);
+      setChartDimensions({ width, height });
     };
 
-    updateDimensions();
-    const initialTimeout = setTimeout(updateDimensions, 100);
-    const secondTimeout = setTimeout(updateDimensions, 300);
+    update();
+    const t1 = setTimeout(update, 80);
+    const t2 = setTimeout(update, 240);
 
-    let resizeObserver: ResizeObserver | null = null;
+    let ro: ResizeObserver | null = null;
     if (chartRef.current && typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver((entries) => {
+      ro = new ResizeObserver((entries) => {
         for (const entry of entries) {
           const { width, height } = entry.contentRect;
           setChartDimensions({
@@ -204,87 +275,264 @@ export default function FXTradingPage() {
           });
         }
       });
-      resizeObserver.observe(chartRef.current);
+      ro.observe(chartRef.current);
     }
 
-    window.addEventListener('resize', updateDimensions);
-    window.addEventListener('orientationchange', updateDimensions);
-
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
     return () => {
-      clearTimeout(initialTimeout);
-      clearTimeout(secondTimeout);
-      window.removeEventListener('resize', updateDimensions);
-      window.removeEventListener('orientationchange', updateDimensions);
-      if (resizeObserver) resizeObserver.disconnect();
+      clearTimeout(t1);
+      clearTimeout(t2);
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
+      if (ro) ro.disconnect();
     };
   }, [mobileTab]);
 
-  // Fetch market data based on pair type
+  // ======================
+  // CHART DATA (ULTRA SNAPPY)
+  // - show cached instantly
+  // - fetch in background (AbortController)
+  // ======================
   useEffect(() => {
-    const fetchData = async () => {
-      const result = await getMarketData(selectedAsset.symbol, chartTimeframe, 50);
-      setChartCandles((result as any)?.candles ?? []);
-    };
-    fetchData();
+    const key = `${selectedAsset.symbol}|${chartTimeframe}`;
+
+    // instant cache paint
+    const cached = candleCacheRef.current.get(key);
+    if (cached && cached.length) setChartCandles(cached);
+    else setChartCandles([]);
+
+    const ac = new AbortController();
+
+    (async () => {
+      try {
+        const result = await getMarketData(selectedAsset.symbol, chartTimeframe, 50);
+        if (ac.signal.aborted) return;
+        const candles = normalizeCandles((result as any)?.candles ?? result);
+        candleCacheRef.current.set(key, candles);
+        setChartCandles(candles);
+      } catch {
+        // keep cached/placeholder
+      }
+    })();
+
+    return () => ac.abort();
   }, [selectedAsset.symbol, chartTimeframe]);
 
-  // Simulate real-time price updates
+  // ======================
+  // LIVE PRICES (USING THE SAME ENDPOINTS YOU USED FOR CRYPTO)
+  // - selected pair updates fast
+  // - full list updates slower (for selector prices)
+  // - falls back to admin educational prices OR local sim
+  // ======================
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (isPaused && isEducationalPair) return;
+    let alive = true;
+    const ac = new AbortController();
 
-      if (isEducationalPair && adminPrices[selectedAsset.symbol]) {
-        setBidPrice(adminPrices[selectedAsset.symbol].bid);
-        setAskPrice(adminPrices[selectedAsset.symbol].ask);
-      } else {
-        const volatility = 0.0001;
-        const change = (Math.random() - 0.5) * volatility * selectedAsset.price;
-        const newBid = bidPrice + change;
-        const spread = selectedAsset.price * 0.0001;
-        setBidPrice(newBid);
-        setAskPrice(newBid + spread);
+    const allSymbols = [...educationalPairs.map((a) => a.symbol), ...standardForexAssets.map((a) => a.symbol)];
+    const uniqueAll = Array.from(new Set(allSymbols));
+
+    const tickSelected = async () => {
+      const symbol = selectedSymbolRef.current;
+
+      // Admin controlled pair: prefer adminPrices (zero network)
+      if (isAdminControlledPair(symbol)) {
+        if (pausedRef.current) return;
+        const p = adminPricesRef.current?.[symbol];
+        if (p?.bid && p?.ask) {
+          const bid = Number(p.bid);
+          const ask = Number(p.ask);
+          if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+          // coalesce updates
+          requestAnimationFrame(() => {
+            if (!alive) return;
+            setBidPrice(bid);
+            setAskPrice(ask);
+          });
+          return;
+        }
       }
 
-      forexPositions.forEach((pos) => {
-        const side = (pos as any).side;
-        const currentPrice = side === 'long' ? bidPrice : askPrice;
-        updateMarginPositionPrice((pos as any).id, currentPrice);
+      // Try real prices endpoint (same pattern as crypto)
+      try {
+        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(symbol)}`, {
+          cache: 'no-store',
+          signal: ac.signal,
+        });
+        if (!res.ok) throw new Error('bad_status');
+        const json = await res.json();
+
+        const map = normalizePriceMap(json?.prices ?? json?.data?.prices ?? json);
+        const mid = map?.[symbol];
+
+        if (typeof mid === 'number' && Number.isFinite(mid)) {
+          // spread: tiny, configurable
+          const spread = Math.max(mid * 0.00006, 0.00001);
+          const bid = mid - spread / 2;
+          const ask = mid + spread / 2;
+
+          requestAnimationFrame(() => {
+            if (!alive) return;
+            setLivePrices((prev) => {
+              const next = prev[symbol] === mid ? prev : { ...prev, [symbol]: mid };
+              livePricesRef.current = next;
+              return next;
+            });
+            setBidPrice(bid);
+            setAskPrice(ask);
+          });
+          return;
+        }
+
+        // if no usable response, fall through to sim
+      } catch {
+        // fall through
+      }
+
+      // Fallback simulation (stable, smooth)
+      requestAnimationFrame(() => {
+        if (!alive) return;
+        const base =
+          livePricesRef.current?.[symbol] ??
+          (standardForexAssets.find((a) => a.symbol === symbol)?.price ??
+            educationalPairs.find((a) => a.symbol === symbol)?.price ??
+            1);
+
+        const volatility = Math.max(base * 0.00004, 0.00001);
+        const change = (Math.random() - 0.5) * volatility;
+        const mid = Math.max(0.00001, base + change);
+        const spread = Math.max(mid * 0.00006, 0.00001);
+
+        setLivePrices((prev) => {
+          const next = { ...prev, [symbol]: mid };
+          livePricesRef.current = next;
+          return next;
+        });
+        setBidPrice(mid - spread / 2);
+        setAskPrice(mid + spread / 2);
       });
-    }, 1000);
+    };
 
-    return () => clearInterval(interval);
-  }, [
-    selectedAsset,
-    bidPrice,
-    isPaused,
-    isEducationalPair,
-    adminPrices,
-    forexPositions,
-    updateMarginPositionPrice,
-  ]);
+    const tickAll = async () => {
+      try {
+        const q = uniqueAll.join(',');
+        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(q)}`, {
+          cache: 'no-store',
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const json = await res.json();
+        const map = normalizePriceMap(json?.prices ?? json?.data?.prices ?? json);
 
-  // Format price
-  const formatPrice = (price: number) => {
+        if (!alive || !Object.keys(map).length) return;
+
+        requestAnimationFrame(() => {
+          if (!alive) return;
+          setLivePrices((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            for (const k of Object.keys(map)) {
+              const v = map[k];
+              if (typeof v === 'number' && Number.isFinite(v) && next[k] !== v) {
+                next[k] = v;
+                changed = true;
+              }
+            }
+            if (!changed) return prev;
+            livePricesRef.current = next;
+            return next;
+          });
+        });
+      } catch {
+        // ignore
+      }
+    };
+
+    tickSelected();
+    tickAll();
+
+    const idSelected = setInterval(tickSelected, 650); // ultra snappy on the current pair
+    const idAll = setInterval(tickAll, 6500); // background refresh for selector list
+
+    return () => {
+      alive = false;
+      ac.abort();
+      clearInterval(idSelected);
+      clearInterval(idAll);
+    };
+  }, []);
+
+  // ======================
+  // POSITION MARK-TO-MARKET (NO RECREATING INTERVAL)
+  // ======================
+  useEffect(() => {
+    let alive = true;
+
+    const id = setInterval(() => {
+      if (!alive) return;
+
+      const symbol = selectedSymbolRef.current;
+      const currentBid = bidRef.current;
+      const currentAsk = askRef.current;
+
+      // update only forex positions
+      const all = positionsRef.current || [];
+      for (const pos of all) {
+        const t = (pos as any).assetType ?? (pos as any).marketType ?? (pos as any).type ?? (pos as any).market;
+        if (t !== 'forex') continue;
+
+        // if position is this symbol use live bid/ask, else approximate from cached mid
+        const sym = (pos as any).symbol;
+        const side = (pos as any).side;
+        const midOther = livePricesRef.current?.[sym];
+
+        const bid = sym === symbol ? currentBid : typeof midOther === 'number' ? midOther : Number((pos as any).currentPrice ?? 0);
+        const ask = sym === symbol ? currentAsk : typeof midOther === 'number' ? midOther : Number((pos as any).currentPrice ?? 0);
+
+        const px = side === 'long' ? bid : ask;
+        if (Number.isFinite(px)) updateMarginPositionPrice((pos as any).id, px);
+      }
+    }, 800);
+
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [updateMarginPositionPrice]);
+
+  // ======================
+  // HELPERS
+  // ======================
+  const formatPrice = useCallback((price: number) => {
+    if (!Number.isFinite(price)) return '—';
     if (price >= 100) return price.toFixed(2);
     if (price >= 1) return price.toFixed(4);
     return price.toFixed(5);
-  };
+  }, []);
 
-  // Calculate trade metrics
-  const positionValue = lotSize * 100000 * askPrice;
-  const requiredMargin = positionValue / leverage;
-  const pipValue = lotSize * 10;
-  const spreadPips = (askPrice - bidPrice) / 0.0001;
+  // Trade metrics (memo)
+  const positionValue = useMemo(() => lotSize * 100000 * askPrice, [lotSize, askPrice]);
+  const requiredMargin = useMemo(() => positionValue / leverage, [positionValue, leverage]);
+  const pipValue = useMemo(() => lotSize * 10, [lotSize]);
+  const spreadPips = useMemo(() => (askPrice - bidPrice) / 0.0001, [askPrice, bidPrice]);
 
-  const metrics = {
-    spread: spreadPips,
-    pipValue,
-    margin: requiredMargin,
-    positionSize: positionValue,
-  };
+  const metrics = useMemo(
+    () => ({
+      spread: spreadPips,
+      pipValue,
+      margin: requiredMargin,
+      positionSize: positionValue,
+    }),
+    [spreadPips, pipValue, requiredMargin, positionValue]
+  );
+
+  // Toggle favorite (stable)
+  const toggleFavorite = useCallback((symbol: string) => {
+    setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
+  }, []);
 
   // Handle trade execution
-  const handleTrade = async () => {
+  const handleTrade = useCallback(async () => {
     if (!canTrade) {
       setNotification({ type: 'error', message: 'Upgrade to Starter tier ($500 deposit) to trade' });
       setTimeout(() => setNotification(null), 3000);
@@ -318,7 +566,6 @@ export default function FXTradingPage() {
     );
 
     if ((result as any)?.success) {
-      // Refresh user balance after trade
       await refreshUser?.();
       setNotification({
         type: 'success',
@@ -329,52 +576,99 @@ export default function FXTradingPage() {
     }
 
     setTimeout(() => setNotification(null), 3000);
-  };
+  }, [
+    canTrade,
+    leverage,
+    tierConfig.maxLeverage,
+    tierConfig.spreadDiscount,
+    tierName,
+    tradeDirection,
+    askPrice,
+    bidPrice,
+    lotSize,
+    positionValue,
+    selectedAsset.symbol,
+    selectedAsset.name,
+    openMarginPosition,
+    stopLoss,
+    takeProfit,
+    refreshUser,
+    formatPrice,
+  ]);
 
   // Handle close position
-  const handleClosePosition = async (position: MarginPosition) => {
-    const side = (position as any).side;
-    const exitPrice = side === 'long' ? bidPrice : askPrice;
-    const fee = ((position as any).qty * exitPrice) * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
+  const handleClosePosition = useCallback(
+    async (position: MarginPosition) => {
+      const side = (position as any).side;
+      const exitPrice = side === 'long' ? bidPrice : askPrice;
+      const fee = ((position as any).qty * exitPrice) * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
 
-    const result = closeMarginPosition((position as any).id, exitPrice, fee);
+      const result = closeMarginPosition((position as any).id, exitPrice, fee);
 
-    if ((result as any)?.success) {
-      const pnl = Number((result as any).realizedPnL ?? 0);
-      // Refresh user balance after close
-      await refreshUser?.();
-      setNotification({
-        type: 'success',
-        message: `Closed ${(position as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
-      });
-    } else {
-      setNotification({ type: 'error', message: (result as any)?.error || 'Close failed' });
-    }
+      if ((result as any)?.success) {
+        const pnl = Number((result as any).realizedPnL ?? 0);
+        await refreshUser?.();
+        setNotification({
+          type: 'success',
+          message: `Closed ${(position as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
+        });
+      } else {
+        setNotification({ type: 'error', message: (result as any)?.error || 'Close failed' });
+      }
 
-    setShowCloseModal(false);
-    setPositionToClose(null);
-    setTimeout(() => setNotification(null), 3000);
-  };
-
-  // Toggle favorite
-  const toggleFavorite = (symbol: string) => {
-    setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
-  };
+      setShowCloseModal(false);
+      setPositionToClose(null);
+      setTimeout(() => setNotification(null), 3000);
+    },
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser]
+  );
 
   // Margin metrics — use user balance as fallback (admin-edited balance counts)
   const accountBalance = Number(marginAccount?.balance ?? 0) || userBalance;
-  const usedMargin = forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0);
-  const unrealizedPnL = forexPositions.reduce((sum, pos) => sum + Number((pos as any).unrealizedPnL ?? 0), 0);
+
+  const usedMargin = useMemo(
+    () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0),
+    [forexPositions]
+  );
+  const unrealizedPnL = useMemo(
+    () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).unrealizedPnL ?? 0), 0),
+    [forexPositions]
+  );
+
   const equity = accountBalance + unrealizedPnL;
   const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
 
   // Check for admin signal
-  const isSignalActive =
-    activeSignal?.asset === selectedAsset.symbol && !!activeSignal?.isActive;
+  const isSignalActive = activeSignal?.asset === selectedAsset.symbol && !!activeSignal?.isActive;
 
-  // Generate chart candles for SVG
-  const generateChartPath = () => {
+  // ======================
+  // ASSET LIST FILTERS (FAST)
+  // ======================
+  const filteredEducational = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return educationalPairs;
+    return educationalPairs.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
+  }, [searchQuery]);
+
+  const filteredFavorites = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return standardForexAssets
+      .filter((a) => favorites.includes(a.symbol))
+      .filter((a) => !q || a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
+  }, [favorites, searchQuery]);
+
+  const filteredAll = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return standardForexAssets
+      .filter((a) => !favorites.includes(a.symbol))
+      .filter((a) => !q || a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
+  }, [favorites, searchQuery]);
+
+  // ======================
+  // CHART GEOMETRY (MEMOIZED)
+  // ======================
+  const chartData = useMemo(() => {
     const { width, height } = chartDimensions;
     const isMobile = width < 400;
 
@@ -388,42 +682,50 @@ export default function FXTradingPage() {
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
 
-    const candles: any[] =
+    const candlesRaw: any[] =
       chartCandles.length > 0
         ? (chartCandles as any[])
-        : Array.from({ length: isMobile ? 30 : 50 }, (_, i) => ({
-            id: `placeholder_${i}`,
-            pairId: selectedAsset.symbol,
-            timestamp: new Date(Date.now() - (50 - i) * 60000),
-            open: selectedAsset.price * (1 + Math.sin(i * 0.2) * 0.02),
-            high: selectedAsset.price * (1 + Math.sin(i * 0.2) * 0.02 + Math.random() * 0.005),
-            low: selectedAsset.price * (1 + Math.sin(i * 0.2) * 0.02 - Math.random() * 0.005),
-            close: selectedAsset.price * (1 + Math.sin((i + 1) * 0.2) * 0.02),
-            volume: Math.random() * 1000000,
-            isSimulated: true,
-          }));
+        : Array.from({ length: isMobile ? 30 : 50 }, (_, i) => {
+            const base = (livePrices[selectedAsset.symbol] ?? selectedAsset.price) || 1;
+            const swing = Math.sin(i * 0.2) * 0.02;
+            const open = base * (1 + swing);
+            const close = base * (1 + Math.sin((i + 1) * 0.2) * 0.02);
+            const high = Math.max(open, close) * (1 + Math.random() * 0.002);
+            const low = Math.min(open, close) * (1 - Math.random() * 0.002);
 
-    if (candles.length === 0) {
+            return {
+              id: `placeholder_${i}`,
+              pairId: selectedAsset.symbol,
+              timestamp: new Date(Date.now() - (50 - i) * 60000),
+              open,
+              high,
+              low,
+              close,
+              volume: Math.random() * 1000000,
+              isSimulated: true,
+            };
+          });
+
+    if (!candlesRaw.length) {
       return { candles: [], minPrice: 0, maxPrice: 0, priceRange: 1, padding, chartHeight };
     }
 
-    const prices = candles.flatMap((c) => [c.high, c.low]);
+    const prices = candlesRaw.flatMap((c) => [c.high, c.low]);
     const minPrice = Math.min(...prices);
     const maxPrice = Math.max(...prices);
     const priceRange = maxPrice - minPrice || 1;
 
-    const candleWidth = Math.max((chartWidth / candles.length) * 0.65, isMobile ? 3 : 2);
-    const gap = (chartWidth / candles.length) * 0.35;
+    const candleWidth = Math.max((chartWidth / candlesRaw.length) * 0.65, isMobile ? 3 : 2);
+    const gap = (chartWidth / candlesRaw.length) * 0.35;
 
     return {
-      candles: candles.map((candle, i) => {
+      candles: candlesRaw.map((candle, i) => {
         const x = padding.left + i * (candleWidth + gap) + candleWidth / 2;
         const openY = padding.top + ((maxPrice - candle.open) / priceRange) * chartHeight;
         const closeY = padding.top + ((maxPrice - candle.close) / priceRange) * chartHeight;
         const highY = padding.top + ((maxPrice - candle.high) / priceRange) * chartHeight;
         const lowY = padding.top + ((maxPrice - candle.low) / priceRange) * chartHeight;
         const isGreen = candle.close >= candle.open;
-
         return { x, openY, closeY, highY, lowY, width: candleWidth, isGreen, candle };
       }),
       minPrice,
@@ -432,9 +734,7 @@ export default function FXTradingPage() {
       padding,
       chartHeight,
     };
-  };
-
-  const chartData = generateChartPath();
+  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
 
   return (
     <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
@@ -744,7 +1044,9 @@ export default function FXTradingPage() {
 
           {/* Tier Badge */}
           <div className="px-3 py-2 border-b border-white/10">
-            <div className={`flex items-center gap-2 px-3 py-1.5 ${tierConfig.bgColor} ${tierConfig.borderColor} border rounded-lg`}>
+            <div
+              className={`flex items-center gap-2 px-3 py-1.5 ${tierConfig.bgColor} ${tierConfig.borderColor} border rounded-lg`}
+            >
               <span className="text-lg">{tierConfig.icon}</span>
               <div>
                 <span className={`text-sm font-medium ${tierConfig.color}`}>{tierName} Tier</span>
@@ -912,7 +1214,9 @@ export default function FXTradingPage() {
               onClick={handleTrade}
               disabled={!canTrade || accountBalance === 0 || requiredMargin > freeMargin}
               className={`w-full py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${
-                tradeDirection === 'buy' ? 'bg-profit hover:bg-profit/90 text-void' : 'bg-loss hover:bg-loss/90 text-white'
+                tradeDirection === 'buy'
+                  ? 'bg-profit hover:bg-profit/90 text-void'
+                  : 'bg-loss hover:bg-loss/90 text-white'
               } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               {!canTrade ? (
@@ -1095,18 +1399,21 @@ export default function FXTradingPage() {
 
               <div className="overflow-y-auto max-h-[60vh]">
                 {/* Educational Pairs */}
-                {educationalPairs.length > 0 && (
+                {filteredEducational.length > 0 && (
                   <div className="p-2 border-b border-white/10">
                     <p className="px-2 py-1 text-xs text-purple-400 font-medium">📚 Educational Pairs (Admin Controlled)</p>
-                    {educationalPairs
-                      .filter((a) => a.symbol.toLowerCase().includes(searchQuery.toLowerCase()))
-                      .map((asset) => (
+                    {filteredEducational.map((asset) => {
+                      const p = adminPrices?.[asset.symbol];
+                      const bid = p?.bid ?? (livePrices[asset.symbol] ?? asset.price);
+                      const ask = p?.ask ?? (livePrices[asset.symbol] ?? asset.price) * 1.0002;
+
+                      return (
                         <button
                           key={asset.id}
                           onClick={() => {
                             setSelectedAsset(asset);
-                            setBidPrice(asset.price);
-                            setAskPrice(asset.price * 1.0002);
+                            setBidPrice(Number(bid));
+                            setAskPrice(Number(ask));
                             setShowAssetSelector(false);
                           }}
                           className="w-full flex items-center justify-between p-3 hover:bg-purple-500/10 rounded-lg transition-colors"
@@ -1119,31 +1426,32 @@ export default function FXTradingPage() {
                             </div>
                           </div>
                           <div className="text-right">
-                            <p className="text-sm font-mono text-cream">{formatPrice(asset.price)}</p>
+                            <p className="text-sm font-mono text-cream">{formatPrice(Number(bid))}</p>
                             <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
                               {asset.change24h >= 0 ? '+' : ''}
                               {asset.change24h.toFixed(2)}%
                             </p>
                           </div>
                         </button>
-                      ))}
+                      );
+                    })}
                   </div>
                 )}
 
                 {/* Favorites */}
-                {favorites.length > 0 && (
+                {filteredFavorites.length > 0 && (
                   <div className="p-2 border-b border-white/10">
                     <p className="px-2 py-1 text-xs text-gold font-medium">★ Favorites</p>
-                    {standardForexAssets
-                      .filter((a) => favorites.includes(a.symbol))
-                      .filter((a) => a.symbol.toLowerCase().includes(searchQuery.toLowerCase()))
-                      .map((asset) => (
+                    {filteredFavorites.map((asset) => {
+                      const mid = livePrices[asset.symbol] ?? asset.price;
+                      return (
                         <button
                           key={asset.id}
                           onClick={() => {
                             setSelectedAsset(asset);
-                            setBidPrice(asset.price);
-                            setAskPrice(asset.price * 1.0001);
+                            const spread = Math.max(mid * 0.00006, 0.00001);
+                            setBidPrice(mid - spread / 2);
+                            setAskPrice(mid + spread / 2);
                             setShowAssetSelector(false);
                           }}
                           className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
@@ -1165,34 +1473,31 @@ export default function FXTradingPage() {
                             </div>
                           </div>
                           <div className="text-right">
-                            <p className="text-sm font-mono text-cream">{formatPrice(asset.price)}</p>
+                            <p className="text-sm font-mono text-cream">{formatPrice(mid)}</p>
                             <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
                               {asset.change24h >= 0 ? '+' : ''}
                               {asset.change24h.toFixed(2)}%
                             </p>
                           </div>
                         </button>
-                      ))}
+                      );
+                    })}
                   </div>
                 )}
 
                 {/* All Pairs */}
                 <div className="p-2">
                   <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Pairs (Real Market Data)</p>
-                  {standardForexAssets
-                    .filter((a) => !favorites.includes(a.symbol))
-                    .filter(
-                      (a) =>
-                        a.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                        a.name.toLowerCase().includes(searchQuery.toLowerCase())
-                    )
-                    .map((asset) => (
+                  {filteredAll.map((asset) => {
+                    const mid = livePrices[asset.symbol] ?? asset.price;
+                    return (
                       <button
                         key={asset.id}
                         onClick={() => {
                           setSelectedAsset(asset);
-                          setBidPrice(asset.price);
-                          setAskPrice(asset.price * 1.0001);
+                          const spread = Math.max(mid * 0.00006, 0.00001);
+                          setBidPrice(mid - spread / 2);
+                          setAskPrice(mid + spread / 2);
                           setShowAssetSelector(false);
                         }}
                         className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
@@ -1214,14 +1519,15 @@ export default function FXTradingPage() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-sm font-mono text-cream">{formatPrice(asset.price)}</p>
+                          <p className="text-sm font-mono text-cream">{formatPrice(mid)}</p>
                           <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
                             {asset.change24h >= 0 ? '+' : ''}
                             {asset.change24h.toFixed(2)}%
                           </p>
                         </div>
                       </button>
-                    ))}
+                    );
+                  })}
                 </div>
               </div>
             </motion.div>

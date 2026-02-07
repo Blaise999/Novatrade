@@ -1,11 +1,9 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import Link from 'next/link';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   TrendingUp,
-  TrendingDown,
   ChevronDown,
   Search,
   Star,
@@ -13,23 +11,15 @@ import {
   CheckCircle,
   AlertCircle,
   Wallet,
-  ArrowUpRight,
-  ArrowDownRight,
   RefreshCw,
-  Info,
   Shield,
-  ShieldOff,
   ShieldCheck,
   Lock,
-  Unlock,
-  Pause,
-  Play,
-  Eye,
-  EyeOff
 } from 'lucide-react';
+
 import { useStore } from '@/lib/supabase/store-supabase';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
-import { useSpotTradingStore, useSpotEquity, useShieldedPositions } from '@/lib/spot-trading-store';
+import { useSpotTradingStore } from '@/lib/spot-trading-store';
 import type { SpotPosition } from '@/lib/spot-trading-types';
 
 // ============================================
@@ -40,6 +30,7 @@ interface CryptoAsset {
   id: string;
   symbol: string;
   name: string;
+  // fallback values (used until live prices arrive)
   price: number;
   change24h: number;
   marketCap?: string;
@@ -48,11 +39,11 @@ interface CryptoAsset {
 }
 
 // ============================================
-// CRYPTO ASSETS DATA
+// CRYPTO ASSETS DATA (fallback UI list)
 // ============================================
 
 const cryptoAssets: CryptoAsset[] = [
-  { id: 'btc', symbol: 'BTC', name: 'Bitcoin', price: 67234.50, change24h: 2.45, marketCap: '$1.32T', volume24h: '$28.5B', icon: '₿' },
+  { id: 'btc', symbol: 'BTC', name: 'Bitcoin', price: 67234.5, change24h: 2.45, marketCap: '$1.32T', volume24h: '$28.5B', icon: '₿' },
   { id: 'eth', symbol: 'ETH', name: 'Ethereum', price: 3456.78, change24h: -1.23, marketCap: '$415B', volume24h: '$12.3B', icon: 'Ξ' },
   { id: 'bnb', symbol: 'BNB', name: 'BNB', price: 567.89, change24h: 0.87, marketCap: '$87B', volume24h: '$1.2B', icon: '◆' },
   { id: 'sol', symbol: 'SOL', name: 'Solana', price: 145.32, change24h: 5.67, marketCap: '$63B', volume24h: '$3.4B', icon: '◎' },
@@ -64,7 +55,7 @@ const cryptoAssets: CryptoAsset[] = [
   { id: 'link', symbol: 'LINK', name: 'Chainlink', price: 14.56, change24h: 1.89, marketCap: '$8B', volume24h: '$345M', icon: '⬡' },
   { id: 'matic', symbol: 'MATIC', name: 'Polygon', price: 0.5678, change24h: 4.22, marketCap: '$5.2B', volume24h: '$450M', icon: '⬣' },
   { id: 'uni', symbol: 'UNI', name: 'Uniswap', price: 12.34, change24h: 4.76, marketCap: '$7.4B', volume24h: '$320M', icon: '🦄' },
-  { id: 'ltc', symbol: 'LTC', name: 'Litecoin', price: 95.67, change24h: 2.50, marketCap: '$7.1B', volume24h: '$680M', icon: 'Ł' },
+  { id: 'ltc', symbol: 'LTC', name: 'Litecoin', price: 95.67, change24h: 2.5, marketCap: '$7.1B', volume24h: '$680M', icon: 'Ł' },
   { id: 'atom', symbol: 'ATOM', name: 'Cosmos', price: 9.45, change24h: 3.05, marketCap: '$3.6B', volume24h: '$280M', icon: '⚛' },
   { id: 'near', symbol: 'NEAR', name: 'NEAR Protocol', price: 5.23, change24h: 6.96, marketCap: '$5.8B', volume24h: '$410M', icon: '◈' },
   { id: 'apt', symbol: 'APT', name: 'Aptos', price: 8.67, change24h: 5.47, marketCap: '$3.9B', volume24h: '$290M', icon: '⬡' },
@@ -80,52 +71,73 @@ const cryptoAssets: CryptoAsset[] = [
 ];
 
 // ============================================
-// MINI CHART COMPONENT
+// REAL MARKET PARSING (fast + tolerant)
 // ============================================
 
-const MiniChart = ({ data, positive, height = 60 }: { data: number[]; positive: boolean; height?: number }) => {
-  if (data.length < 2) return <div className="w-full bg-white/5 rounded animate-pulse" style={{ height }} />;
+const toFiniteNumber = (v: unknown): number | null => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
 
-  const min = Math.min(...data);
-  const max = Math.max(...data);
-  const range = max - min || 1;
+const normalizePriceMap = (raw: unknown): Record<string, number> => {
+  if (!raw || typeof raw !== 'object') return {};
+  const obj = raw as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const k of Object.keys(obj)) {
+    const n = toFiniteNumber(obj[k]);
+    if (n !== null) out[k.toUpperCase()] = n;
+  }
+  return out;
+};
 
-  const points = data.map((val, i) => {
-    const x = (i / (data.length - 1)) * 100;
-    const y = height - 4 - ((val - min) / range) * (height - 8);
-    return `${x},${y}`;
-  }).join(' ');
+const normalizeSeries = (raw: unknown): number[] => {
+  if (!Array.isArray(raw)) return [];
 
-  const areaPoints = `0,${height} ${points} 100,${height}`;
+  // [1,2,3] (numbers or numeric strings)
+  if (raw.every((x) => typeof x === 'number' || typeof x === 'string')) {
+    return raw
+      .map((x) => toFiniteNumber(x))
+      .filter((x): x is number => x !== null);
+  }
 
-  return (
-    <svg viewBox={`0 0 100 ${height}`} className="w-full" style={{ height }}>
-      <defs>
-        <linearGradient id="chartFill" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stopColor={positive ? '#10B981' : '#EF4444'} stopOpacity="0.3" />
-          <stop offset="100%" stopColor={positive ? '#10B981' : '#EF4444'} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon points={areaPoints} fill="url(#chartFill)" />
-      <polyline points={points} fill="none" stroke={positive ? '#10B981' : '#EF4444'} strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
+  // [[ts, price], ...]
+  if (raw.every((x) => Array.isArray(x) && (x as any).length >= 2)) {
+    return raw
+      .map((x) => toFiniteNumber((x as any)[1]))
+      .filter((x): x is number => x !== null);
+  }
+
+  // [{price|close|value}, ...]
+  if (raw.every((x) => x && typeof x === 'object')) {
+    return raw
+      .map((x) => {
+        const o = x as any;
+        return (
+          toFiniteNumber(o.price) ??
+          toFiniteNumber(o.close) ??
+          toFiniteNumber(o.value) ??
+          null
+        );
+      })
+      .filter((x): x is number => x !== null);
+  }
+
+  return [];
 };
 
 // ============================================
 // PRICE CHART COMPONENT
 // ============================================
 
-const PriceChart = ({ asset, priceHistory }: { asset: CryptoAsset; priceHistory: number[] }) => {
+const PriceChart = ({ priceHistory }: { priceHistory: number[] }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 300, height: 200 });
 
   useEffect(() => {
     const updateDimensions = () => {
-      if (containerRef.current) {
-        const { width, height } = containerRef.current.getBoundingClientRect();
-        setDimensions({ width, height: Math.max(150, height) });
-      }
+      if (!containerRef.current) return;
+      const { width, height } = containerRef.current.getBoundingClientRect();
+      setDimensions({ width, height: Math.max(150, height) });
     };
     updateDimensions();
     window.addEventListener('resize', updateDimensions);
@@ -149,11 +161,13 @@ const PriceChart = ({ asset, priceHistory }: { asset: CryptoAsset; priceHistory:
   const max = Math.max(...priceHistory);
   const range = max - min || 1;
 
-  const points = priceHistory.map((val, i) => {
-    const x = padding + (i / (priceHistory.length - 1)) * chartWidth;
-    const y = padding + chartHeight - ((val - min) / range) * chartHeight;
-    return `${x},${y}`;
-  }).join(' ');
+  const points = priceHistory
+    .map((val, i) => {
+      const x = padding + (i / (priceHistory.length - 1)) * chartWidth;
+      const y = padding + chartHeight - ((val - min) / range) * chartHeight;
+      return `${x},${y}`;
+    })
+    .join(' ');
 
   const areaPoints = `${padding},${padding + chartHeight} ${points} ${padding + chartWidth},${padding + chartHeight}`;
   const isPositive = priceHistory[priceHistory.length - 1] >= priceHistory[0];
@@ -168,7 +182,14 @@ const PriceChart = ({ asset, priceHistory }: { asset: CryptoAsset; priceHistory:
           </linearGradient>
         </defs>
         <polygon points={areaPoints} fill="url(#priceGradient)" />
-        <polyline points={points} fill="none" stroke={isPositive ? '#10B981' : '#EF4444'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        <polyline
+          points={points}
+          fill="none"
+          stroke={isPositive ? '#10B981' : '#EF4444'}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       </svg>
     </div>
   );
@@ -179,16 +200,17 @@ const PriceChart = ({ asset, priceHistory }: { asset: CryptoAsset; priceHistory:
 // ============================================
 
 const ShieldBadge = ({ position, onToggle }: { position: SpotPosition; onToggle: () => void }) => {
-  const priceChange = position.shieldEnabled && position.shieldSnapPrice 
-    ? position.currentPrice - position.shieldSnapPrice 
-    : 0;
-  const priceChangePercent = position.shieldSnapPrice 
-    ? (priceChange / position.shieldSnapPrice) * 100 
-    : 0;
+  const priceChange =
+    position.shieldEnabled && position.shieldSnapPrice ? position.currentPrice - position.shieldSnapPrice : 0;
+
+  const priceChangePercent = position.shieldSnapPrice ? (priceChange / position.shieldSnapPrice) * 100 : 0;
 
   return (
     <motion.button
-      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
       className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
         position.shieldEnabled
           ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
@@ -201,9 +223,10 @@ const ShieldBadge = ({ position, onToggle }: { position: SpotPosition; onToggle:
         <>
           <ShieldCheck className="w-3.5 h-3.5" />
           <span>Protected</span>
-          {priceChange !== 0 && (
-            <span className={priceChange < 0 ? 'text-profit' : 'text-loss'}>
-              {priceChange < 0 ? '↓' : '↑'}{Math.abs(priceChangePercent).toFixed(1)}%
+          {position.shieldSnapPrice && (
+            <span className={priceChange < 0 ? 'text-loss' : 'text-profit'}>
+              {priceChange < 0 ? '↓' : '↑'}
+              {Math.abs(priceChangePercent).toFixed(1)}%
             </span>
           )}
         </>
@@ -221,40 +244,30 @@ const ShieldBadge = ({ position, onToggle }: { position: SpotPosition; onToggle:
 // PORTFOLIO CARD WITH SHIELD
 // ============================================
 
-const PortfolioCard = ({ 
-  position, 
-  prices, 
+const PortfolioCard = ({
+  position,
+  prices,
   onToggleShield,
-  onSelect 
-}: { 
-  position: SpotPosition; 
+  onSelect,
+}: {
+  position: SpotPosition;
   prices: Record<string, number>;
   onToggleShield: () => void;
   onSelect: () => void;
 }) => {
-  const asset = cryptoAssets.find(a => a.symbol === position.symbol);
-  const livePrice = prices[position.symbol] || position.currentPrice;
-  
-  // Calculate what the value WOULD be if shield was off
+  const asset = cryptoAssets.find((a) => a.symbol === position.symbol);
+  const livePrice = prices[position.symbol] ?? position.currentPrice;
+
   const liveValue = position.quantity * livePrice;
-  const livePnL = liveValue - position.totalCostBasis;
-  const livePnLPercent = (livePnL / position.totalCostBasis) * 100;
-  
-  // Use display values (respects shield)
   const displayValue = position.displayValue;
-  const displayPnL = position.displayPnL;
-  const displayPnLPercent = position.displayPnLPercent;
-  
-  // Calculate protection amount if shielded
+
   const protectionAmount = position.shieldEnabled ? displayValue - liveValue : 0;
 
   return (
-    <motion.div 
-      layout 
+    <motion.div
+      layout
       className={`p-4 rounded-xl border transition-all cursor-pointer ${
-        position.shieldEnabled 
-          ? 'bg-blue-500/5 border-blue-500/20' 
-          : 'bg-white/5 border-white/5 hover:border-white/10'
+        position.shieldEnabled ? 'bg-blue-500/5 border-blue-500/20' : 'bg-white/5 border-white/5 hover:border-white/10'
       }`}
       onClick={onSelect}
     >
@@ -278,27 +291,22 @@ const PortfolioCard = ({
         <ShieldBadge position={position} onToggle={onToggleShield} />
       </div>
 
-      {/* Value Display */}
       <div className="space-y-2">
-        {/* Display Value (what user sees) */}
         <div className="flex justify-between items-baseline">
-          <span className="text-sm text-slate-400">
-            {position.shieldEnabled ? 'Shielded Value' : 'Value'}
-          </span>
+          <span className="text-sm text-slate-400">{position.shieldEnabled ? 'Shielded Value' : 'Value'}</span>
           <span className="text-lg font-semibold text-cream">
             ${displayValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         </div>
 
-        {/* P&L */}
         <div className="flex justify-between items-center">
           <span className="text-xs text-slate-500">P&L</span>
-          <span className={`text-sm font-medium ${displayPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-            {displayPnL >= 0 ? '+' : ''}{displayPnL.toFixed(2)} ({displayPnLPercent.toFixed(2)}%)
+          <span className={`text-sm font-medium ${position.displayPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {position.displayPnL >= 0 ? '+' : ''}
+            {position.displayPnL.toFixed(2)} ({position.displayPnLPercent.toFixed(2)}%)
           </span>
         </div>
 
-        {/* Shield Info - Show live price vs snap price when shielded */}
         {position.shieldEnabled && position.shieldSnapPrice && (
           <div className="mt-3 pt-3 border-t border-white/5 space-y-1.5">
             <div className="flex justify-between items-center text-xs">
@@ -306,10 +314,9 @@ const PortfolioCard = ({
                 <Lock className="w-3 h-3" />
                 Locked Price
               </span>
-              <span className="text-blue-400 font-mono">
-                ${position.shieldSnapPrice.toLocaleString()}
-              </span>
+              <span className="text-blue-400 font-mono">${position.shieldSnapPrice.toLocaleString()}</span>
             </div>
+
             <div className="flex justify-between items-center text-xs">
               <span className="text-slate-500 flex items-center gap-1">
                 <TrendingUp className="w-3 h-3" />
@@ -319,13 +326,13 @@ const PortfolioCard = ({
                 ${livePrice.toLocaleString()}
               </span>
             </div>
+
             {protectionAmount !== 0 && (
               <div className="flex justify-between items-center text-xs mt-2 pt-2 border-t border-white/5">
-                <span className="text-slate-400">
-                  {protectionAmount > 0 ? '💪 Protected from loss' : '📈 Missed gain'}
-                </span>
+                <span className="text-slate-400">{protectionAmount > 0 ? '💪 Protected from loss' : '📈 Missed gain'}</span>
                 <span className={protectionAmount > 0 ? 'text-profit' : 'text-loss'}>
-                  {protectionAmount > 0 ? '+' : ''}{protectionAmount.toFixed(2)}
+                  {protectionAmount > 0 ? '+' : ''}
+                  {protectionAmount.toFixed(2)}
                 </span>
               </div>
             )}
@@ -343,53 +350,54 @@ const PortfolioCard = ({
 export default function CryptoTradingPage() {
   // Get real user data from store
   const { user, refreshUser, loadTrades } = useStore();
-  
+
   // Spot Trading Store
-  const { 
-    account,
-    positions,
-    initializeAccount,
-    syncCashFromUser,
-    executeBuy,
-    executeSell,
-    updatePrices,
-    toggleShield,
-    getShieldSummary,
-  } = useSpotTradingStore();
+  const { account, positions, initializeAccount, syncCashFromUser, executeBuy, executeSell, updatePrices, toggleShield, getShieldSummary } =
+    useSpotTradingStore();
 
   // State
   const [selectedAsset, setSelectedAsset] = useState<CryptoAsset>(cryptoAssets[0]);
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [favorites, setFavorites] = useState<string[]>(['BTC', 'ETH', 'SOL']);
-  
-  // Price state
-  const [prices, setPrices] = useState<Record<string, number>>(() => 
-    Object.fromEntries(cryptoAssets.map(a => [a.symbol, a.price]))
+
+  // Live prices + 24h changes
+  const [prices, setPrices] = useState<Record<string, number>>(() =>
+    Object.fromEntries(cryptoAssets.map((a) => [a.symbol.toUpperCase(), a.price]))
+  );
+  const [changes24h, setChanges24h] = useState<Record<string, number>>(() =>
+    Object.fromEntries(cryptoAssets.map((a) => [a.symbol.toUpperCase(), a.change24h]))
   );
   const [priceHistory, setPriceHistory] = useState<number[]>([]);
-  
+
   // Trading state
   const [orderType, setOrderType] = useState<'buy' | 'sell'>('buy');
   const [orderMode, setOrderMode] = useState<'amount' | 'quantity'>('amount');
   const [amount, setAmount] = useState<number>(100);
   const [quantity, setQuantity] = useState<number>(0);
-  
+
   // Use real balance from user
   const balance = user?.balance || 0;
-  
+
   // UI state
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [mobileTab, setMobileTab] = useState<'chart' | 'trade' | 'portfolio'>('chart');
   const [isExecuting, setIsExecuting] = useState(false);
 
+  // fast cache for history (instant switching)
+  const historyCacheRef = useRef<Map<string, number[]>>(new Map());
+
+  const selectedSymbol = selectedAsset.symbol.toUpperCase();
+
   // Current price
-  const currentPrice = prices[selectedAsset.symbol] || selectedAsset.price;
+  const currentPrice = prices[selectedSymbol] ?? selectedAsset.price;
+  const liveChange = changes24h[selectedSymbol] ?? selectedAsset.change24h;
 
   // Initialize account and sync balance
   useEffect(() => {
     refreshUser();
     loadTrades();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -398,69 +406,170 @@ export default function CryptoTradingPage() {
     } else if (user?.balance !== undefined && account) {
       syncCashFromUser(user.balance);
     }
-    // Only re-run when user ID or balance actually changes, not the whole object
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, user?.balance, !!account]);
 
   // Calculate quantity from amount
   useEffect(() => {
-    if (orderMode === 'amount' && amount > 0) {
-      setQuantity(amount / currentPrice);
-    }
+    if (orderMode === 'amount' && amount > 0) setQuantity(amount / currentPrice);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amount, currentPrice, orderMode]);
 
   // Calculate amount from quantity
   useEffect(() => {
-    if (orderMode === 'quantity' && quantity > 0) {
-      setAmount(quantity * currentPrice);
-    }
+    if (orderMode === 'quantity' && quantity > 0) setAmount(quantity * currentPrice);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quantity, currentPrice, orderMode]);
 
-  // Simulate real-time price updates (WebSocket simulation)
+  // Load HISTORY when asset changes (chart baseline) — real market
   useEffect(() => {
-    // Initialize price history
-    const initialHistory: number[] = [];
-    let price = selectedAsset.price;
-    for (let i = 0; i < 50; i++) {
-      price = price * (1 + (Math.random() - 0.5) * 0.002);
-      initialHistory.push(price);
-    }
-    setPriceHistory(initialHistory);
+    const ac = new AbortController();
 
-    // Update prices every second (simulates WebSocket)
-    const interval = setInterval(() => {
-      setPrices(prev => {
-        const newPrices = { ...prev };
-        cryptoAssets.forEach(asset => {
-          const change = (Math.random() - 0.5) * 0.001;
-          newPrices[asset.symbol] = newPrices[asset.symbol] * (1 + change);
+    // show cached instantly (fast UI)
+    const cached = historyCacheRef.current.get(selectedSymbol);
+    if (cached && cached.length >= 2) setPriceHistory(cached.slice(-100));
+    else setPriceHistory([]);
+
+    (async () => {
+      try {
+        const r = await fetch(`/api/market/history?symbol=${encodeURIComponent(selectedSymbol)}&days=1`, {
+          cache: 'no-store',
+          signal: ac.signal,
         });
-        
-        // Update spot trading store with new prices
-        updatePrices(newPrices);
-        
-        return newPrices;
-      });
+        if (!r.ok) return;
 
-      setPriceHistory(prev => {
-        const newPrice = prices[selectedAsset.symbol] * (1 + (Math.random() - 0.5) * 0.002);
-        return [...prev.slice(-99), newPrice];
-      });
-    }, 1000);
+        const j = await r.json();
+        const series = normalizeSeries(j?.prices ?? j?.history ?? j?.data);
 
-    return () => clearInterval(interval);
-  }, [selectedAsset]);
+        if (series.length >= 2) {
+          const sliced = series.slice(-200); // keep a bit more in cache
+          historyCacheRef.current.set(selectedSymbol, sliced);
+          setPriceHistory(sliced.slice(-100));
+        } else {
+          historyCacheRef.current.delete(selectedSymbol);
+          setPriceHistory([]);
+        }
+      } catch {
+        // ignore
+      }
+    })();
 
-  // Filter assets
-  const filteredAssets = cryptoAssets.filter(a =>
-    a.symbol.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    a.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+    return () => ac.abort();
+  }, [selectedSymbol]);
 
-  // Toggle favorite
-  const toggleFavorite = (symbol: string) => {
-    setFavorites(prev => prev.includes(symbol) ? prev.filter(s => s !== symbol) : [...prev, symbol]);
-  };
+  // Poll LIVE prices (real online) — FAST: selected asset more frequently
+  useEffect(() => {
+    let alive = true;
+    const ac = new AbortController();
+
+    const allSymbols = cryptoAssets.map((a) => a.symbol.toUpperCase()).join(',');
+    const selectedOnly = selectedSymbol;
+
+    const applyTick = (json: any) => {
+      const newPrices = normalizePriceMap(json?.prices ?? json?.data?.prices ?? json);
+      const newChanges = normalizePriceMap(json?.changes24h ?? json?.data?.changes24h);
+
+      if (Object.keys(newPrices).length) {
+        setPrices((prev) => {
+          let changed = false;
+          const merged = { ...prev };
+          for (const k of Object.keys(newPrices)) {
+            const v = newPrices[k];
+            if (merged[k] !== v) {
+              merged[k] = v;
+              changed = true;
+            }
+          }
+          if (changed) updatePrices(merged);
+          return changed ? merged : prev;
+        });
+
+        // append selected tick to chart (keeps it moving)
+        const p = newPrices[selectedSymbol];
+        if (typeof p === 'number' && Number.isFinite(p)) {
+          setPriceHistory((prev) => {
+            if (prev.length < 2) return [p, p * 0.999];
+            const next = [...prev.slice(-99), p];
+            historyCacheRef.current.set(selectedSymbol, next.slice(-200));
+            return next;
+          });
+        }
+      }
+
+      if (Object.keys(newChanges).length) {
+        setChanges24h((prev) => {
+          let changed = false;
+          const merged = { ...prev };
+          for (const k of Object.keys(newChanges)) {
+            const v = newChanges[k];
+            if (merged[k] !== v) {
+              merged[k] = v;
+              changed = true;
+            }
+          }
+          return changed ? merged : prev;
+        });
+      }
+    };
+
+    const tickSelected = async () => {
+      try {
+        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(selectedOnly)}`, {
+          cache: 'no-store',
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!alive) return;
+        applyTick(json);
+      } catch {
+        // ignore
+      }
+    };
+
+    const tickAll = async () => {
+      try {
+        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(allSymbols)}`, {
+          cache: 'no-store',
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (!alive) return;
+        applyTick(json);
+      } catch {
+        // ignore
+      }
+    };
+
+    tickSelected();
+    tickAll();
+
+    const idSelected = setInterval(tickSelected, 2000); // fast for the asset you're looking at
+    const idAll = setInterval(tickAll, 10000); // slower background refresh for the whole list
+
+    return () => {
+      alive = false;
+      ac.abort();
+      clearInterval(idSelected);
+      clearInterval(idAll);
+    };
+  }, [selectedSymbol, updatePrices]);
+
+  // Filter assets (memoized for speed)
+  const filteredAssets = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return cryptoAssets;
+    return cryptoAssets.filter(
+      (a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q)
+    );
+  }, [searchQuery]);
+
+  // Toggle favorite (stable fn)
+  const toggleFavorite = useCallback((symbol: string) => {
+    const s = symbol.toUpperCase();
+    setFavorites((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }, []);
 
   // Execute buy - Spot Model
   const handleBuy = async () => {
@@ -479,70 +588,56 @@ export default function CryptoTradingPage() {
 
     setIsExecuting(true);
     const qty = amount / currentPrice;
-    const asset = cryptoAssets.find(a => a.symbol === selectedAsset.symbol);
+    const asset = cryptoAssets.find((a) => a.symbol.toUpperCase() === selectedSymbol);
 
     try {
-      // Execute in spot trading store (this handles Supabase sync internally)
-      const result = executeBuy(
-        selectedAsset.symbol,
-        selectedAsset.name,
-        qty,
-        currentPrice,
-        0, // fee
-        asset?.icon
-      );
+      const result = executeBuy(selectedSymbol, selectedAsset.name, qty, currentPrice, 0, asset?.icon);
 
-      if (!result.success) {
-        throw new Error(result.error || 'Trade failed');
-      }
+      if (!result.success) throw new Error(result.error || 'Trade failed');
 
-      // Record trade in Supabase (for history only, balance already synced)
       if (isSupabaseConfigured()) {
-        await supabase
-          .from('trades')
-          .insert({
-            user_id: user.id,
-            pair: `${selectedAsset.symbol}/USD`,
-            market_type: 'crypto',
-            type: 'buy',
-            side: 'long',
-            amount: amount,
-            quantity: qty,
-            entry_price: currentPrice,
-            current_price: currentPrice,
-            leverage: 1,
-            margin_used: amount,
-            pnl: 0,
-            pnl_percentage: 0,
-            fees: 0,
-            status: 'open',
-            source: 'live',
-            opened_at: new Date().toISOString(),
-          });
+        await supabase.from('trades').insert({
+          user_id: user.id,
+          pair: `${selectedSymbol}/USD`,
+          market_type: 'crypto',
+          type: 'buy',
+          side: 'long',
+          amount,
+          quantity: qty,
+          entry_price: currentPrice,
+          current_price: currentPrice,
+          leverage: 1,
+          margin_used: amount,
+          pnl: 0,
+          pnl_percentage: 0,
+          fees: 0,
+          status: 'open',
+          source: 'live',
+          opened_at: new Date().toISOString(),
+        });
 
-        // Refresh user state to get updated balance from Supabase
         await refreshUser();
         await loadTrades();
       }
-      
-      setNotification({ 
-        type: 'success', 
-        message: `Bought ${qty.toFixed(6)} ${selectedAsset.symbol} @ $${currentPrice.toLocaleString()}` 
+
+      setNotification({
+        type: 'success',
+        message: `Bought ${qty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}`,
       });
     } catch (error: any) {
       console.error('Trade error:', error);
-      setNotification({ type: 'error', message: error.message || 'Trade failed' });
+      setNotification({ type: 'error', message: error?.message || 'Trade failed' });
     }
-    
+
     setIsExecuting(false);
     setTimeout(() => setNotification(null), 3000);
   };
 
   // Execute sell - Spot Model
   const handleSell = async () => {
-    const position = positions.find(p => p.symbol === selectedAsset.symbol);
+    const position = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
     if (!position) {
-      setNotification({ type: 'error', message: `You don't own any ${selectedAsset.symbol}` });
+      setNotification({ type: 'error', message: `You don't own any ${selectedSymbol}` });
       return;
     }
     if (!user) {
@@ -559,27 +654,23 @@ export default function CryptoTradingPage() {
     setIsExecuting(true);
 
     try {
-      // Execute in spot trading store (this handles Supabase sync internally)
       const result = executeSell(position.id, sellQty, currentPrice, 0);
+      if (!result.success) throw new Error(result.error || 'Sell failed');
 
-      if (!result.success) {
-        throw new Error(result.error || 'Sell failed');
-      }
-
-      // Refresh user state to get updated balance from Supabase
       if (isSupabaseConfigured()) {
         await refreshUser();
         await loadTrades();
       }
 
-      setNotification({ 
-        type: 'success', 
-        message: `Sold ${sellQty.toFixed(6)} ${selectedAsset.symbol} @ $${currentPrice.toLocaleString()}` +
-          (result.realizedPnL !== undefined ? ` (P&L: ${result.realizedPnL >= 0 ? '+' : ''}$${result.realizedPnL.toFixed(2)})` : '')
+      setNotification({
+        type: 'success',
+        message:
+          `Sold ${sellQty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}` +
+          (result.realizedPnL !== undefined ? ` (P&L: ${result.realizedPnL >= 0 ? '+' : ''}$${result.realizedPnL.toFixed(2)})` : ''),
       });
     } catch (error: any) {
       console.error('Sell error:', error);
-      setNotification({ type: 'error', message: error.message || 'Sell failed' });
+      setNotification({ type: 'error', message: error?.message || 'Sell failed' });
     }
 
     setIsExecuting(false);
@@ -592,7 +683,7 @@ export default function CryptoTradingPage() {
   const shieldSummary = getShieldSummary();
 
   // Get current position for selected asset
-  const currentPosition = positions.find(p => p.symbol === selectedAsset.symbol);
+  const currentPosition = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
 
   return (
     <div className="min-h-screen bg-void">
@@ -612,23 +703,19 @@ export default function CryptoTradingPage() {
             ) : (
               <AlertCircle className="w-5 h-5 text-loss" />
             )}
-            <span className={notification.type === 'success' ? 'text-profit' : 'text-loss'}>
-              {notification.message}
-            </span>
+            <span className={notification.type === 'success' ? 'text-profit' : 'text-loss'}>{notification.message}</span>
           </motion.div>
         )}
       </AnimatePresence>
 
       {/* Mobile Tabs */}
       <div className="lg:hidden flex border-b border-white/10">
-        {(['chart', 'trade', 'portfolio'] as const).map(tab => (
+        {(['chart', 'trade', 'portfolio'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setMobileTab(tab)}
             className={`flex-1 py-3 text-sm font-medium transition-all ${
-              mobileTab === tab 
-                ? 'text-gold border-b-2 border-gold' 
-                : 'text-slate-400 hover:text-cream'
+              mobileTab === tab ? 'text-gold border-b-2 border-gold' : 'text-slate-400 hover:text-cream'
             }`}
           >
             {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -652,25 +739,27 @@ export default function CryptoTradingPage() {
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-bold text-cream">{selectedAsset.symbol}</h2>
+                    <h2 className="text-xl font-bold text-cream">{selectedSymbol}</h2>
                     <ChevronDown className="w-4 h-4 text-slate-400" />
                   </div>
                   <p className="text-sm text-slate-400">{selectedAsset.name}</p>
                 </div>
               </button>
+
               <div className="text-right">
                 <p className="text-2xl font-bold text-cream font-mono">
                   ${currentPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </p>
-                <p className={`text-sm ${selectedAsset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  {selectedAsset.change24h >= 0 ? '+' : ''}{selectedAsset.change24h}%
+                <p className={`text-sm ${liveChange >= 0 ? 'text-profit' : 'text-loss'}`}>
+                  {liveChange >= 0 ? '+' : ''}
+                  {Number.isFinite(liveChange) ? liveChange.toFixed(2) : selectedAsset.change24h.toFixed(2)}%
                 </p>
               </div>
             </div>
-            
+
             {/* Price Chart */}
             <div className="h-64 mt-4">
-              <PriceChart asset={selectedAsset} priceHistory={priceHistory} />
+              <PriceChart priceHistory={priceHistory} />
             </div>
           </div>
 
@@ -699,14 +788,13 @@ export default function CryptoTradingPage() {
               <div className="p-3 bg-white/5 rounded-xl">
                 <p className="text-xs text-slate-500 mb-1">Unrealized P&L</p>
                 <p className={`text-lg font-semibold ${totalPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  {totalPnL >= 0 ? '+' : ''}{totalPnL.toFixed(2)}
+                  {totalPnL >= 0 ? '+' : ''}
+                  {totalPnL.toFixed(2)}
                 </p>
               </div>
               <div className="p-3 bg-white/5 rounded-xl">
                 <p className="text-xs text-slate-500 mb-1">Cash Balance</p>
-                <p className="text-lg font-semibold text-cream">
-                  ${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                </p>
+                <p className="text-lg font-semibold text-cream">${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
               </div>
             </div>
 
@@ -719,14 +807,14 @@ export default function CryptoTradingPage() {
               </div>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
-                {positions.map(position => (
+                {positions.map((position) => (
                   <PortfolioCard
                     key={position.id}
                     position={position}
                     prices={prices}
                     onToggleShield={() => toggleShield(position.id)}
                     onSelect={() => {
-                      const asset = cryptoAssets.find(a => a.symbol === position.symbol);
+                      const asset = cryptoAssets.find((a) => a.symbol.toUpperCase() === position.symbol.toUpperCase());
                       if (asset) {
                         setSelectedAsset(asset);
                         setMobileTab('trade');
@@ -748,9 +836,7 @@ export default function CryptoTradingPage() {
                 <Wallet className="w-4 h-4 text-gold" />
                 <span className="text-sm text-slate-400">Available</span>
               </div>
-              <span className="text-lg font-semibold text-cream">
-                ${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-              </span>
+              <span className="text-lg font-semibold text-cream">${balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
             </div>
 
             {/* Buy/Sell Toggle */}
@@ -758,9 +844,7 @@ export default function CryptoTradingPage() {
               <button
                 onClick={() => setOrderType('buy')}
                 className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${
-                  orderType === 'buy' 
-                    ? 'bg-profit text-void' 
-                    : 'bg-white/5 text-slate-400 hover:bg-white/10'
+                  orderType === 'buy' ? 'bg-profit text-void' : 'bg-white/5 text-slate-400 hover:bg-white/10'
                 }`}
               >
                 Buy
@@ -768,9 +852,7 @@ export default function CryptoTradingPage() {
               <button
                 onClick={() => setOrderType('sell')}
                 className={`flex-1 py-3 rounded-xl text-sm font-semibold transition-all ${
-                  orderType === 'sell' 
-                    ? 'bg-loss text-white' 
-                    : 'bg-white/5 text-slate-400 hover:bg-white/10'
+                  orderType === 'sell' ? 'bg-loss text-white' : 'bg-white/5 text-slate-400 hover:bg-white/10'
                 }`}
               >
                 Sell
@@ -781,11 +863,8 @@ export default function CryptoTradingPage() {
             {currentPosition && (
               <div className="mb-4 p-3 bg-white/5 rounded-xl border border-white/10">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-slate-500">Your {selectedAsset.symbol}</span>
-                  <ShieldBadge 
-                    position={currentPosition} 
-                    onToggle={() => toggleShield(currentPosition.id)} 
-                  />
+                  <span className="text-xs text-slate-500">Your {selectedSymbol}</span>
+                  <ShieldBadge position={currentPosition} onToggle={() => toggleShield(currentPosition.id)} />
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-cream">{currentPosition.quantity.toFixed(6)}</span>
@@ -798,25 +877,30 @@ export default function CryptoTradingPage() {
 
             {/* Amount Input */}
             <div className="mb-4">
-              <label className="text-xs text-slate-500 mb-1 block">
-                Amount (USD)
-              </label>
+              <label className="text-xs text-slate-500 mb-1 block">Amount (USD)</label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">$</span>
                 <input
                   type="number"
                   value={amount}
-                  onChange={(e) => { setOrderMode('amount'); setAmount(Number(e.target.value)); }}
+                  onChange={(e) => {
+                    setOrderMode('amount');
+                    setAmount(Number(e.target.value));
+                  }}
                   className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-4 py-3 text-cream text-right font-mono focus:outline-none focus:border-gold/50"
                   placeholder="0.00"
                 />
               </div>
+
               {/* Quick Amounts */}
               <div className="flex gap-2 mt-2">
-                {[25, 50, 100, 250, 500].map(amt => (
+                {[25, 50, 100, 250, 500].map((amt) => (
                   <button
                     key={amt}
-                    onClick={() => { setOrderMode('amount'); setAmount(amt); }}
+                    onClick={() => {
+                      setOrderMode('amount');
+                      setAmount(amt);
+                    }}
                     className="flex-1 py-1.5 text-xs bg-white/5 hover:bg-white/10 text-cream rounded-lg transition-all"
                   >
                     ${amt}
@@ -830,14 +914,12 @@ export default function CryptoTradingPage() {
               <div className="flex justify-between items-center">
                 <span className="text-xs text-slate-500">You {orderType === 'buy' ? 'get' : 'sell'}</span>
                 <span className="text-sm font-mono text-cream">
-                  {quantity.toFixed(6)} {selectedAsset.symbol}
+                  {quantity.toFixed(6)} {selectedSymbol}
                 </span>
               </div>
               <div className="flex justify-between items-center mt-1">
                 <span className="text-xs text-slate-500">Price</span>
-                <span className="text-xs font-mono text-slate-400">
-                  ${currentPrice.toLocaleString()}
-                </span>
+                <span className="text-xs font-mono text-slate-400">${currentPrice.toLocaleString()}</span>
               </div>
             </div>
 
@@ -846,9 +928,7 @@ export default function CryptoTradingPage() {
               onClick={orderType === 'buy' ? handleBuy : handleSell}
               disabled={amount <= 0 || isExecuting}
               className={`w-full py-3.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${
-                orderType === 'buy' 
-                  ? 'bg-profit hover:bg-profit/90 text-void' 
-                  : 'bg-loss hover:bg-loss/90 text-white'
+                orderType === 'buy' ? 'bg-profit hover:bg-profit/90 text-void' : 'bg-loss hover:bg-loss/90 text-white'
               }`}
             >
               {isExecuting ? (
@@ -856,8 +936,10 @@ export default function CryptoTradingPage() {
                   <RefreshCw className="w-4 h-4 animate-spin" />
                   Processing...
                 </>
+              ) : orderType === 'buy' ? (
+                `Buy ${selectedSymbol}`
               ) : (
-                orderType === 'buy' ? `Buy ${selectedAsset.symbol}` : `Sell ${selectedAsset.symbol}`
+                `Sell ${selectedSymbol}`
               )}
             </button>
 
@@ -868,8 +950,8 @@ export default function CryptoTradingPage() {
                 <div>
                   <p className="text-xs text-blue-400 font-medium mb-1">Shield Mode</p>
                   <p className="text-xs text-blue-400/70">
-                    Activate Shield on any holding to lock your portfolio value at the current price. 
-                    The live price continues to move, but your displayed value stays frozen until you deactivate.
+                    Activate Shield on any holding to lock your portfolio value at the current price. The live price continues to move,
+                    but your displayed value stays frozen until you deactivate.
                   </p>
                 </div>
               </div>
@@ -889,6 +971,7 @@ export default function CryptoTradingPage() {
                 </p>
               </div>
             </div>
+
             {positions.length === 0 ? (
               <div className="text-center py-12 text-slate-500">
                 <Wallet className="w-12 h-12 mx-auto mb-3 opacity-30" />
@@ -900,14 +983,14 @@ export default function CryptoTradingPage() {
               </div>
             ) : (
               <div className="space-y-3">
-                {positions.map(position => (
+                {positions.map((position) => (
                   <PortfolioCard
                     key={position.id}
                     position={position}
                     prices={prices}
                     onToggleShield={() => toggleShield(position.id)}
                     onSelect={() => {
-                      const asset = cryptoAssets.find(a => a.symbol === position.symbol);
+                      const asset = cryptoAssets.find((a) => a.symbol.toUpperCase() === position.symbol.toUpperCase());
                       if (asset) {
                         setSelectedAsset(asset);
                         setMobileTab('trade');
@@ -935,7 +1018,7 @@ export default function CryptoTradingPage() {
               initial={{ y: '100%' }}
               animate={{ y: 0 }}
               exit={{ y: '100%' }}
-              onClick={e => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
               className="w-full lg:w-[480px] max-h-[80vh] bg-charcoal rounded-t-3xl lg:rounded-3xl overflow-hidden"
             >
               <div className="p-4 border-b border-white/10">
@@ -951,41 +1034,62 @@ export default function CryptoTradingPage() {
                     type="text"
                     placeholder="Search..."
                     value={searchQuery}
-                    onChange={e => setSearchQuery(e.target.value)}
+                    onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 py-2.5 text-cream text-sm focus:outline-none focus:border-gold/50"
                   />
                 </div>
               </div>
+
               <div className="max-h-[60vh] overflow-y-auto p-2">
-                {filteredAssets.map(asset => (
-                  <button
-                    key={asset.id}
-                    onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
-                    className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${
-                      selectedAsset.id === asset.id ? 'bg-gold/10' : 'hover:bg-white/5'
-                    }`}
-                  >
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold">
-                      {asset.icon}
-                    </div>
-                    <div className="flex-1 text-left">
-                      <p className="font-medium text-cream">{asset.symbol}</p>
-                      <p className="text-xs text-slate-500">{asset.name}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-mono text-cream">${prices[asset.symbol]?.toLocaleString() || asset.price.toLocaleString()}</p>
-                      <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {asset.change24h >= 0 ? '+' : ''}{asset.change24h}%
-                      </p>
-                    </div>
+                {filteredAssets.map((asset) => {
+                  const sym = asset.symbol.toUpperCase();
+                  const p = prices[sym] ?? asset.price;
+                  const c = changes24h[sym] ?? asset.change24h;
+
+                  return (
                     <button
-                      onClick={e => { e.stopPropagation(); toggleFavorite(asset.symbol); }}
-                      className="p-1"
+                      key={asset.id}
+                      onClick={() => {
+                        setSelectedAsset(asset);
+                        setShowAssetSelector(false);
+                      }}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${
+                        selectedAsset.id === asset.id ? 'bg-gold/10' : 'hover:bg-white/5'
+                      }`}
                     >
-                      <Star className={`w-4 h-4 ${favorites.includes(asset.symbol) ? 'text-yellow-500 fill-yellow-500' : 'text-slate-500'}`} />
+                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-orange-500 to-yellow-500 flex items-center justify-center text-white font-bold">
+                        {asset.icon}
+                      </div>
+
+                      <div className="flex-1 text-left">
+                        <p className="font-medium text-cream">{sym}</p>
+                        <p className="text-xs text-slate-500">{asset.name}</p>
+                      </div>
+
+                      <div className="text-right">
+                        <p className="text-sm font-mono text-cream">${p.toLocaleString()}</p>
+                        <p className={`text-xs ${c >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {c >= 0 ? '+' : ''}
+                          {Number.isFinite(c) ? c.toFixed(2) : asset.change24h.toFixed(2)}%
+                        </p>
+                      </div>
+
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(sym);
+                        }}
+                        className="p-1"
+                      >
+                        <Star
+                          className={`w-4 h-4 ${
+                            favorites.includes(sym) ? 'text-yellow-500 fill-yellow-500' : 'text-slate-500'
+                          }`}
+                        />
+                      </button>
                     </button>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             </motion.div>
           </motion.div>
