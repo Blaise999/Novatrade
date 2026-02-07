@@ -5,6 +5,10 @@ import { isSupabaseConfigured } from "@/lib/supabase/client";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+console.log("VERCEL_ENV:", process.env.VERCEL_ENV);
+console.log("HAS OTP_PEPPER:", !!process.env.OTP_PEPPER);
+
+
 const ALLOWED_OTP_TYPES = new Set([
   "email_verification",
   "password_reset",
