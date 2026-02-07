@@ -4,12 +4,12 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { LucideIcon } from 'lucide-react';
 import {
   TrendingUp,
   LayoutDashboard,
   LineChart,
   Wallet,
+  Users,
   Settings,
   Bell,
   Search,
@@ -25,63 +25,54 @@ import {
   Bitcoin,
   DollarSign,
   BarChart3,
-  Bot,
-  Copy, // ✅ fixes "Cannot find name 'Copy'" if you use it anywhere
+  Bot
 } from 'lucide-react';
-
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore, useNotificationStore } from '@/lib/store';
 import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
 import SupportWidget from '@/components/SupportWidget';
 
-// ✅ Strong nav types to stop href becoming string|undefined
-type NavLink = { name: string; href: string; icon: LucideIcon };
-type NavGroup = { name: string; icon: LucideIcon; children: NavLink[] };
-type NavItem = NavLink | NavGroup;
-
-const isGroup = (item: NavItem): item is NavGroup => 'children' in item;
-
 const navigation = [
-  {
-    name: 'Dashboard',
-    href: '/dashboard',
-    icon: LayoutDashboard,
+  { 
+    name: 'Dashboard', 
+    href: '/dashboard', 
+    icon: LayoutDashboard 
   },
-  {
-    name: 'Trade',
+  { 
+    name: 'Trade', 
     icon: LineChart,
     children: [
       { name: 'Cryptocurrency', href: '/dashboard/trade/crypto', icon: Bitcoin },
       { name: 'Forex', href: '/dashboard/trade/fx', icon: DollarSign },
       { name: 'Stocks', href: '/dashboard/trade/stocks', icon: BarChart3 },
-    ],
+    ]
   },
-  {
-    name: 'Trading Bots',
-    href: '/dashboard/bots',
-    icon: Bot,
+  { 
+    name: 'Trading Bots', 
+    href: '/dashboard/bots', 
+    icon: Bot 
   },
-  {
-    name: 'Portfolio',
-    href: '/dashboard/portfolio',
-    icon: BarChart3,
+  { 
+    name: 'Portfolio', 
+    href: '/dashboard/portfolio', 
+    icon: BarChart3 
   },
-  {
-    name: 'Wallet',
-    href: '/dashboard/wallet',
-    icon: Wallet,
+  { 
+    name: 'Wallet', 
+    href: '/dashboard/wallet', 
+    icon: Wallet 
   },
-  {
-    name: 'History',
-    href: '/dashboard/history',
-    icon: History,
+  { 
+    name: 'History', 
+    href: '/dashboard/history', 
+    icon: History 
   },
-] satisfies NavItem[];
+];
 
 const bottomNav = [
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
   { name: 'Help', href: '/dashboard/help', icon: HelpCircle },
-] satisfies NavLink[];
+];
 
 export default function DashboardLayout({
   children,
@@ -90,14 +81,13 @@ export default function DashboardLayout({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
   const { unreadCount } = useNotificationStore();
-
+  
   // 🔥 Initialize all trading accounts with user's balance
   const { balance, isInitialized } = useUnifiedBalance();
-
+  
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -115,7 +105,7 @@ export default function DashboardLayout({
   };
 
   const isActive = (href: string) => pathname === href;
-  const isChildActive = (children: NavLink[]) => children.some((child) => pathname === child.href);
+  const isChildActive = (children: any[]) => children?.some(child => pathname === child.href);
 
   if (isLoading || !user) {
     return (
@@ -128,11 +118,9 @@ export default function DashboardLayout({
   return (
     <div className="min-h-screen bg-void flex">
       {/* Desktop Sidebar */}
-      <aside
-        className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
-          sidebarOpen ? 'w-64' : 'w-20'
-        }`}
-      >
+      <aside className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
+        sidebarOpen ? 'w-64' : 'w-20'
+      }`}>
         {/* Logo */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
           <Link href="/dashboard" className="flex items-center gap-2">
@@ -156,12 +144,10 @@ export default function DashboardLayout({
           <ul className="space-y-1">
             {navigation.map((item) => (
               <li key={item.name}>
-                {isGroup(item) ? (
+                {item.children ? (
                   <div>
                     <button
-                      onClick={() =>
-                        setExpandedMenu(expandedMenu === item.name ? null : item.name)
-                      }
+                      onClick={() => setExpandedMenu(expandedMenu === item.name ? null : item.name)}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
                         isChildActive(item.children)
                           ? 'bg-gold/10 text-gold'
@@ -171,18 +157,14 @@ export default function DashboardLayout({
                       <item.icon className="w-5 h-5 flex-shrink-0" />
                       {sidebarOpen && (
                         <>
-                          <span className="flex-1 text-left text-sm font-medium">
-                            {item.name}
-                          </span>
-                          <ChevronDown
-                            className={`w-4 h-4 transition-transform ${
-                              expandedMenu === item.name ? 'rotate-180' : ''
-                            }`}
-                          />
+                          <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
+                          <ChevronDown className={`w-4 h-4 transition-transform ${
+                            expandedMenu === item.name ? 'rotate-180' : ''
+                          }`} />
                         </>
                       )}
                     </button>
-
+                    
                     <AnimatePresence>
                       {sidebarOpen && expandedMenu === item.name && (
                         <motion.ul
@@ -220,7 +202,9 @@ export default function DashboardLayout({
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
-                    {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
+                    {sidebarOpen && (
+                      <span className="text-sm font-medium">{item.name}</span>
+                    )}
                   </Link>
                 )}
               </li>
@@ -242,7 +226,9 @@ export default function DashboardLayout({
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
-                  {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
+                  {sidebarOpen && (
+                    <span className="text-sm font-medium">{item.name}</span>
+                  )}
                 </Link>
               </li>
             ))}
@@ -253,11 +239,7 @@ export default function DashboardLayout({
             onClick={toggleSidebar}
             className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
           >
-            <ChevronDown
-              className={`w-5 h-5 transition-transform ${
-                sidebarOpen ? 'rotate-90' : '-rotate-90'
-              }`}
-            />
+            <ChevronDown className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
             {sidebarOpen && <span className="text-sm">Collapse</span>}
           </button>
         </div>
@@ -300,12 +282,10 @@ export default function DashboardLayout({
                 <ul className="space-y-1">
                   {navigation.map((item) => (
                     <li key={item.name}>
-                      {isGroup(item) ? (
+                      {item.children ? (
                         <div>
                           <button
-                            onClick={() =>
-                              setExpandedMenu(expandedMenu === item.name ? null : item.name)
-                            }
+                            onClick={() => setExpandedMenu(expandedMenu === item.name ? null : item.name)}
                             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
                               isChildActive(item.children)
                                 ? 'bg-gold/10 text-gold'
@@ -313,16 +293,12 @@ export default function DashboardLayout({
                             }`}
                           >
                             <item.icon className="w-5 h-5" />
-                            <span className="flex-1 text-left text-sm font-medium">
-                              {item.name}
-                            </span>
-                            <ChevronDown
-                              className={`w-4 h-4 transition-transform ${
-                                expandedMenu === item.name ? 'rotate-180' : ''
-                              }`}
-                            />
+                            <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
+                            <ChevronDown className={`w-4 h-4 transition-transform ${
+                              expandedMenu === item.name ? 'rotate-180' : ''
+                            }`} />
                           </button>
-
+                          
                           <AnimatePresence>
                             {expandedMenu === item.name && (
                               <motion.ul
@@ -375,11 +351,9 @@ export default function DashboardLayout({
       </AnimatePresence>
 
       {/* Main Content */}
-      <div
-        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
-          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
-        }`}
-      >
+      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
+        sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
+      }`}>
         {/* Top Header */}
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           {/* Left */}
@@ -390,7 +364,7 @@ export default function DashboardLayout({
             >
               <Menu className="w-6 h-6" />
             </button>
-
+            
             {/* Search */}
             <div className="hidden sm:flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <Search className="w-4 h-4 text-slate-500" />
@@ -399,9 +373,7 @@ export default function DashboardLayout({
                 placeholder="Search assets, traders..."
                 className="bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none w-48 lg:w-64"
               />
-              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">
-                ⌘K
-              </kbd>
+              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">⌘K</kbd>
             </div>
           </div>
 
@@ -411,16 +383,9 @@ export default function DashboardLayout({
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                {isInitialized
-                  ? `$${balance.total.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}`
-                  : '—'}
-                {isInitialized && balance.bonus > 0 && (
-                  <span className="text-profit text-xs ml-1">
-                    +${balance.bonus.toLocaleString()}
-                  </span>
+                ${balance.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {balance.bonus > 0 && (
+                  <span className="text-profit text-xs ml-1">+${balance.bonus.toLocaleString()}</span>
                 )}
               </p>
             </div>
@@ -439,9 +404,7 @@ export default function DashboardLayout({
                 className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
-                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">
-                  Connect Wallet
-                </span>
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
               </Link>
             )}
 
@@ -491,7 +454,7 @@ export default function DashboardLayout({
                   >
                     <div className="p-3 border-b border-white/5">
                       <p className="text-sm font-medium text-cream">
-                        {user.firstName || (user.email ? user.email.split('@')[0] : 'User')}
+                        {user.firstName || user.email.split('@')[0]}
                       </p>
                       <p className="text-xs text-slate-500">{user.email}</p>
                       {user.walletAddress && (
@@ -503,7 +466,6 @@ export default function DashboardLayout({
                         </div>
                       )}
                     </div>
-
                     <div className="py-2">
                       <Link
                         href="/dashboard/settings"
@@ -530,7 +492,6 @@ export default function DashboardLayout({
                         Settings
                       </Link>
                     </div>
-
                     <div className="border-t border-white/5 py-2">
                       <button
                         onClick={handleLogout}
@@ -548,7 +509,9 @@ export default function DashboardLayout({
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 p-4 lg:p-6">{children}</main>
+        <main className="flex-1 p-4 lg:p-6">
+          {children}
+        </main>
       </div>
 
       {/* Support Widget */}

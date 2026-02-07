@@ -102,6 +102,59 @@ async function logActivity(botId: string, action: string, details?: Record<strin
 const FEE_PCT = 0.1; // 0.1 % per side
 
 // ============================================
+// BALANCE INTEGRATION
+// ============================================
+
+/** Deduct amount from user balance (for bot buys) */
+async function deductBalance(userId: string, amount: number): Promise<boolean> {
+  try {
+    const { data: u } = await supabase.from('users').select('balance_available').eq('id', userId).maybeSingle();
+    if (!u) return false;
+    const current = Number(u.balance_available ?? 0);
+    if (current < amount) return false; // insufficient funds
+    await supabase.from('users').update({ balance_available: +(current - amount).toFixed(2) }).eq('id', userId);
+    return true;
+  } catch { return false; }
+}
+
+/** Credit amount to user balance (for bot sells / profit) */
+async function creditBalance(userId: string, amount: number): Promise<void> {
+  try {
+    const { data: u } = await supabase.from('users').select('balance_available').eq('id', userId).maybeSingle();
+    if (!u) return;
+    const current = Number(u.balance_available ?? 0);
+    await supabase.from('users').update({ balance_available: +(current + amount).toFixed(2) }).eq('id', userId);
+  } catch {}
+}
+
+/** Insert a record into the trades table for trade history */
+async function insertTradeHistory(params: {
+  userId: string; pair: string; side: 'buy' | 'sell'; role: string;
+  amount: number; price: number; pnl: number; botName: string;
+}): Promise<void> {
+  try {
+    await supabase.from('trades').insert({
+      user_id: params.userId,
+      pair: params.pair,
+      market_type: 'crypto',
+      type: 'bot',
+      side: params.side === 'buy' ? 'up' : 'down',
+      amount: Math.abs(params.amount),
+      entry_price: params.price,
+      exit_price: params.price,
+      leverage: 1,
+      pnl: params.pnl,
+      pnl_percentage: params.amount > 0 ? (params.pnl / params.amount) * 100 : 0,
+      fees: Math.abs(params.amount) * (FEE_PCT / 100),
+      status: 'closed',
+      close_reason: `${params.role} (${params.botName})`,
+      created_at: new Date().toISOString(),
+      closed_at: new Date().toISOString(),
+    });
+  } catch {}
+}
+
+// ============================================
 // ZUSTAND STORE
 // ============================================
 
@@ -427,6 +480,10 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
             quantity: newBaseBought, price, total: sellTotal, fee, status: 'filled',
           });
 
+          // Credit proceeds back to user balance
+          await creditBalance(bot.user_id, net);
+          await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'sell', role: 'DCA Take Profit (Trailing)', amount: net, price, pnl, botName: bot.name });
+
           newTotalPnl += pnl;
           newTrades += 1;
           invested -= newQuoteSpent;
@@ -445,6 +502,9 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
           side: 'sell', role: 'dca_take_profit',
           quantity: newBaseBought, price, total: sellTotal, fee, status: 'filled',
         });
+
+        await creditBalance(bot.user_id, net);
+        await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'sell', role: 'DCA Take Profit', amount: net, price, pnl, botName: bot.name });
 
         newTotalPnl += pnl;
         newTrades += 1;
@@ -468,6 +528,9 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
         quantity: newBaseBought, price, total: sellTotal, fee, status: 'filled',
       });
 
+      await creditBalance(bot.user_id, net);
+      await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'sell', role: 'DCA Stop Loss', amount: net, price, pnl, botName: bot.name });
+
       newTotalPnl += pnl;
       newTrades += 1;
       invested -= newQuoteSpent;
@@ -485,19 +548,24 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
         const soSize = calculateSafetyOrderSize(cfg.safety_order_size, cfg.safety_order_volume_scale, newSafetyCount);
         const qty = soSize / price;
         const fee = soSize * (FEE_PCT / 100);
+        const totalCost = soSize + fee;
 
-        await dbInsert('bot_orders', {
-          bot_id: botId, user_id: bot.user_id, pair: bot.pair,
-          side: 'buy', role: 'dca_safety',
-          quantity: qty, price, total: soSize, fee, status: 'filled', safety_level: newSafetyCount + 1,
-        });
+        const canAfford = await deductBalance(bot.user_id, totalCost);
+        if (canAfford) {
+          await dbInsert('bot_orders', {
+            bot_id: botId, user_id: bot.user_id, pair: bot.pair,
+            side: 'buy', role: 'dca_safety',
+            quantity: qty, price, total: soSize, fee, status: 'filled', safety_level: newSafetyCount + 1,
+          });
+          await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'buy', role: 'DCA Safety Order', amount: totalCost, price, pnl: 0, botName: bot.name });
 
-        newBaseBought += qty;
-        newQuoteSpent += soSize + fee;
-        invested += soSize + fee;
-        newSafetyCount += 1;
-        newTrades += 1;
-        await logActivity(botId, 'safety_order', { level: newSafetyCount, price, size: soSize });
+          newBaseBought += qty;
+          newQuoteSpent += totalCost;
+          invested += totalCost;
+          newSafetyCount += 1;
+          newTrades += 1;
+          await logActivity(botId, 'safety_order', { level: newSafetyCount, price, size: soSize });
+        }
       }
     }
 
@@ -510,17 +578,23 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
       const amt = cfg.order_amount;
       const qty = amt / price;
       const fee = amt * (FEE_PCT / 100);
+      const totalCost = amt + fee;
 
-      await dbInsert('bot_orders', {
-        bot_id: botId, user_id: bot.user_id, pair: bot.pair,
-        side: 'buy', role: 'dca_base',
-        quantity: qty, price, total: amt, fee, status: 'filled',
-      });
+      // Deduct from user balance
+      const canAfford = await deductBalance(bot.user_id, totalCost);
+      if (canAfford) {
+        await dbInsert('bot_orders', {
+          bot_id: botId, user_id: bot.user_id, pair: bot.pair,
+          side: 'buy', role: 'dca_base',
+          quantity: qty, price, total: amt, fee, status: 'filled',
+        });
+        await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'buy', role: 'DCA Buy', amount: totalCost, price, pnl: 0, botName: bot.name });
 
-      newBaseBought += qty;
-      newQuoteSpent += amt + fee;
-      invested += amt + fee;
-      newTrades += 1;
+        newBaseBought += qty;
+        newQuoteSpent += totalCost;
+        invested += totalCost;
+        newTrades += 1;
+      }
     }
 
     // ---- Persist ----
@@ -595,32 +669,38 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
       if (!lv.buy_filled && price <= lv.price) {
         const qty = cfg.per_grid_amount / lv.price;
         const fee = cfg.per_grid_amount * (FEE_PCT / 100);
+        const totalCost = cfg.per_grid_amount + fee;
 
-        const order = await dbInsert<BotOrder>('bot_orders', {
-          bot_id: botId, user_id: bot.user_id, pair: bot.pair,
-          side: 'buy', role: 'grid_buy',
-          quantity: qty, price: lv.price, total: cfg.per_grid_amount, fee, status: 'filled',
-          grid_level: lv.level_index,
-        });
+        const canAfford = await deductBalance(bot.user_id, totalCost);
+        if (canAfford) {
+          const order = await dbInsert<BotOrder>('bot_orders', {
+            bot_id: botId, user_id: bot.user_id, pair: bot.pair,
+            side: 'buy', role: 'grid_buy',
+            quantity: qty, price: lv.price, total: cfg.per_grid_amount, fee, status: 'filled',
+            grid_level: lv.level_index,
+          });
+          await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'buy', role: 'Grid Buy', amount: totalCost, price: lv.price, pnl: 0, botName: bot.name });
 
-        lv.buy_filled = true;
-        lv.sell_filled = false; // reset sell for cycling
-        lv.buy_order_id = order?.id;
-        totalBaseHeld += qty;
-        invested += cfg.per_grid_amount + fee;
-        totalTrades += 1;
+          lv.buy_filled = true;
+          lv.sell_filled = false;
+          lv.buy_order_id = order?.id;
+          totalBaseHeld += qty;
+          invested += totalCost;
+          totalTrades += 1;
 
-        await dbUpsertGridLevel({ id: lv.id, buy_filled: true, sell_filled: false, buy_order_id: order?.id });
-        await logActivity(botId, 'grid_buy', { level: lv.level_index, price: lv.price, qty });
+          await dbUpsertGridLevel({ id: lv.id, buy_filled: true, sell_filled: false, buy_order_id: order?.id });
+          await logActivity(botId, 'grid_buy', { level: lv.level_index, price: lv.price, qty });
+        }
       }
 
       // SELL: price crossed above next level and buy was filled
       if (lv.buy_filled && !lv.sell_filled && i < levels.length - 1) {
         const sellLevel = levels[i + 1];
         if (price >= sellLevel.price) {
-          const qty = cfg.per_grid_amount / lv.price; // sell what was bought
+          const qty = cfg.per_grid_amount / lv.price;
           const sellTotal = qty * sellLevel.price;
           const fee = sellTotal * (FEE_PCT / 100);
+          const net = sellTotal - fee;
           const cyclePnl = calculateGridProfitPerCycle(lv.price, sellLevel.price, qty, FEE_PCT);
 
           const order = await dbInsert<BotOrder>('bot_orders', {
@@ -630,8 +710,12 @@ export const useBotEngine = create<BotEngineState>((set, get) => ({
             grid_level: lv.level_index,
           });
 
+          // Credit sell proceeds to user balance
+          await creditBalance(bot.user_id, net);
+          await insertTradeHistory({ userId: bot.user_id, pair: bot.pair, side: 'sell', role: 'Grid Sell', amount: net, price: sellLevel.price, pnl: cyclePnl, botName: bot.name });
+
           lv.sell_filled = true;
-          lv.buy_filled = false; // reset buy for next cycle
+          lv.buy_filled = false;
           lv.sell_order_id = order?.id;
           totalBaseHeld -= qty;
           gridProfit += cyclePnl;
