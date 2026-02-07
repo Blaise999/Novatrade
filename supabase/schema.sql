@@ -390,7 +390,6 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
-
 CREATE TRIGGER users_updated_at
     BEFORE UPDATE ON public.users
     FOR EACH ROW
