@@ -1,49 +1,77 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
+import type { LucideIcon } from 'lucide-react';
 import { TrendingUp, Shield, Zap, Award, BarChart3 } from 'lucide-react';
 
-export default function AuthLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+type Feature = {
+  icon: LucideIcon;
+  title: string;
+  subtitle: string;
+  gradient: string;
+};
+
+const FEATURES: Feature[] = [
+  {
+    icon: Shield,
+    title: 'Bank-Grade Security',
+    subtitle: '$500M Insurance',
+    gradient: 'from-gold/20 to-gold/5',
+  },
+  {
+    icon: Zap,
+    title: 'Lightning Fast',
+    subtitle: '0.001s Execution',
+    gradient: 'from-emerald-500/20 to-emerald-500/5',
+  },
+  {
+    icon: Award,
+    title: 'Award Winning',
+    subtitle: '5 Industry Awards',
+    gradient: 'from-blue-500/20 to-blue-500/5',
+  },
+  {
+    icon: BarChart3,
+    title: '200+ Assets',
+    subtitle: 'Global Markets',
+    gradient: 'from-purple-500/20 to-purple-500/5',
+  },
+];
+
+const TRUSTED_BY = ['Forbes', 'Bloomberg', 'Reuters', 'CNBC'] as const;
+
+export default function AuthLayout({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen bg-[#050508] flex">
       {/* Left Side - Branding Panel */}
       <div className="hidden lg:flex lg:w-1/2 xl:w-[55%] relative overflow-hidden">
         {/* Background */}
         <div className="absolute inset-0 bg-gradient-to-br from-[#0a0a12] via-[#080810] to-[#050508]" />
-        
+
         {/* Animated gradient orbs */}
         <motion.div
+          initial={false}
           className="absolute top-1/4 -left-32 w-[500px] h-[500px] bg-gold/15 rounded-full blur-[150px]"
-          animate={{
-            scale: [1, 1.1, 1],
-            opacity: [0.4, 0.6, 0.4],
-          }}
+          animate={{ scale: [1, 1.1, 1], opacity: [0.4, 0.6, 0.4] }}
           transition={{ duration: 10, repeat: Infinity, ease: 'easeInOut' }}
         />
         <motion.div
+          initial={false}
           className="absolute bottom-1/4 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[120px]"
-          animate={{
-            scale: [1.1, 1, 1.1],
-            opacity: [0.3, 0.5, 0.3],
-          }}
+          animate={{ scale: [1.1, 1, 1.1], opacity: [0.3, 0.5, 0.3] }}
           transition={{ duration: 12, repeat: Infinity, ease: 'easeInOut' }}
         />
         <motion.div
+          initial={false}
           className="absolute top-3/4 left-1/2 w-[300px] h-[300px] bg-blue-500/10 rounded-full blur-[100px]"
-          animate={{
-            x: ['-50%', '-40%', '-50%'],
-            opacity: [0.2, 0.4, 0.2],
-          }}
+          animate={{ x: ['-50%', '-40%', '-50%'], opacity: [0.2, 0.4, 0.2] }}
           transition={{ duration: 15, repeat: Infinity, ease: 'easeInOut' }}
         />
 
         {/* Grid pattern */}
-        <div 
+        <div
           className="absolute inset-0 opacity-[0.03]"
           style={{
             backgroundImage: `
@@ -81,8 +109,8 @@ export default function AuthLayout({
                 </span>
               </h1>
               <p className="mt-6 text-lg text-slate-400 leading-relaxed">
-                Join over 2.8 million traders worldwide. Access global markets with 
-                institutional-grade tools and zero commission on crypto.
+                Join over 2.8 million traders worldwide. Access global markets with institutional-grade tools and zero
+                commission on crypto.
               </p>
             </motion.div>
 
@@ -93,46 +121,23 @@ export default function AuthLayout({
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
             >
-              {[
-                { 
-                  icon: Shield, 
-                  title: 'Bank-Grade Security', 
-                  subtitle: '$500M Insurance',
-                  gradient: 'from-gold/20 to-gold/5'
-                },
-                { 
-                  icon: Zap, 
-                  title: 'Lightning Fast', 
-                  subtitle: '0.001s Execution',
-                  gradient: 'from-emerald-500/20 to-emerald-500/5'
-                },
-                { 
-                  icon: Award, 
-                  title: 'Award Winning', 
-                  subtitle: '5 Industry Awards',
-                  gradient: 'from-blue-500/20 to-blue-500/5'
-                },
-                { 
-                  icon: BarChart3, 
-                  title: '200+ Assets', 
-                  subtitle: 'Global Markets',
-                  gradient: 'from-purple-500/20 to-purple-500/5'
-                },
-              ].map((feature, i) => (
+              {FEATURES.map((feature, i) => (
                 <motion.div
-                  key={i}
+                  key={feature.title}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.3 + i * 0.1 }}
                   className="group"
                 >
-                  <div className={`
-                    flex items-center gap-3 p-4 rounded-xl 
-                    bg-gradient-to-br ${feature.gradient}
-                    border border-white/[0.05]
-                    hover:border-white/[0.1] transition-all
-                    backdrop-blur-sm
-                  `}>
+                  <div
+                    className={`
+                      flex items-center gap-3 p-4 rounded-xl
+                      bg-gradient-to-br ${feature.gradient}
+                      border border-white/[0.05]
+                      hover:border-white/[0.1] transition-all
+                      backdrop-blur-sm
+                    `}
+                  >
                     <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center">
                       <feature.icon className="w-5 h-5 text-gold" />
                     </div>
@@ -155,9 +160,9 @@ export default function AuthLayout({
           >
             <p className="text-xs text-slate-600 uppercase tracking-wider font-medium">Trusted by</p>
             <div className="flex items-center gap-8">
-              {['Forbes', 'Bloomberg', 'Reuters', 'CNBC'].map((brand) => (
-                <span 
-                  key={brand} 
+              {TRUSTED_BY.map((brand) => (
+                <span
+                  key={brand}
                   className="text-sm font-medium text-slate-600 hover:text-slate-400 transition-colors cursor-default"
                 >
                   {brand}
@@ -188,9 +193,7 @@ export default function AuthLayout({
         </div>
 
         {/* Form Container */}
-        <div className="w-full max-w-md relative z-10">
-          {children}
-        </div>
+        <div className="w-full max-w-md relative z-10">{children}</div>
       </div>
     </div>
   );
