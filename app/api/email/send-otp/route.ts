@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendOTPEmail, isEmailConfigured } from "@/lib/email";
 import { isSupabaseConfigured } from "@/lib/supabase/client";
-
 const ALLOWED_OTP_TYPES = new Set([
   "email_verification",
   "password_reset",
