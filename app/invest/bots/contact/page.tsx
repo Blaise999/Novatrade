@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
   Clock, Settings, ArrowLeft, Send, CheckCircle, AlertTriangle,
-  BarChart3, Target, Grid3X3, MessageSquare, Loader2,
+  BarChart3, Target, Grid3X3, MessageSquare, Loader2, Phone, Mail, Check,
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
@@ -245,10 +245,50 @@ function ContactPageInner() {
                 </motion.div>
               ) : (
                 <>
+                  {/* Personal Contact Card */}
+                  <div className="flex flex-col sm:flex-row items-center gap-5 mb-8 p-5 bg-gradient-to-r from-electric/10 to-gold/5 rounded-xl border border-electric/20">
+                    <div className="relative flex-shrink-0">
+                      <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-slate-700 to-slate-800 overflow-hidden flex items-center justify-center border-2 border-electric/30">
+                        {/* Professional male avatar */}
+                        <svg viewBox="0 0 80 80" className="w-20 h-20">
+                          <rect width="80" height="80" fill="#1e293b"/>
+                          <circle cx="40" cy="28" r="14" fill="#94a3b8"/>
+                          <ellipse cx="40" cy="68" rx="22" ry="18" fill="#475569"/>
+                          <circle cx="40" cy="28" r="12" fill="#cbd5e1"/>
+                          <circle cx="40" cy="25" r="10" fill="#e2e8f0"/>
+                          <path d="M28 22 Q40 14 52 22 Q52 18 40 16 Q28 18 28 22Z" fill="#334155"/>
+                          <circle cx="36" cy="24" r="1.5" fill="#1e293b"/>
+                          <circle cx="44" cy="24" r="1.5" fill="#1e293b"/>
+                          <path d="M37 29 Q40 31 43 29" stroke="#64748b" strokeWidth="1" fill="none"/>
+                          <rect x="32" y="40" width="16" height="20" rx="2" fill="#1e40af"/>
+                          <path d="M38 40 L40 48 L42 40Z" fill="#f5f0e5"/>
+                        </svg>
+                      </div>
+                      <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-profit rounded-full border-2 border-[#0a0b0d] flex items-center justify-center">
+                        <Check className="w-3 h-3 text-white" />
+                      </div>
+                    </div>
+                    <div className="text-center sm:text-left">
+                      <h3 className="text-lg font-bold text-cream">James Mitchell</h3>
+                      <p className="text-sm text-electric font-medium">Senior Trading Strategist</p>
+                      <p className="text-xs text-cream/50 mt-1">8+ years algorithmic trading • Former Goldman Sachs</p>
+                      <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-3">
+                        <a href="tel:+12127658431" className="inline-flex items-center gap-1.5 text-sm text-cream/70 hover:text-cream transition-colors">
+                          <Phone className="w-3.5 h-3.5 text-profit" />
+                          +1 (212) 765-8431
+                        </a>
+                        <a href="mailto:j.mitchell@novatrade.io" className="inline-flex items-center gap-1.5 text-sm text-cream/70 hover:text-cream transition-colors">
+                          <Mail className="w-3.5 h-3.5 text-electric" />
+                          j.mitchell@novatrade.io
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+
                   <h2 className="text-xl font-bold text-cream mb-2 flex items-center gap-2">
-                    <MessageSquare className="w-5 h-5 text-electric" /> Get Started — Talk to Our Team
+                    <MessageSquare className="w-5 h-5 text-electric" /> Get Started — Talk to James
                   </h2>
-                  <p className="text-sm text-cream/50 mb-6">Tell us your goals. We'll help configure the right parameters for you.</p>
+                  <p className="text-sm text-cream/50 mb-6">Tell us your goals. James will personally help configure the right bot parameters for you.</p>
 
                   <form onSubmit={handleSubmit} className="space-y-4">
                     <div className="grid sm:grid-cols-2 gap-4">

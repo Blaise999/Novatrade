@@ -1,7 +1,5 @@
 'use client';
 
-import { useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
@@ -26,54 +24,9 @@ import { useStore } from '@/lib/supabase/store-supabase';
 
 const bots = [
   {
-    id: 'conservative',
-    name: 'Safe Trader',
-    description: 'Low-risk bot focusing on stable, consistent returns',
-    monthlyReturn: '5-8%',
-    riskLevel: 'Low',
-    winRate: 78,
-    trades: 45,
-    minCapital: 100,
-    status: 'active',
-    icon: Shield,
-    color: 'from-blue-500 to-blue-600',
-    features: ['Stop-loss protection', 'Conservative positions', 'Blue-chip assets only'],
-    free: true,
-  },
-  {
-    id: 'balanced',
-    name: 'Smart Scalper',
-    description: 'Balanced approach with moderate risk and good returns',
-    monthlyReturn: '12-18%',
-    riskLevel: 'Medium',
-    winRate: 72,
-    trades: 120,
-    minCapital: 500,
-    status: 'active',
-    icon: BarChart3,
-    color: 'from-profit to-emerald-600',
-    features: ['AI-powered analysis', 'Multi-timeframe', 'News sentiment'],
-    free: false,
-  },
-  {
-    id: 'aggressive',
-    name: 'Alpha Hunter',
-    description: 'High-frequency trading for maximum profit potential',
-    monthlyReturn: '25-40%',
-    riskLevel: 'High',
-    winRate: 65,
-    trades: 300,
-    minCapital: 1000,
-    status: 'active',
-    icon: Zap,
-    color: 'from-gold to-yellow-600',
-    features: ['High-frequency trades', 'Leverage trading', 'All market conditions'],
-    free: false,
-  },
-  {
     id: 'dca',
     name: 'DCA Master',
-    description: 'Dollar-cost averaging with safety orders for systematic long-term accumulation',
+    description: 'Dollar-cost averaging with intelligent safety orders for systematic long-term accumulation',
     monthlyReturn: 'Varies',
     riskLevel: 'Low',
     winRate: 85,
@@ -82,30 +35,12 @@ const bots = [
     status: 'active',
     icon: Clock,
     color: 'from-purple-500 to-pink-600',
-    features: ['Scheduled auto-buys', 'Safety orders (dip-buying)', 'Trailing take profit', 'Custom frequency & sizing'],
-    free: false,
-    contactRequired: true,
-  },
-  {
-    id: 'arbitrage',
-    name: 'Arbitrage Pro',
-    description: 'Exploits price differences across exchanges',
-    monthlyReturn: '15-25%',
-    riskLevel: 'Medium',
-    winRate: 92,
-    trades: 500,
-    minCapital: 5000,
-    status: 'active',
-    icon: Activity,
-    color: 'from-electric to-cyan-600',
-    features: ['Cross-exchange', 'Lightning fast', 'Zero market risk'],
-    free: false,
-    premium: true,
+    features: ['Scheduled auto-buys at any interval', 'Safety orders (automatic dip-buying)', 'Trailing take profit', 'Custom frequency & sizing', 'Auto stop-loss protection'],
   },
   {
     id: 'grid',
     name: 'Grid Warrior',
-    description: 'Automated buy-low sell-high grid strategy — profits from price oscillation',
+    description: 'Automated buy-low sell-high grid strategy — profits from price oscillation in any range',
     monthlyReturn: 'Varies',
     riskLevel: 'Medium',
     winRate: 70,
@@ -114,39 +49,24 @@ const bots = [
     status: 'active',
     icon: Settings,
     color: 'from-orange-500 to-red-600',
-    features: ['Arithmetic & Geometric grids', 'Long/Short/Neutral strategy', 'Auto order cycling', 'Custom grid count & range'],
-    free: false,
-    contactRequired: true,
+    features: ['Arithmetic & Geometric grids', 'Long / Short / Neutral modes', 'Auto buy-sell cycling', 'Custom grid count & price range', 'Works 24/7 in sideways markets'],
   },
 ];
 
 const stats = [
-  { label: 'Total Bot Users', value: '28,000+' },
-  { label: 'Profits Generated', value: '$45M+' },
-  { label: 'Avg. Monthly Return', value: '18%' },
-  { label: 'Uptime', value: '99.99%' },
+  { label: 'Active Bot Users', value: '12,000+' },
+  { label: 'Total Profit Generated', value: '$18M+' },
+  { label: 'Bot Uptime', value: '99.99%' },
+  { label: 'Avg Win Rate', value: '77%' },
 ];
 
 export default function BotsPage() {
   const { isAuthenticated } = useStore();
   const router = useRouter();
-  const [selectedRisk, setSelectedRisk] = useState<string | null>(null);
 
-  const handleActivateBot = (botId: string) => {
-    if (botId === 'dca' || botId === 'grid') {
-      router.push(`/invest/bots/contact?bot=${botId}`);
-      return;
-    }
-    if (isAuthenticated) {
-      router.push(`/dashboard/wallet?bot=${botId}`);
-    } else {
-      router.push(`/auth/signup?redirect=/dashboard/wallet&bot=${botId}`);
-    }
+  const handleLearnMore = (botId: string) => {
+    router.push(`/invest/bots/contact?bot=${botId}`);
   };
-
-  const filteredBots = selectedRisk
-    ? bots.filter(b => b.riskLevel === selectedRisk)
-    : bots;
 
   return (
     <div className="min-h-screen bg-void">
@@ -167,13 +87,13 @@ export default function BotsPage() {
               <span className="gradient-text-gold">Trade While You Sleep</span>
             </h1>
             <p className="text-lg text-cream/60 max-w-2xl mx-auto">
-              Let our AI-powered trading bots work for you 24/7. Choose from multiple strategies 
-              designed for different risk levels and profit goals.
+              Two proven strategies designed to grow your portfolio automatically. 
+              Choose the bot that fits your trading style and let it work 24/7.
             </p>
           </div>
 
           {/* Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-16">
             {stats.map((stat, index) => (
               <motion.div
                 key={index}
@@ -188,91 +108,53 @@ export default function BotsPage() {
             ))}
           </div>
 
-          {/* Risk Filter */}
-          <div className="flex flex-wrap items-center justify-center gap-2 mb-12">
-            <button
-              onClick={() => setSelectedRisk(null)}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                selectedRisk === null
-                  ? 'bg-gold text-void'
-                  : 'bg-white/5 text-cream/70 hover:bg-white/10'
-              }`}
-            >
-              All Bots
-            </button>
-            {['Low', 'Medium', 'High'].map((risk) => (
-              <button
-                key={risk}
-                onClick={() => setSelectedRisk(risk)}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                  selectedRisk === risk
-                    ? 'bg-gold text-void'
-                    : 'bg-white/5 text-cream/70 hover:bg-white/10'
-                }`}
-              >
-                {risk} Risk
-              </button>
-            ))}
-          </div>
-
-          {/* Bots Grid */}
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
-            {filteredBots.map((bot, index) => (
+          {/* Bots Grid — 2 cards side by side */}
+          <div className="grid md:grid-cols-2 gap-8 mb-16 max-w-4xl mx-auto">
+            {bots.map((bot, index) => (
               <motion.div
                 key={bot.id}
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-                className={`relative p-6 rounded-2xl border ${
-                  bot.premium 
-                    ? 'bg-gradient-to-b from-gold/10 to-transparent border-gold/30' 
-                    : 'bg-white/5 border-white/10'
-                } hover:border-white/20 transition-all`}
+                transition={{ delay: index * 0.15 }}
+                className="relative p-7 rounded-2xl border bg-white/5 border-white/10 hover:border-white/20 transition-all"
               >
-                {bot.premium && (
-                  <div className="absolute -top-3 right-4 px-3 py-1 bg-gold text-void text-xs font-bold rounded-full">
-                    VIP ONLY
-                  </div>
-                )}
-
-                <div className="flex items-start justify-between mb-4">
-                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${bot.color} flex items-center justify-center`}>
-                    <bot.icon className="w-6 h-6 text-white" />
+                <div className="flex items-start justify-between mb-5">
+                  <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${bot.color} flex items-center justify-center`}>
+                    <bot.icon className="w-7 h-7 text-white" />
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${bot.status === 'active' ? 'bg-profit' : 'bg-slate-500'}`} />
-                    <span className="text-xs text-cream/50 capitalize">{bot.status}</span>
+                    <span className="w-2 h-2 rounded-full bg-profit" />
+                    <span className="text-xs text-cream/50">Active</span>
                   </div>
                 </div>
 
-                <h3 className="text-xl font-bold text-cream mb-1">{bot.name}</h3>
-                <p className="text-sm text-cream/60 mb-4">{bot.description}</p>
+                <h3 className="text-2xl font-bold text-cream mb-2">{bot.name}</h3>
+                <p className="text-sm text-cream/60 mb-5">{bot.description}</p>
 
                 {/* Performance Stats */}
-                <div className="grid grid-cols-2 gap-3 mb-4">
-                  <div className="p-2 bg-white/5 rounded-lg">
-                    <p className="text-xs text-cream/50">Monthly Return</p>
-                    <p className="text-profit font-bold">{bot.monthlyReturn}</p>
-                  </div>
-                  <div className="p-2 bg-white/5 rounded-lg">
+                <div className="grid grid-cols-2 gap-3 mb-5">
+                  <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-cream/50">Win Rate</p>
-                    <p className="text-cream font-bold">{bot.winRate}%</p>
+                    <p className="text-cream font-bold text-lg">{bot.winRate}%</p>
                   </div>
-                  <div className="p-2 bg-white/5 rounded-lg">
+                  <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-cream/50">Risk Level</p>
-                    <p className={`font-bold ${
-                      bot.riskLevel === 'Low' ? 'text-profit' : 
-                      bot.riskLevel === 'Medium' ? 'text-gold' : 'text-loss'
+                    <p className={`font-bold text-lg ${
+                      bot.riskLevel === 'Low' ? 'text-profit' : 'text-gold'
                     }`}>{bot.riskLevel}</p>
                   </div>
-                  <div className="p-2 bg-white/5 rounded-lg">
+                  <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-cream/50">Min Capital</p>
-                    <p className="text-cream font-bold">${bot.minCapital}</p>
+                    <p className="text-cream font-bold text-lg">${bot.minCapital}</p>
+                  </div>
+                  <div className="p-3 bg-white/5 rounded-xl">
+                    <p className="text-xs text-cream/50">Monthly Return</p>
+                    <p className="text-gold font-bold text-lg">{bot.monthlyReturn}</p>
                   </div>
                 </div>
 
                 {/* Features */}
-                <ul className="space-y-2 mb-6">
+                <ul className="space-y-2.5 mb-7">
                   {bot.features.map((feature, i) => (
                     <li key={i} className="flex items-center gap-2 text-sm">
                       <CheckCircle className="w-4 h-4 text-profit flex-shrink-0" />
@@ -282,26 +164,15 @@ export default function BotsPage() {
                 </ul>
 
                 <button
-                  onClick={() => handleActivateBot(bot.id)}
-                  className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
-                    bot.contactRequired
-                      ? 'bg-electric text-white hover:bg-electric/90'
-                      : bot.free
-                        ? 'bg-profit text-void hover:bg-profit/90'
-                        : 'bg-gold text-void hover:bg-gold/90'
+                  onClick={() => handleLearnMore(bot.id)}
+                  className={`w-full flex items-center justify-center gap-2 py-3.5 rounded-xl font-semibold transition-all ${
+                    bot.id === 'dca'
+                      ? 'bg-gradient-to-r from-purple-500 to-pink-600 text-white hover:opacity-90'
+                      : 'bg-gradient-to-r from-orange-500 to-red-600 text-white hover:opacity-90'
                   }`}
                 >
-                  {bot.contactRequired ? (
-                    <>
-                      <ArrowRight className="w-4 h-4" />
-                      Learn More & Contact Us
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4" />
-                      Activate Bot
-                    </>
-                  )}
+                  <ArrowRight className="w-4 h-4" />
+                  Learn More & Get Started
                 </button>
               </motion.div>
             ))}
