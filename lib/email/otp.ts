@@ -1,6 +1,8 @@
 // OTP Service for NOVATrADE (Supabase/Postgres-backed)
 // Handles generation, storage, and verification of OTPs reliably on Vercel/serverless
 
+import "server-only";
+
 import crypto from "crypto";
 import { createServerClient } from "@/lib/supabase/client";
 

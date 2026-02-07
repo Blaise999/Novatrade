@@ -1,6 +1,9 @@
 // Main Email Service for NOVATrADE
 // Combines Resend client with templates
 
+import "server-only";
+
+
 import { resend, emailConfig, isEmailConfigured } from "./config";
 import {
   otpEmailTemplate,
@@ -147,7 +150,7 @@ export async function sendPasswordResetEmail(
   resetToken: string
 ): Promise<EmailResponse> {
   const resetLink = `${
-    process.env.NEXT_PUBLIC_APP_URL || "https://novatrade.com"
+    process.env.NEXT_PUBLIC_APP_URL || "https://novaatrade.com"
   }/auth/reset-password?token=${resetToken}`;
 
   const html = passwordResetEmailTemplate({ name, resetLink, expiryMinutes: 30 });
