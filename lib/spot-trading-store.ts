@@ -68,6 +68,72 @@ async function syncCryptoBalanceToSupabase(
 }
 
 // ==========================================
+// SUPABASE PORTFOLIO PERSISTENCE
+// Syncs positions/trades to DB so they survive cross-device logins
+// ==========================================
+
+async function savePortfolioToSupabase(userId: string, state: {
+  account: SpotAccount | null;
+  positions: SpotPosition[];
+  tradeHistory: SpotTrade[];
+}): Promise<void> {
+  if (!isSupabaseConfigured() || !userId) return;
+  try {
+    const payload = {
+      account: state.account,
+      positions: state.positions,
+      tradeHistory: (state.tradeHistory || []).slice(0, 200),
+    };
+    await supabase
+      .from('user_trading_data')
+      .upsert({
+        user_id: userId,
+        spot_crypto_state: payload,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id' });
+  } catch (err) {
+    console.warn('[CryptoTrading] Portfolio save failed (table may not exist yet):', err);
+  }
+}
+
+async function loadPortfolioFromSupabase(userId: string): Promise<{
+  account: SpotAccount | null;
+  positions: SpotPosition[];
+  tradeHistory: SpotTrade[];
+} | null> {
+  if (!isSupabaseConfigured() || !userId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('user_trading_data')
+      .select('spot_crypto_state')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error || !data?.spot_crypto_state) return null;
+    const s = data.spot_crypto_state as any;
+    // Rehydrate dates
+    const positions = (s.positions || []).map((p: any) => ({
+      ...p,
+      createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
+      updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
+      shieldActivatedAt: p.shieldActivatedAt ? new Date(p.shieldActivatedAt) : null,
+    }));
+    const tradeHistory = (s.tradeHistory || []).map((t: any) => ({
+      ...t,
+      executedAt: t.executedAt ? new Date(t.executedAt) : new Date(),
+    }));
+    const account = s.account ? {
+      ...s.account,
+      createdAt: s.account.createdAt ? new Date(s.account.createdAt) : new Date(),
+      updatedAt: s.account.updatedAt ? new Date(s.account.updatedAt) : new Date(),
+    } : null;
+    return { account, positions, tradeHistory };
+  } catch (err) {
+    console.warn('[CryptoTrading] Portfolio load failed:', err);
+    return null;
+  }
+}
+
+// ==========================================
 // SPOT TRADING STORE
 // Implements Spot Asset Model with Shield Mode
 // ==========================================
@@ -84,11 +150,15 @@ interface SpotTradingState {
   
   // Real-time prices (from WebSocket)
   prices: Record<string, number>;
+
+  // Loading state for Supabase hydration
+  _hydrated: boolean;
   
   // ==========================================
   // ACCOUNT ACTIONS
   // ==========================================
   initializeAccount: (userId: string, initialCash?: number) => void;
+  loadFromSupabase: (userId: string, fallbackCash?: number) => Promise<void>;
   syncCashFromUser: (cash: number) => void;
   
   // ==========================================
@@ -122,6 +192,10 @@ interface SpotTradingState {
   activateShield: (positionId: string) => { success: boolean; error?: string };
   deactivateShield: (positionId: string) => { success: boolean; error?: string };
   toggleShield: (positionId: string) => { success: boolean; error?: string };
+  enableAllShields: () => void;
+  disableAllShields: () => void;
+  toggleGlobalShield: () => void;
+  isGlobalShieldActive: () => boolean;
   getShieldSummary: () => ShieldSummary;
   
   // ==========================================
@@ -141,11 +215,23 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       positions: [],
       tradeHistory: [],
       prices: {},
+      _hydrated: false,
       
       // ==========================================
       // ACCOUNT INITIALIZATION
       // ==========================================
       initializeAccount: (userId, initialCash = 0) => {
+        const existing = get();
+        // Don't reinitialize if already loaded for this user
+        if (existing.account && existing.account.userId === userId && existing.positions.length > 0) {
+          // Just sync cash
+          if (initialCash > 0) {
+            set(state => ({
+              account: state.account ? { ...state.account, cashBalance: initialCash, updatedAt: new Date() } : null
+            }));
+          }
+          return;
+        }
         const now = new Date();
         const account: SpotAccount = {
           id: `spot_${userId}`,
@@ -161,6 +247,58 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           updatedAt: now,
         };
         set({ account });
+      },
+
+      // ==========================================
+      // LOAD FROM SUPABASE (cross-device sync)
+      // ==========================================
+      loadFromSupabase: async (userId, fallbackCash = 0) => {
+        const remote = await loadPortfolioFromSupabase(userId);
+        if (remote && remote.positions && remote.positions.length > 0) {
+          // Remote has data — use it (positions survive across devices)
+          const account = remote.account || {
+            id: `spot_${userId}`,
+            userId,
+            cashBalance: fallbackCash,
+            portfolioValue: 0,
+            displayPortfolioValue: 0,
+            totalEquity: fallbackCash,
+            totalUnrealizedPnL: 0,
+            totalRealizedPnL: 0,
+            currency: 'USD',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          // Sync cash from user profile (always trust Supabase user balance)
+          account.cashBalance = fallbackCash;
+          const portfolioValue = remote.positions.reduce((sum, p) => sum + p.marketValue, 0);
+          const displayPortfolioValue = remote.positions.reduce((sum, p) => sum + p.displayValue, 0);
+          account.portfolioValue = portfolioValue;
+          account.displayPortfolioValue = displayPortfolioValue;
+          account.totalEquity = fallbackCash + displayPortfolioValue;
+          set({
+            account,
+            positions: remote.positions,
+            tradeHistory: remote.tradeHistory || [],
+            _hydrated: true,
+          });
+          return;
+        }
+        // No remote data — check if localStorage already has data for this user
+        const local = get();
+        if (local.account && local.account.userId === userId && local.positions.length > 0) {
+          // localStorage has data for this user, keep it and sync to Supabase
+          set({ _hydrated: true });
+          savePortfolioToSupabase(userId, {
+            account: local.account,
+            positions: local.positions,
+            tradeHistory: local.tradeHistory,
+          });
+          return;
+        }
+        // No data anywhere, initialize fresh
+        get().initializeAccount(userId, fallbackCash);
+        set({ _hydrated: true });
       },
       
       syncCashFromUser: (cash) => {
@@ -348,6 +486,12 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             -totalCost,
             `Crypto Buy: ${quantity} ${symbol}`
           );
+          // 🔥 CRITICAL: Persist positions to Supabase for cross-device sync
+          savePortfolioToSupabase(finalState.account.userId, {
+            account: finalState.account,
+            positions: finalState.positions,
+            tradeHistory: finalState.tradeHistory,
+          });
         }
         
         return { success: true };
@@ -481,6 +625,12 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             realizedPnL,
             `Crypto Sell: ${quantity} ${position.symbol}`
           );
+          // 🔥 CRITICAL: Persist positions to Supabase for cross-device sync
+          savePortfolioToSupabase(finalState.account.userId, {
+            account: finalState.account,
+            positions: finalState.positions,
+            tradeHistory: finalState.tradeHistory,
+          });
         }
         
         return { success: true, realizedPnL };
@@ -634,6 +784,16 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             : null,
         }));
         
+        // Save shield state to Supabase
+        const postActivate = get();
+        if (postActivate.account) {
+          savePortfolioToSupabase(postActivate.account.userId, {
+            account: postActivate.account,
+            positions: postActivate.positions,
+            tradeHistory: postActivate.tradeHistory,
+          });
+        }
+
         return { success: true };
       },
       
@@ -705,21 +865,31 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         }));
         
         // Recalculate account totals
-        const newState = get();
-        const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
-        const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
+        const newStateD = get();
+        const displayPortfolioValueD = newStateD.positions.reduce((sum, p) => sum + p.displayValue, 0);
+        const totalUnrealizedPnLD = newStateD.positions.reduce((sum, p) => sum + p.displayPnL, 0);
         
         set((state) => ({
           account: state.account
             ? {
                 ...state.account,
-                displayPortfolioValue,
-                totalEquity: state.account.cashBalance + displayPortfolioValue,
-                totalUnrealizedPnL,
+                displayPortfolioValue: displayPortfolioValueD,
+                totalEquity: state.account.cashBalance + displayPortfolioValueD,
+                totalUnrealizedPnL: totalUnrealizedPnLD,
                 updatedAt: now,
               }
             : null,
         }));
+
+        // Save shield state to Supabase
+        const postDeactivate = get();
+        if (postDeactivate.account) {
+          savePortfolioToSupabase(postDeactivate.account.userId, {
+            account: postDeactivate.account,
+            positions: postDeactivate.positions,
+            tradeHistory: postDeactivate.tradeHistory,
+          });
+        }
         
         return { success: true };
       },
@@ -738,6 +908,49 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         return position.shieldEnabled
           ? get().deactivateShield(positionId)
           : get().activateShield(positionId);
+      },
+
+      /**
+       * Enable shields on ALL positions (global on)
+       */
+      enableAllShields: () => {
+        const state = get();
+        state.positions.forEach((p) => {
+          if (!p.shieldEnabled) {
+            get().activateShield(p.id);
+          }
+        });
+      },
+
+      /**
+       * Disable shields on ALL positions (global off)
+       */
+      disableAllShields: () => {
+        const state = get();
+        state.positions.forEach((p) => {
+          if (p.shieldEnabled) {
+            get().deactivateShield(p.id);
+          }
+        });
+      },
+
+      /**
+       * Toggle all shields on/off
+       */
+      toggleGlobalShield: () => {
+        const anyActive = get().positions.some((p) => p.shieldEnabled);
+        if (anyActive) {
+          get().disableAllShields();
+        } else {
+          get().enableAllShields();
+        }
+      },
+
+      /**
+       * Check if any shield is active
+       */
+      isGlobalShieldActive: () => {
+        return get().positions.some((p) => p.shieldEnabled);
       },
       
       /**

@@ -58,6 +58,58 @@ async function syncBalanceToSupabase(
 }
 
 // ==========================================
+// SUPABASE STOCK PORTFOLIO PERSISTENCE
+// ==========================================
+
+async function saveStockPortfolioToSupabase(userId: string, state: {
+  spotAccount: TradingAccount | null;
+  stockPositions: StockPosition[];
+  marginPositions: MarginPosition[];
+}): Promise<void> {
+  if (!isSupabaseConfigured() || !userId) return;
+  try {
+    const payload = {
+      spotAccount: state.spotAccount,
+      stockPositions: state.stockPositions,
+      marginPositions: state.marginPositions,
+    };
+    await supabase
+      .from('user_trading_data')
+      .upsert({
+        user_id: userId,
+        spot_stocks_state: payload,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id' });
+  } catch (err) {
+    console.warn('[StockTrading] Portfolio save failed:', err);
+  }
+}
+
+async function loadStockPortfolioFromSupabase(userId: string): Promise<{
+  spotAccount: TradingAccount | null;
+  stockPositions: StockPosition[];
+  marginPositions: MarginPosition[];
+} | null> {
+  if (!isSupabaseConfigured() || !userId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('user_trading_data')
+      .select('spot_stocks_state')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error || !data?.spot_stocks_state) return null;
+    const s = data.spot_stocks_state as any;
+    return {
+      spotAccount: s.spotAccount || null,
+      stockPositions: s.stockPositions || [],
+      marginPositions: s.marginPositions || [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ==========================================
 // TRADING ACCOUNT STORE
 // ==========================================
 
@@ -84,6 +136,7 @@ interface TradingAccountState {
 
   // Account actions
   initializeAccounts: (userId: string, initialBalance?: number) => void;
+  loadStocksFromSupabase: (userId: string, fallbackBalance?: number) => Promise<void>;
   updateSpotAccount: (updates: Partial<TradingAccount>) => void;
   updateMarginAccount: (updates: Partial<TradingAccount>) => void;
   syncBalanceFromUser: (balance: number) => void;
@@ -241,6 +294,35 @@ export const useTradingAccountStore = create<TradingAccountState>()(
         };
 
         set({ spotAccount, marginAccount });
+      },
+
+      // Load stock/FX positions from Supabase (cross-device sync)
+      loadStocksFromSupabase: async (userId, fallbackBalance = 0) => {
+        const remote = await loadStockPortfolioFromSupabase(userId);
+        if (remote && remote.stockPositions && remote.stockPositions.length > 0) {
+          const balance = Number(fallbackBalance) || 0;
+          const account = remote.spotAccount || get().spotAccount;
+          if (account) {
+            account.cash = balance;
+            account.balance = balance;
+            account.availableToTrade = balance;
+          }
+          set({
+            spotAccount: account,
+            stockPositions: remote.stockPositions,
+            marginPositions: remote.marginPositions || [],
+          });
+          return;
+        }
+        // If no remote data but local has data for same user, sync local up
+        const local = get();
+        if (local.spotAccount && local.spotAccount.userId === userId && local.stockPositions.length > 0) {
+          saveStockPortfolioToSupabase(userId, {
+            spotAccount: local.spotAccount,
+            stockPositions: local.stockPositions,
+            marginPositions: local.marginPositions,
+          });
+        }
       },
 
       updateSpotAccount: (updates) => {
@@ -467,6 +549,14 @@ export const useTradingAccountStore = create<TradingAccountState>()(
 
         syncBalanceToSupabase(account.userId, newCash, -cost, `Stock Buy: ${qty} ${symbol}`);
 
+        // 🔥 CRITICAL: Persist stock positions to Supabase for cross-device sync
+        const afterBuy = get();
+        saveStockPortfolioToSupabase(account.userId, {
+          spotAccount: afterBuy.spotAccount,
+          stockPositions: afterBuy.stockPositions,
+          marginPositions: afterBuy.marginPositions,
+        });
+
         return { success: true };
       },
 
@@ -553,6 +643,14 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           realizedPnL,
           `Stock Sell: ${qty} ${position.symbol}`
         );
+
+        // 🔥 CRITICAL: Persist stock positions to Supabase for cross-device sync
+        const afterSell = get();
+        saveStockPortfolioToSupabase(account.userId, {
+          spotAccount: afterSell.spotAccount,
+          stockPositions: afterSell.stockPositions,
+          marginPositions: afterSell.marginPositions,
+        });
 
         return { success: true, realizedPnL };
       },

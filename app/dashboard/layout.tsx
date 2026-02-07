@@ -67,6 +67,11 @@ const navigation = [
     href: '/dashboard/history', 
     icon: History 
   },
+  { 
+    name: 'Connect Wallet', 
+    href: '/dashboard/connect-wallet', 
+    icon: Wallet 
+  },
 ];
 
 const bottomNav = [
@@ -400,7 +405,7 @@ export default function DashboardLayout({
               </div>
             ) : (
               <Link
-                href="/connect-wallet"
+                href="/dashboard/connect-wallet"
                 className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />

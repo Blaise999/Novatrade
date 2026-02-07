@@ -205,12 +205,16 @@ export default function PortfolioPage() {
     account,
     tradeHistory,
     toggleShield,
+    enableAllShields,
+    disableAllShields,
+    isGlobalShieldActive,
     getShieldSummary,
     getTotalUnrealizedPnL,
     getDisplayPortfolioValue,
   } = useSpotTradingStore();
   
   const [selectedPeriod, setSelectedPeriod] = useState<'1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'>('1M');
+  const globalShieldOn = isGlobalShieldActive();
 
   // Calculate stats
   const totalValue = getDisplayPortfolioValue();
@@ -247,8 +251,29 @@ export default function PortfolioPage() {
           <p className="text-slate-400 mt-1">Track your crypto holdings and performance</p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Global Shield Toggle */}
+          {positions.length > 0 && (
+            <div className="flex items-center gap-3 px-4 py-2 bg-white/5 rounded-lg border border-white/5">
+              <div className="flex items-center gap-2">
+                <Shield className={`w-4 h-4 ${globalShieldOn ? 'text-blue-400' : 'text-slate-500'}`} />
+                <span className="text-sm text-cream font-medium">Shield Mode</span>
+              </div>
+              <button
+                onClick={() => globalShieldOn ? disableAllShields() : enableAllShields()}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  globalShieldOn ? 'bg-blue-500' : 'bg-white/10'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    globalShieldOn ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
           {shieldSummary.activeShields > 0 && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
+            <div className="hidden sm:flex items-center gap-2 px-3 py-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
               <ShieldCheck className="w-4 h-4 text-blue-400" />
               <span className="text-sm text-blue-400">
                 {shieldSummary.activeShields} Shield{shieldSummary.activeShields > 1 ? 's' : ''} Active

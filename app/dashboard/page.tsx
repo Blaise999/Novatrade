@@ -139,7 +139,7 @@ export default function DashboardOverview() {
             </>
           ) : (
             <>
-              <Link href="/connect-wallet" className="text-sm font-bold text-cream/60 hover:text-electric transition-colors">
+              <Link href="/dashboard/connect-wallet" className="text-sm font-bold text-cream/60 hover:text-electric transition-colors">
                 Not Connected
               </Link>
               <p className="text-xs text-cream/40">Tap to connect</p>

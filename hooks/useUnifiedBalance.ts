@@ -56,6 +56,14 @@ export function useUnifiedBalance(): UseUnifiedBalanceReturn {
     const initAccounts = async () => {
       console.log('[useUnifiedBalance] Initializing accounts for user:', user.id);
       
+      const userBalance = (user?.balance ?? 0) + (user?.bonusBalance ?? 0);
+
+      // 🔥 CRITICAL: Load crypto portfolio from Supabase first (cross-device sync)
+      await spotTradingStore.loadFromSupabase(user.id, userBalance);
+
+      // 🔥 CRITICAL: Load stock/FX positions from Supabase (cross-device sync)
+      await tradingStore.loadStocksFromSupabase(user.id, userBalance);
+
       await initializeAllTradingAccounts(
         user.id,
         {

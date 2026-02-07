@@ -158,7 +158,7 @@ export function getRegistrationRedirect(status: RegistrationStatus): string {
     case 'pending_kyc':
       return '/kyc';
     case 'pending_wallet':
-      return '/connect-wallet';
+      return '/dashboard/connect-wallet';
     default:
       return '/dashboard';
   }

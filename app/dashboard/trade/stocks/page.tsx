@@ -382,7 +382,7 @@ export default function StockTradingPage() {
 
     const load = async () => {
       try {
-        const url = `/api/market/stocks/history?symbol=${encodeURIComponent(selectedSymbol)}&tf=${encodeURIComponent(
+        const url = `/api/market/stock/history?symbol=${encodeURIComponent(selectedSymbol)}&tf=${encodeURIComponent(
           chartTimeframe
         )}`;
         const res = await fetch(url, { cache: 'no-store', signal: ac.signal });
@@ -677,6 +677,14 @@ export default function StockTradingPage() {
               ))}
             </div>
             <div className="flex items-center gap-1">
+              <button
+                onClick={() => setChartType('candle')}
+                className={`p-1.5 rounded-lg ${
+                  chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'
+                }`}
+              >
+                <CandlestickChart className="w-4 h-4" />
+              </button>
              <button
   onClick={() => setChartType('line')}
   className={`p-1.5 rounded-lg ${
@@ -770,19 +778,27 @@ export default function StockTradingPage() {
                 </>
               )}
 
-              {/* current price marker (always) */}
-              <line x1="0" y1={chart.h / 2} x2={chart.w} y2={chart.h / 2} stroke="#d4af37" strokeDasharray="4" />
-              <rect x={chart.w - 65} y={chart.h / 2 - 10} width="60" height="20" fill="#d4af37" rx="3" />
-              <text
-                x={chart.w - 35}
-                y={chart.h / 2 + 4}
-                textAnchor="middle"
-                fill="#0a0a0f"
-                fontSize="10"
-                fontFamily="monospace"
-              >
-                ${price.toFixed(2)}
-              </text>
+              {/* current price marker */}
+              {chart.max > 0 && (() => {
+                const range = chart.max - chart.min || 1;
+                const priceY = chart.pad.t + ((chart.max - price) / range) * (chart.h - chart.pad.t - chart.pad.b);
+                return (
+                  <>
+                    <line x1="0" y1={priceY} x2={chart.w} y2={priceY} stroke="#d4af37" strokeDasharray="4" />
+                    <rect x={chart.w - 65} y={priceY - 10} width="60" height="20" fill="#d4af37" rx="3" />
+                    <text
+                      x={chart.w - 35}
+                      y={priceY + 4}
+                      textAnchor="middle"
+                      fill="#0a0a0f"
+                      fontSize="10"
+                      fontFamily="monospace"
+                    >
+                      ${price.toFixed(2)}
+                    </text>
+                  </>
+                );
+              })()}
 
               {chart.max > 0 && (
                 <>

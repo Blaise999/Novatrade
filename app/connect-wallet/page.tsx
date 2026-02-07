@@ -1,21 +1,25 @@
-import dynamic from "next/dynamic";
-import { Suspense } from "react";
+"use client";
 
-// ✅ IMPORTANT: this stops wagmi/rainbowkit from running during export/SSR
-const ConnectWalletClient = dynamic(() => import("./ConnectWalletClient"), {
-  ssr: false,
-});
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useStore } from "@/lib/supabase/store-supabase";
 
-export default function ConnectWalletPage() {
+export default function ConnectWalletRedirect() {
+  const router = useRouter();
+  const { isAuthenticated, isLoading } = useStore();
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (isAuthenticated) {
+      router.replace("/dashboard/connect-wallet");
+    } else {
+      router.replace("/auth/login");
+    }
+  }, [isAuthenticated, isLoading, router]);
+
   return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen bg-void flex items-center justify-center p-6">
-          <div className="text-sm text-cream/60">Loading wallet…</div>
-        </div>
-      }
-    >
-      <ConnectWalletClient />
-    </Suspense>
+    <div className="min-h-screen bg-void flex items-center justify-center p-6">
+      <div className="text-sm text-cream/60">Redirecting...</div>
+    </div>
   );
 }
