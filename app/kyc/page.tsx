@@ -217,11 +217,22 @@ export default function KYCPage() {
         kyc_data: kycMeta,
       };
 
-      const { data: saved, error: saveErr } = await supabase
-        .from('users')
-        .upsert(kycPayload, { onConflict: 'id' })
-        .select('id, kyc_status, kyc_submitted_at')
-        .single();
+   const { data: saved, error: saveErr } = await supabase
+  .from('users')
+  .update({
+    kyc_status: 'pending',
+    kyc_submitted_at: nowIso,
+    updated_at: nowIso,
+    ...(data.firstName ? { first_name: data.firstName } : {}),
+    ...(data.lastName ? { last_name: data.lastName } : {}),
+    kyc_data: kycMeta,
+  })
+  .eq('id', user.id)
+  .select('id, kyc_status, kyc_submitted_at')
+  .single();
+
+if (saveErr) throw new Error(`KYC save failed: ${saveErr.message}`);
+
 
       if (saveErr) throw new Error(`KYC save failed: ${saveErr.message}`);
       if (!saved?.id || saved.kyc_status !== 'pending') {
