@@ -21,6 +21,8 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { useSpotTradingStore } from '@/lib/spot-trading-store';
 import type { SpotPosition } from '@/lib/spot-trading-types';
+import KYCGate from '@/components/KYCGate';
+import { closeTradeInHistory } from '@/lib/services/trade-history';
 
 // ============================================
 // TYPES
@@ -599,6 +601,7 @@ export default function CryptoTradingPage() {
         await supabase.from('trades').insert({
           user_id: user.id,
           pair: `${selectedSymbol}/USD`,
+          symbol: selectedSymbol,
           market_type: 'crypto',
           type: 'buy',
           side: 'long',
@@ -658,6 +661,17 @@ export default function CryptoTradingPage() {
       if (!result.success) throw new Error(result.error || 'Sell failed');
 
       if (isSupabaseConfigured()) {
+        // ✅ Close the trade in history
+        if (user?.id) {
+          closeTradeInHistory({
+            userId: user.id,
+            symbol: selectedSymbol,
+            exitPrice: currentPrice,
+            pnl: result.realizedPnL ?? 0,
+            status: 'closed',
+          });
+        }
+
         await refreshUser();
         await loadTrades();
       }
@@ -686,6 +700,7 @@ export default function CryptoTradingPage() {
   const currentPosition = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
 
   return (
+    <KYCGate action="trade cryptocurrency">
     <div className="min-h-screen bg-void">
       {/* Notification */}
       <AnimatePresence>
@@ -1096,5 +1111,6 @@ export default function CryptoTradingPage() {
         )}
       </AnimatePresence>
     </div>
+    </KYCGate>
   );
 }

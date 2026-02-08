@@ -35,6 +35,7 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { useWalletStore } from '@/lib/store';
 import { useMembershipStore, TIER_CONFIG, MembershipTier } from '@/lib/membership-tiers';
 import { useDepositSettingsStore, CryptoWallet, BankAccount, PaymentProcessor } from '@/lib/deposit-settings';
+import KYCGate from '@/components/KYCGate';
 
 // Investment plan info
 const investmentPlans: Record<string, { name: string; roi: string; min: number }> = {
@@ -222,6 +223,7 @@ function WalletContent() {
   };
 
   return (
+    <KYCGate action="deposit funds">
     <div className="p-4 lg:p-6 max-w-6xl mx-auto">
       {/* Header */}
       <div className="mb-6">
@@ -1186,6 +1188,7 @@ function WalletContent() {
         </div>
       </div>
     </div>
+    </KYCGate>
   );
 }
 

@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { useKYCStore } from '@/lib/store';
 import { useStore } from '@/lib/supabase/store-supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 // Validation schemas for each step
 const personalInfoSchema = z.object({
@@ -100,14 +101,62 @@ export default function KYCPage() {
   const handleSubmitKYC = async () => {
     setSubmitting(true);
     try {
-      // Simulate API submission
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
+      // Save KYC data to Supabase
+      if (isSupabaseConfigured() && user?.id) {
+        const kycPayload: Record<string, any> = {
+          kyc_status: 'pending',
+          kyc_submitted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        // Save personal info if available
+        if (data.firstName) kycPayload.first_name = data.firstName;
+        if (data.lastName) kycPayload.last_name = data.lastName;
+
+        // Save KYC form data as JSON metadata
+        const kycMeta: Record<string, any> = {};
+        if (data.dateOfBirth) kycMeta.date_of_birth = data.dateOfBirth;
+        if (data.nationality) kycMeta.nationality = data.nationality;
+        if (data.address) kycMeta.address = data.address;
+        if (data.city) kycMeta.city = data.city;
+        if (data.state) kycMeta.state = data.state;
+        if (data.postalCode) kycMeta.postal_code = data.postalCode;
+        if (data.country) kycMeta.country = data.country;
+        if (data.idType) kycMeta.id_type = data.idType;
+        if (data.idNumber) kycMeta.id_number = data.idNumber;
+        kycPayload.kyc_data = kycMeta;
+
+        // Upload documents to Supabase storage if files exist
+        const uploadFile = async (file: File | null, path: string) => {
+          if (!file) return null;
+          try {
+            const ext = file.name.split('.').pop();
+            const filePath = `kyc/${user.id}/${path}.${ext}`;
+            const { error } = await supabase.storage.from('documents').upload(filePath, file, { upsert: true });
+            if (!error) return filePath;
+          } catch {}
+          return null;
+        };
+
+        const [idFrontPath, idBackPath, selfiePath, proofPath] = await Promise.all([
+          uploadFile(idFrontFile, 'id-front'),
+          uploadFile(idBackFile, 'id-back'),
+          uploadFile(selfieFile, 'selfie'),
+          uploadFile(proofOfAddressFile, 'proof-of-address'),
+        ]);
+
+        if (idFrontPath) kycMeta.id_front_doc = idFrontPath;
+        if (idBackPath) kycMeta.id_back_doc = idBackPath;
+        if (selfiePath) kycMeta.selfie_doc = selfiePath;
+        if (proofPath) kycMeta.proof_of_address_doc = proofPath;
+
+        kycPayload.kyc_data = kycMeta;
+
+        await supabase.from('users').update(kycPayload).eq('id', user.id);
+      }
+
       // Update KYC status to pending
       await updateKycStatus('pending');
-      
-      // Advance registration to next step (wallet connection)
-      await updateRegistrationStatus('pending_wallet');
       
       setStep(5); // Move to success step
     } finally {
@@ -146,18 +195,68 @@ export default function KYCPage() {
           </Link>
           
           <button
-            onClick={async () => {
-              await updateRegistrationStatus('pending_wallet');
-              router.push('/connect-wallet');
-            }}
+            onClick={() => router.push('/dashboard')}
             className="text-sm text-slate-400 hover:text-cream transition-colors"
           >
-            Skip for now
+            Back to Dashboard
           </button>
         </div>
       </header>
 
       <main className="max-w-2xl mx-auto px-4 py-8">
+        {/* If KYC already pending, show waiting screen */}
+        {user?.kycStatus === 'pending' && currentStep !== 5 && (
+          <div className="text-center py-12 space-y-6">
+            <div className="w-20 h-20 bg-yellow-500/10 rounded-2xl flex items-center justify-center mx-auto">
+              <Clock className="w-10 h-10 text-yellow-400" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-cream mb-3">Verification Under Review</h2>
+              <p className="text-slate-400 leading-relaxed max-w-md mx-auto">
+                Your identity verification documents have been submitted and are being reviewed by our team.
+                This process typically takes 1-24 hours.
+              </p>
+            </div>
+            <div className="bg-yellow-500/5 border border-yellow-500/10 rounded-xl p-5 max-w-sm mx-auto">
+              <div className="flex items-center gap-2 text-yellow-400 font-medium mb-1">
+                <Clock className="w-4 h-4" />
+                Awaiting Admin Approval
+              </div>
+              <p className="text-xs text-slate-500">
+                You&apos;ll be notified once your verification is complete. Trading and deposits will be unlocked after approval.
+              </p>
+            </div>
+            <button
+              onClick={() => router.push('/dashboard')}
+              className="px-8 py-3 bg-white/5 text-cream font-medium rounded-xl hover:bg-white/10 transition-colors"
+            >
+              Back to Dashboard
+            </button>
+          </div>
+        )}
+
+        {/* If KYC already verified, show success */}
+        {(user?.kycStatus === 'verified' || user?.kycStatus === 'approved') && currentStep !== 5 && (
+          <div className="text-center py-12 space-y-6">
+            <div className="w-20 h-20 bg-profit/10 rounded-2xl flex items-center justify-center mx-auto">
+              <CheckCircle className="w-10 h-10 text-profit" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-cream mb-3">Identity Verified</h2>
+              <p className="text-slate-400">Your identity has been verified. You have full access to all trading features.</p>
+            </div>
+            <button
+              onClick={() => router.push('/dashboard')}
+              className="px-8 py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:opacity-90 transition-opacity"
+            >
+              Go to Dashboard
+            </button>
+          </div>
+        )}
+
+        {/* KYC Form - only show if not already pending or verified */}
+        {(!user?.kycStatus || user?.kycStatus === 'none' || user?.kycStatus === 'not_started' || user?.kycStatus === 'rejected' || currentStep === 5) && (
+        <>
         {/* Progress Steps */}
         {currentStep <= 4 && (
           <div className="mb-8">
@@ -247,6 +346,8 @@ export default function KYCPage() {
             <SuccessStep key="success" />
           )}
         </AnimatePresence>
+        </>
+        )}
       </main>
     </div>
   );

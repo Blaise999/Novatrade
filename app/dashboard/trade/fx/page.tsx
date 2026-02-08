@@ -27,6 +27,8 @@ import {
 import { useTradingAccountStore } from '@/lib/trading-store';
 import { useAdminSessionStore } from '@/lib/admin-store';
 import { useStore } from '@/lib/supabase/store-supabase';
+import KYCGate from '@/components/KYCGate';
+import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 import {
   useAdminMarketStore,
   isAdminControlledPair,
@@ -567,6 +569,26 @@ export default function FXTradingPage() {
 
     if ((result as any)?.success) {
       await refreshUser?.();
+
+      // ✅ Save to trades table for history
+      if (user?.id) {
+        saveTradeToHistory({
+          userId: user.id,
+          symbol: selectedAsset.symbol,
+          marketType: 'forex',
+          type: tradeDirection === 'buy' ? 'buy' : 'sell',
+          side: tradeDirection === 'buy' ? 'long' : 'short',
+          amount: positionValue,
+          quantity: lotSize * 100000,
+          entryPrice,
+          leverage,
+          fees: positionValue * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100),
+          stopLoss: stopLoss || undefined,
+          takeProfit: takeProfit || undefined,
+          status: 'open',
+        });
+      }
+
       setNotification({
         type: 'success',
         message: `${tradeDirection.toUpperCase()} ${lotSize} lots ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
@@ -608,6 +630,18 @@ export default function FXTradingPage() {
       if ((result as any)?.success) {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
+
+        // ✅ Update trade in history as closed
+        if (user?.id) {
+          closeTradeInHistory({
+            userId: user.id,
+            symbol: (position as any).symbol,
+            exitPrice,
+            pnl,
+            status: 'closed',
+          });
+        }
+
         setNotification({
           type: 'success',
           message: `Closed ${(position as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
@@ -737,6 +771,7 @@ export default function FXTradingPage() {
   }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
 
   return (
+    <KYCGate action="trade forex">
     <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
       {/* Header */}
       <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
@@ -1624,5 +1659,6 @@ export default function FXTradingPage() {
         )}
       </AnimatePresence>
     </div>
+    </KYCGate>
   );
 }

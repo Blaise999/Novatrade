@@ -387,6 +387,18 @@ export const useStore = create<AuthStore>((set, get) => ({
       if (!isSupabaseConfigured()) localStorage.removeItem('novatrade_session');
       else await supabase.auth.signOut();
     } finally {
+      // ✅ CRITICAL: Clear ALL trading persist stores to prevent data leaks between users
+      const tradingKeys = [
+        'novatrade-trading-accounts',
+        'novatrade-spot-trading',
+        'novatrade-investments',
+        'novatrade-airdrops',
+        'novatrade-deposit-addresses',
+      ];
+      tradingKeys.forEach((key) => {
+        try { localStorage.removeItem(key); } catch {}
+      });
+
       set({
         user: null,
         isAuthenticated: false,

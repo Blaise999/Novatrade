@@ -222,6 +222,12 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       // ==========================================
       initializeAccount: (userId, initialCash = 0) => {
         const existing = get();
+
+        // ✅ CRITICAL: If userId changed, clear stale data from previous user
+        if (existing.account && existing.account.userId && existing.account.userId !== userId) {
+          set({ positions: [], tradeHistory: [] });
+        }
+
         // Don't reinitialize if already loaded for this user
         if (existing.account && existing.account.userId === userId && existing.positions.length > 0) {
           // Just sync cash

@@ -78,9 +78,15 @@ export default function HistoryPage() {
         query = query.eq('status', statusFilter);
       }
 
+      // Apply asset type filter at DB level
+      if (assetFilter !== 'all') {
+        const dbType = assetFilter === 'stocks' ? 'stocks' : assetFilter;
+        query = query.eq('market_type', dbType);
+      }
+
       // Apply search filter
       if (searchQuery) {
-        query = query.ilike('symbol', `%${searchQuery}%`);
+        query = query.or(`symbol.ilike.%${searchQuery}%,pair.ilike.%${searchQuery}%`);
       }
 
       // Pagination
@@ -94,43 +100,88 @@ export default function HistoryPage() {
 
       // Transform database records to Trade interface
       const trades: Trade[] = (data || []).map(trade => {
-        // Determine asset type from symbol
-        const symbol = trade.symbol || '';
+        // Use market_type from DB, with fallback heuristic
         let type: 'crypto' | 'forex' | 'stock' = 'crypto';
-        if (symbol.includes('/USD') && !symbol.includes('BTC') && !symbol.includes('ETH')) {
+        if (trade.market_type === 'forex' || trade.market_type === 'fx') {
           type = 'forex';
-        } else if (['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META', 'NFLX'].some(s => symbol.includes(s))) {
+        } else if (trade.market_type === 'stocks' || trade.market_type === 'stock') {
           type = 'stock';
+        } else if (trade.market_type === 'crypto') {
+          type = 'crypto';
+        } else {
+          // Fallback heuristic for older trades without market_type
+          const symbol = (trade.symbol || trade.pair || '').toUpperCase();
+          const fxPairs = ['EUR', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF'];
+          const stockSymbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'NVDA', 'AMZN', 'META', 'NFLX', 'AMD', 'INTC', 'DIS', 'BA', 'JPM', 'V', 'WMT'];
+          if (fxPairs.some(fx => symbol.includes(fx)) && !symbol.includes('BTC') && !symbol.includes('ETH')) {
+            type = 'forex';
+          } else if (stockSymbols.some(s => symbol.includes(s))) {
+            type = 'stock';
+          }
         }
 
-        // Calculate profit
-        const profit = trade.status === 'won' 
-          ? (trade.amount * (trade.payout_percent || 85) / 100)
-          : trade.status === 'lost' 
-            ? -trade.amount 
-            : 0;
+        // Calculate profit - handle both binary options (won/lost) and spot/margin trades (open/closed)
+        let profit = 0;
+        if (trade.pnl != null && trade.pnl !== 0) {
+          profit = Number(trade.pnl) || 0;
+        } else if (trade.status === 'won') {
+          profit = trade.amount * (trade.payout_percent || 85) / 100;
+        } else if (trade.status === 'lost') {
+          profit = -trade.amount;
+        } else if (trade.status === 'closed' && trade.exit_price && trade.entry_price) {
+          const priceDiff = trade.side === 'short' 
+            ? trade.entry_price - trade.exit_price 
+            : trade.exit_price - trade.entry_price;
+          profit = priceDiff * (trade.quantity || trade.amount / trade.entry_price);
+        }
+
+        // Map direction: support both up/down and long/short/buy/sell
+        let direction: 'up' | 'down' = 'up';
+        if (trade.direction) {
+          direction = trade.direction === 'down' ? 'down' : 'up';
+        } else if (trade.side === 'short' || trade.type === 'sell') {
+          direction = 'down';
+        }
+
+        // Map status to unified display format
+        let displayStatus: 'won' | 'lost' | 'pending' | 'cancelled' = 'pending';
+        if (trade.status === 'won') displayStatus = 'won';
+        else if (trade.status === 'lost') displayStatus = 'lost';
+        else if (trade.status === 'closed') displayStatus = profit >= 0 ? 'won' : 'lost';
+        else if (trade.status === 'open') displayStatus = 'pending';
+        else if (trade.status === 'cancelled' || trade.status === 'liquidated') displayStatus = 'lost';
 
         // Format duration
-        const durationSeconds = trade.duration_seconds || 300;
-        let duration = '5m';
-        if (durationSeconds < 60) duration = `${durationSeconds}s`;
-        else if (durationSeconds < 3600) duration = `${Math.floor(durationSeconds / 60)}m`;
-        else duration = `${Math.floor(durationSeconds / 3600)}h`;
+        const durationSeconds = trade.duration_seconds || 0;
+        let duration = '-';
+        if (durationSeconds > 0) {
+          if (durationSeconds < 60) duration = `${durationSeconds}s`;
+          else if (durationSeconds < 3600) duration = `${Math.floor(durationSeconds / 60)}m`;
+          else duration = `${Math.floor(durationSeconds / 3600)}h`;
+        } else if (trade.opened_at && trade.closed_at) {
+          const diffMs = new Date(trade.closed_at).getTime() - new Date(trade.opened_at).getTime();
+          const diffMins = Math.floor(diffMs / 60000);
+          if (diffMins < 60) duration = `${diffMins}m`;
+          else if (diffMins < 1440) duration = `${Math.floor(diffMins / 60)}h`;
+          else duration = `${Math.floor(diffMins / 1440)}d`;
+        } else if (trade.status === 'open') {
+          duration = 'Open';
+        }
 
         return {
           id: trade.id,
-          asset: trade.symbol || 'Unknown',
+          asset: trade.symbol || trade.pair || 'Unknown',
           type,
-          direction: trade.direction || 'up',
+          direction,
           amount: trade.amount || 0,
           profit,
-          payout: trade.payout_percent || 85,
-          status: trade.status || 'pending',
+          payout: trade.payout_percent || 0,
+          status: displayStatus,
           entryPrice: trade.entry_price || 0,
           exitPrice: trade.exit_price,
           duration,
-          date: new Date(trade.created_at).toLocaleString(),
-          created_at: trade.created_at,
+          date: new Date(trade.created_at || trade.opened_at).toLocaleString(),
+          created_at: trade.created_at || trade.opened_at,
         };
       });
 

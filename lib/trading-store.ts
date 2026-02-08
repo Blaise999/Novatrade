@@ -252,6 +252,12 @@ export const useTradingAccountStore = create<TradingAccountState>()(
         const now = new Date();
         const balance = Number(initialBalance) || 0;
 
+        // ✅ CRITICAL: If userId changed, clear stale data from previous user
+        const currentSpot = get().spotAccount;
+        if (currentSpot && currentSpot.userId && currentSpot.userId !== userId) {
+          set({ stockPositions: [], marginPositions: [], ledger: [] });
+        }
+
         const spotAccount: TradingAccount = {
           id: `spot_${userId}`,
           userId,

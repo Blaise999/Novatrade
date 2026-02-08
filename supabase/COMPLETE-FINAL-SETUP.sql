@@ -119,6 +119,7 @@ CREATE TABLE public.users (
     email_verified_at TIMESTAMPTZ,
     kyc_submitted_at TIMESTAMPTZ,
     kyc_verified_at TIMESTAMPTZ,
+    kyc_data JSONB DEFAULT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

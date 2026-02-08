@@ -24,6 +24,9 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { useTradingAccountStore } from '@/lib/trading-store';
 import { marketAssets } from '@/lib/data';
 import { StockPosition } from '@/lib/trading-types';
+import KYCGate from '@/components/KYCGate';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 
 type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
 const timeframes: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1D'];
@@ -514,6 +517,24 @@ export default function StockTradingPage() {
 
     if ((result as any)?.success) {
       await refreshUser?.();
+
+      // ✅ Save to trades table for history
+      if (user?.id) {
+        saveTradeToHistory({
+          userId: user.id,
+          symbol: selectedSymbol,
+          marketType: 'stocks',
+          type: 'buy',
+          side: 'long',
+          amount: effectiveShares * askPrice,
+          quantity: effectiveShares,
+          entryPrice: askPrice,
+          leverage: 1,
+          fees: commission,
+          status: 'open',
+        });
+      }
+
       setNotification({
         type: 'success',
         message: `Bought ${effectiveShares} ${selectedSymbol} @ $${askPrice.toFixed(2)}`,
@@ -533,6 +554,18 @@ export default function StockTradingPage() {
     if ((result as any)?.success) {
       const pnl = Number((result as any)?.realizedPnL ?? 0);
       await refreshUser?.();
+
+      // ✅ Save sell/close to trades table for history
+      if (user?.id) {
+        closeTradeInHistory({
+          userId: user.id,
+          symbol: positionToSell.symbol,
+          exitPrice: bidPrice,
+          pnl,
+          status: 'closed',
+        });
+      }
+
       setNotification({
         type: 'success',
         message: `Sold ${sellQty} ${positionToSell.symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
@@ -596,6 +629,7 @@ export default function StockTradingPage() {
   const info = stockInfo[selectedSymbol] || { emoji: '📈', sector: 'Other' };
 
   return (
+    <KYCGate action="trade stocks">
     <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
       {/* Header */}
       <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
@@ -1367,5 +1401,6 @@ export default function StockTradingPage() {
         )}
       </AnimatePresence>
     </div>
+    </KYCGate>
   );
 }
