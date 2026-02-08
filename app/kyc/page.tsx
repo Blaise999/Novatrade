@@ -173,7 +173,7 @@ export default function KYCPage() {
         const filePath = `kyc/${user.id}/${name}.${ext}`;
 
         const { error: uploadError } = await supabase.storage
-         .from('YOUR_REAL_BUCKET_NAME')
+         .from('kyc-documents')
           .upload(filePath, file, {
             upsert: true,
             contentType: file.type || 'application/octet-stream',

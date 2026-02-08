@@ -37,7 +37,7 @@ async function requireAdmin(request: NextRequest) {
 async function signed(path?: string | null) {
   if (!path) return null;
   const { data } = await supabaseAdmin.storage
-    .from("documents")
+    .from('kyc-documents')
     .createSignedUrl(path, 60 * 15);
   return data?.signedUrl ?? null;
 }
