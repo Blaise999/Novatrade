@@ -18,49 +18,61 @@ function hashToken(token: string): string {
 async function requireAdmin(request: NextRequest) {
   const auth = request.headers.get('authorization');
   if (!auth?.startsWith('Bearer ')) return null;
+  const token = auth.slice(7).trim();
+  if (!token) return null;
 
-  const token = auth.slice(7);
   const tokenHash = hashToken(token);
 
   const { data, error } = await supabaseAdmin
     .from('admin_sessions')
-    .select('id, revoked_at')
+    .select('id, admin_id, revoked_at, expires_at')
     .eq('token_hash', tokenHash)
     .maybeSingle();
 
   if (error || !data || data.revoked_at) return null;
-  return { tokenHash };
+  if (data.expires_at && new Date(data.expires_at) <= new Date()) return null;
+
+  return { adminId: (data as any).admin_id ?? null };
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export async function POST(request: NextRequest, ctx: { params: { userId: string } }) {
   try {
     const admin = await requireAdmin(request);
     if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    const userId = params?.userId;
-    if (!userId) return NextResponse.json({ error: 'Missing userId' }, { status: 400 });
+    const userId = ctx.params.userId;
 
-    const now = new Date().toISOString();
-
-    const { data, error } = await supabaseAdmin
+    const { error } = await supabaseAdmin
       .from('users')
       .update({
         kyc_status: 'verified',
-        kyc_verified_at: now,
-        updated_at: now,
-      })
-      .eq('id', userId)
-      .select('id, email, kyc_status, kyc_verified_at')
-      .single();
+        kyc_reviewed_at: new Date().toISOString(),
+        kyc_reviewed_by: admin.adminId,
+      } as any)
+      .eq('id', userId);
 
-    if (error) throw error;
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-    return NextResponse.json({ success: true, user: data });
+    // optional audit (only if table exists)
+    // optional audit (don’t break the endpoint if logging fails)
+try {
+  const { error: logError } = await supabaseAdmin.from('admin_logs').insert({
+    admin_id: admin.adminId,
+    action: 'kyc_approve',
+    target_type: 'user',
+    target_id: userId,
+    created_at: new Date().toISOString(),
+  } as any);
+
+  // ignore logError on purpose
+} catch {
+  // ignore
+}
+
+
+    return NextResponse.json({ success: true });
   } catch (e: any) {
-    console.error('[Admin] approve kyc error:', e);
+    console.error('[AdminKYC] approve error:', e);
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
   }
 }
