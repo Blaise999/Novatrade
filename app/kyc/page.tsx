@@ -205,7 +205,6 @@ export default function KYCPage() {
         id: user.id,
         kyc_status: 'pending',
         kyc_submitted_at: nowIso,
-        updated_at: nowIso,
         ...(data.firstName ? { first_name: data.firstName } : {}),
         ...(data.lastName ? { last_name: data.lastName } : {}),
         kyc_data: kycMeta,

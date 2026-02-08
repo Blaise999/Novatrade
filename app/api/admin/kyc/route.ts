@@ -1,84 +1,67 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import crypto from 'crypto';
+// app/api/admin/kyc/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-// change if your bucket name is different
-const DOCS_BUCKET = process.env.SUPABASE_DOCS_BUCKET || 'documents';
+const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
+  auth: { autoRefreshToken: false, persistSession: false },
+});
 
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
+const hashToken = (token: string) =>
+  crypto.createHash("sha256").update(token).digest("hex");
 
 async function requireAdmin(request: NextRequest) {
-  const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return null;
+  const auth = request.headers.get("authorization");
+  if (!auth?.startsWith("Bearer ")) return null;
 
-  const token = auth.slice(7).trim();
-  if (!token) return null;
-
+  const token = auth.slice(7);
   const tokenHash = hashToken(token);
 
   const { data, error } = await supabaseAdmin
-    .from('admin_sessions')
-    .select('id, admin_id, revoked_at, expires_at')
-    .eq('token_hash', tokenHash)
+    .from("admin_sessions")
+    .select("admin_id, revoked_at")
+    .eq("token_hash", tokenHash)
     .maybeSingle();
 
-  if (error || !data) return null;
-  if (data.revoked_at) return null;
-  if (data.expires_at && new Date(data.expires_at) <= new Date()) return null;
-
-  return { tokenHash, adminId: (data as any).admin_id ?? null, sessionId: data.id };
+  if (error || !data || data.revoked_at) return null;
+  return { admin_id: data.admin_id as string };
 }
 
-async function signedUrl(path?: string | null) {
+async function signed(path?: string | null) {
   if (!path) return null;
-
-  // IMPORTANT: path must be the object key inside the bucket (no bucket prefix)
-  const { data, error } = await supabaseAdmin.storage
-    .from(DOCS_BUCKET)
+  const { data } = await supabaseAdmin.storage
+    .from("documents")
     .createSignedUrl(path, 60 * 15);
-
-  if (error) return null;
   return data?.signedUrl ?? null;
 }
 
 export async function GET(request: NextRequest) {
   try {
     const admin = await requireAdmin(request);
-    if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    if (!admin) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { searchParams } = new URL(request.url);
-    const status = (searchParams.get('status') || 'pending').toLowerCase();
+    const raw = (searchParams.get("status") || "pending").toLowerCase();
 
     let q = supabaseAdmin
-      .from('users')
-      .select('id,email,first_name,last_name,kyc_status,kyc_submitted_at,kyc_data,created_at');
+      .from("users")
+      .select("id,email,first_name,last_name,kyc_status,kyc_submitted_at,kyc_data,created_at")
+      .order("created_at", { ascending: false });
 
-    // ✅ filtering
-    if (status !== 'all') {
-      if (status === 'none') {
-        q = q.or('kyc_status.is.null,kyc_status.eq.none,kyc_status.eq.not_started');
-      } else if (status === 'verified') {
-        q = q.in('kyc_status', ['verified', 'approved']); // allow both
+    if (raw !== "all") {
+      if (raw === "none") {
+        q = q.or("kyc_status.is.null,kyc_status.eq.none,kyc_status.eq.not_started");
       } else {
-        q = q.eq('kyc_status', status);
+        q = q.eq("kyc_status", raw);
       }
     }
-
-    // ✅ ordering (push null submissions to bottom)
-    q = q
-      .order('kyc_submitted_at', { ascending: false, nullsFirst: false })
-      .order('created_at', { ascending: false });
 
     const { data: rows, error } = await q;
     if (error) throw error;
@@ -89,10 +72,10 @@ export async function GET(request: NextRequest) {
         return {
           ...u,
           kyc_docs: {
-            id_front: await signedUrl(k.id_front_doc),
-            id_back: await signedUrl(k.id_back_doc),
-            selfie: await signedUrl(k.selfie_doc),
-            proof: await signedUrl(k.proof_of_address_doc),
+            id_front: await signed(k.id_front_doc),
+            id_back: await signed(k.id_back_doc),
+            selfie: await signed(k.selfie_doc),
+            proof: await signed(k.proof_of_address_doc),
           },
         };
       })
@@ -100,8 +83,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ kycs });
   } catch (e: any) {
-    console.error('[AdminKYC] list error:', e);
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
+    console.error("[AdminKYC] list error:", e);
+    return NextResponse.json({ error: e?.message ?? "Server error" }, { status: 500 });
   }
 }
-``
