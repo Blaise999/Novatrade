@@ -1256,6 +1256,7 @@ export interface KycFormData {
   dateOfBirth?: string;
   country?: string;
   city?: string;
+   nationality?: string;
   addressLine1?: string;
   addressLine2?: string;
   documentType?: 'passport' | 'drivers_license' | 'national_id' | 'other';
