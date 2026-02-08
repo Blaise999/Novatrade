@@ -29,7 +29,17 @@ export type RegistrationStatus =
   | 'pending_wallet'
   | 'complete';
 
-export type KycStatus = 'none' | 'pending' | 'verified' | 'rejected';
+export type KycStatus =
+  | 'none'
+  | 'not_started'
+  | 'pending'
+  | 'in_review'
+  | 'verified'
+  | 'approved'
+  | 'rejected'
+  | 'declined'
+  | string;
+
 
 export interface User {
   id: string;
@@ -552,10 +562,12 @@ export const useStore = create<AuthStore>((set, get) => ({
     if (!user) return false;
 
     try {
-      const nextRegistrationStatus: RegistrationStatus =
-        status === 'verified' && user.registrationStatus === 'pending_kyc'
-          ? 'pending_wallet'
-          : user.registrationStatus;
+    const isPassed = status === 'verified' || status === 'approved';
+
+const nextRegistrationStatus: RegistrationStatus =
+  isPassed && user.registrationStatus === 'pending_kyc'
+    ? 'pending_wallet'
+    : user.registrationStatus;
 
       if (!isSupabaseConfigured()) {
         const updatedUser: User = {

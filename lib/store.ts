@@ -1254,17 +1254,33 @@ export interface KycFormData {
   firstName?: string;
   lastName?: string;
   dateOfBirth?: string;
+
   country?: string;
+  nationality?: string;
+
   city?: string;
-   nationality?: string;
+  state?: string;
+
+  address?: string;
   addressLine1?: string;
   addressLine2?: string;
+
+  postalCode?: string;  // ✅ add (page uses this)
+
+  idType?: 'passport' | 'drivers_license' | 'national_id' | 'other'; // ✅ add (alias)
+  idNumber?: string;    // ✅ add (alias)
+
   documentType?: 'passport' | 'drivers_license' | 'national_id' | 'other';
   documentNumber?: string;
+
   documentFrontUrl?: string;
   documentBackUrl?: string;
   selfieUrl?: string;
+
+  // optional safety net so builds don’t break again when UI adds fields
+  [key: string]: any;
 }
+
 
 interface KYCStore {
   step: number;

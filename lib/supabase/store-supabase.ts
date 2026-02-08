@@ -16,10 +16,9 @@ export {
   type Deposit,
   type Trade,
   type PaymentMethod,
+  type RegistrationStatus,  // ✅ re-export
+  type KycStatus,           // ✅ re-export
 } from '@/lib/auth/store';
 
-export type RegistrationStatus =
-  | 'pending_verification'
-  | 'pending_kyc'
-  | 'pending_wallet'
-  | 'complete';
+
+
