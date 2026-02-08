@@ -166,26 +166,33 @@ export default function KYCPage() {
       };
 
       // Upload helper that throws (LOUD)
-      const uploadFile = async (file: File | null, name: string) => {
-        if (!file) return null;
+   const uploadFile = async (file: File | null, name: string) => {
+  if (!file) return null;
 
-        const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
-        const filePath = `kyc/${user.id}/${name}.${ext}`;
+  // ✅ get the real auth user id (what RLS uses)
+  const { data: authRes, error: authErr } = await supabase.auth.getUser();
+  if (authErr) throw new Error(`Auth error: ${authErr.message}`);
 
-        const { error: uploadError } = await supabase.storage
-         .from('kyc-documents')
-          .upload(filePath, file, {
-            upsert: true,
-            contentType: file.type || 'application/octet-stream',
-            cacheControl: '3600',
-          });
+  const uid = authRes.user?.id;
+  if (!uid) throw new Error('Not authenticated');
 
-        if (uploadError) {
-          throw new Error(`Upload failed for ${name}: ${uploadError.message}`);
-        }
+  const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+  const filePath = `kyc/${uid}/${name}.${ext}`;
 
-        return filePath;
-      };
+  const { error: uploadError } = await supabase.storage
+    .from('kyc-documents')
+    .upload(filePath, file, {
+      upsert: true,
+      contentType: file.type || 'application/octet-stream',
+      cacheControl: '3600',
+    });
+
+  if (uploadError) {
+    throw new Error(`Upload failed for ${name}: ${uploadError.message}`);
+  }
+
+  return filePath;
+};
 
       // Upload (LOUD)
       const idFrontPath = await uploadFile(idFrontFile, 'id-front');
