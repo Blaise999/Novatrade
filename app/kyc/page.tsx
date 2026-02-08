@@ -125,130 +125,129 @@ export default function KYCPage() {
   };
 
   // ✅ FULL FIX: KYC submission that FAILS LOUDLY
-  const handleSubmitKYC = async () => {
-    setSubmitError(null);
-    setSubmitting(true);
+// ✅ FULL FIX: KYC submission that FAILS LOUDLY (and builds)
+const handleSubmitKYC = async () => {
+  setSubmitError(null);
+  setSubmitting(true);
 
-    try {
-      if (!user?.id) throw new Error('You must be logged in to submit KYC.');
-      if (!isSupabaseConfigured())
-        throw new Error('Supabase is not configured.');
+  try {
+    if (!user?.id) throw new Error('You must be logged in to submit KYC.');
+    if (!isSupabaseConfigured()) throw new Error('Supabase is not configured.');
 
-      // Required docs (LOUD)
-      if (!idFrontFile) throw new Error('Please upload the FRONT of your ID.');
-      if (!selfieFile)
-        throw new Error('Please upload your selfie holding the ID.');
+    // Required docs
+    if (!idFrontFile) throw new Error('Please upload the FRONT of your ID.');
+    if (!selfieFile) throw new Error('Please upload your selfie holding the ID.');
 
-      // If not passport, require back file (LOUD)
-      const idType = data?.idType as
-        | 'passport'
-        | 'drivers_license'
-        | 'national_id'
-        | undefined;
+    // If not passport, require back
+    const idType = data?.idType as
+      | 'passport'
+      | 'drivers_license'
+      | 'national_id'
+      | undefined;
 
-      if (idType && idType !== 'passport' && !idBackFile) {
-        throw new Error('Please upload the BACK of your ID.');
+    if (idType && idType !== 'passport' && !idBackFile) {
+      throw new Error('Please upload the BACK of your ID.');
+    }
+
+    // Build metadata
+    const kycMeta: Record<string, any> = {
+      ...(data.firstName ? { first_name: data.firstName } : {}),
+      ...(data.lastName ? { last_name: data.lastName } : {}),
+      ...(data.dateOfBirth ? { date_of_birth: data.dateOfBirth } : {}),
+      ...(data.nationality ? { nationality: data.nationality } : {}),
+      ...(data.address ? { address: data.address } : {}),
+      ...(data.city ? { city: data.city } : {}),
+      ...(data.state ? { state: data.state } : {}),
+      ...(data.postalCode ? { postal_code: data.postalCode } : {}),
+      ...(data.country ? { country: data.country } : {}),
+      ...(data.idType ? { id_type: data.idType } : {}),
+      ...(data.idNumber ? { id_number: data.idNumber } : {}),
+    };
+
+    // Upload helper
+    const uploadFile = async (file: File | null, name: string) => {
+      if (!file) return null;
+
+      // ✅ get the real auth user id (what RLS uses)
+      const { data: authRes, error: authErr } = await supabase.auth.getUser();
+      if (authErr) throw new Error(`Auth error: ${authErr.message}`);
+
+      const uid = authRes.user?.id;
+      if (!uid) throw new Error('Not authenticated');
+
+      const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+      const filePath = `kyc/${uid}/${name}.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('kyc-documents')
+        .upload(filePath, file, {
+          upsert: true,
+          contentType: file.type || 'application/octet-stream',
+          cacheControl: '3600',
+        });
+
+      // ✅ safe error string (no TS issue)
+      if (uploadError) {
+        const msg =
+          (uploadError as any)?.message ??
+          (uploadError as any)?.error_description ??
+          String(uploadError);
+        throw new Error(`Upload failed for ${name}: ${msg}`);
       }
 
-      // Build metadata
-      const kycMeta: Record<string, any> = {
-        ...(data.firstName ? { first_name: data.firstName } : {}),
-        ...(data.lastName ? { last_name: data.lastName } : {}),
-        ...(data.dateOfBirth ? { date_of_birth: data.dateOfBirth } : {}),
-        ...(data.nationality ? { nationality: data.nationality } : {}),
-        ...(data.address ? { address: data.address } : {}),
-        ...(data.city ? { city: data.city } : {}),
-        ...(data.state ? { state: data.state } : {}),
-        ...(data.postalCode ? { postal_code: data.postalCode } : {}),
-        ...(data.country ? { country: data.country } : {}),
-        ...(data.idType ? { id_type: data.idType } : {}),
-        ...(data.idNumber ? { id_number: data.idNumber } : {}),
-      };
+      return filePath;
+    };
 
-      // Upload helper that throws (LOUD)
-   const uploadFile = async (file: File | null, name: string) => {
-  if (!file) return null;
+    // Upload docs
+    const idFrontPath = await uploadFile(idFrontFile, 'id-front');
+    const idBackPath = await uploadFile(idBackFile, 'id-back');
+    const selfiePath = await uploadFile(selfieFile, 'selfie');
+    const proofPath = await uploadFile(proofOfAddressFile, 'proof-of-address');
 
-  // ✅ get the real auth user id (what RLS uses)
-  const { data: authRes, error: authErr } = await supabase.auth.getUser();
-  if (authErr) throw new Error(`Auth error: ${authErr.message}`);
+    if (idFrontPath) kycMeta.id_front_doc = idFrontPath;
+    if (idBackPath) kycMeta.id_back_doc = idBackPath;
+    if (selfiePath) kycMeta.selfie_doc = selfiePath;
+    if (proofPath) kycMeta.proof_of_address_doc = proofPath;
 
-  const uid = authRes.user?.id;
-  if (!uid) throw new Error('Not authenticated');
+    const nowIso = new Date().toISOString();
 
-  const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
-  const filePath = `kyc/${uid}/${name}.${ext}`;
-
-  const { error: uploadError } = await supabase.storage
-    .from('kyc-documents')
-    .upload(filePath, file, {
-      upsert: true,
-      contentType: file.type || 'application/octet-stream',
-      cacheControl: '3600',
-    });
-
-  if (uploadError) {
-    throw new Error(`Upload failed for ${name}: ${uploadError.message}`);
-  }
-
-  return filePath;
-};
-
-      // Upload (LOUD)
-      const idFrontPath = await uploadFile(idFrontFile, 'id-front');
-      const idBackPath = await uploadFile(idBackFile, 'id-back');
-      const selfiePath = await uploadFile(selfieFile, 'selfie');
-      const proofPath = await uploadFile(proofOfAddressFile, 'proof-of-address');
-
-      if (idFrontPath) kycMeta.id_front_doc = idFrontPath;
-      if (idBackPath) kycMeta.id_back_doc = idBackPath;
-      if (selfiePath) kycMeta.selfie_doc = selfiePath;
-      if (proofPath) kycMeta.proof_of_address_doc = proofPath;
-
-      const nowIso = new Date().toISOString();
-
-      // ✅ Use UPSERT so row always exists; VERIFY save
-      const kycPayload: Record<string, any> = {
-        id: user.id,
+    // ✅ DB save (UPDATE is best if your user row already exists)
+    const { data: saved, error: saveErr } = await supabase
+      .from('users')
+      .update({
         kyc_status: 'pending',
         kyc_submitted_at: nowIso,
+        updated_at: nowIso,
         ...(data.firstName ? { first_name: data.firstName } : {}),
         ...(data.lastName ? { last_name: data.lastName } : {}),
         kyc_data: kycMeta,
-      };
+      })
+      .eq('id', user.id)
+      .select('id, kyc_status, kyc_submitted_at')
+      .single();
 
-   const { data: saved, error: saveErr } = await supabase
-  .from('users')
-  .update({
-    kyc_status: 'pending',
-    kyc_submitted_at: nowIso,
-    updated_at: nowIso,
-    ...(data.firstName ? { first_name: data.firstName } : {}),
-    ...(data.lastName ? { last_name: data.lastName } : {}),
-    kyc_data: kycMeta,
-  })
-  .eq('id', user.id)
-  .select('id, kyc_status, kyc_submitted_at')
-  .single();
-
-if (saveErr) throw new Error(`KYC save failed: ${saveErr.message}`);
-
-
-      if (saveErr) throw new Error(`KYC save failed: ${saveErr.message}`);
-      if (!saved?.id || saved.kyc_status !== 'pending') {
-        throw new Error('KYC save failed: record not persisted correctly.');
-      }
-
-      // Only after DB success:
-      await updateKycStatus('pending');
-      setStep(5);
-    } catch (e: any) {
-      console.error('[KYC] Submit failed:', e);
-      setSubmitError(e?.message || 'KYC submission failed. Please try again.');
-    } finally {
-      setSubmitting(false);
+    if (saveErr) {
+      const msg =
+        (saveErr as any)?.message ??
+        (saveErr as any)?.error_description ??
+        String(saveErr);
+      throw new Error(`KYC save failed: ${msg}`);
     }
-  };
+
+    if (!saved?.id || (saved as any).kyc_status !== 'pending') {
+      throw new Error('KYC save failed: record not persisted correctly.');
+    }
+
+    // Only after DB success:
+    await updateKycStatus('pending');
+    setStep(5);
+  } catch (e: any) {
+    console.error('[KYC] Submit failed:', e);
+    setSubmitError(e?.message || 'KYC submission failed. Please try again.');
+  } finally {
+    setSubmitting(false);
+  }
+};
 
   return (
     <div className="min-h-screen bg-void">
