@@ -17,7 +17,6 @@ interface KYCUser {
   created_at: string;
   kyc_data?: {
     date_of_birth?: string;
-    nationality?: string;
     address?: string;
     city?: string;
     state?: string;
@@ -234,12 +233,6 @@ export default function AdminKYCPage() {
                           <div className="bg-white/5 rounded-lg p-3">
                             <p className="text-[10px] text-slate-500 uppercase tracking-wider">Date of Birth</p>
                             <p className="text-sm text-cream mt-0.5">{u.kyc_data.date_of_birth}</p>
-                          </div>
-                        )}
-                        {u.kyc_data.nationality && (
-                          <div className="bg-white/5 rounded-lg p-3">
-                            <p className="text-[10px] text-slate-500 uppercase tracking-wider">Nationality</p>
-                            <p className="text-sm text-cream mt-0.5">{u.kyc_data.nationality}</p>
                           </div>
                         )}
                         {u.kyc_data.country && (
