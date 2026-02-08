@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Shield,
@@ -13,7 +12,6 @@ import {
   RefreshCw,
   AlertCircle,
   ExternalLink,
-  LogOut,
 } from 'lucide-react';
 
 import { useAdminAuthStore } from '@/lib/admin-store';
@@ -51,11 +49,26 @@ interface KYCUser {
 
 type Filter = 'all' | 'pending' | 'verified' | 'rejected' | 'none';
 
-export default function AdminKYCPage() {
-  const { admin, sessionToken, logout, getAuthHeader } = useAdminAuthStore();
+function getAdminToken(admin: any, sessionToken?: string | null): string | null {
+  if (!admin && !sessionToken) return null;
 
-  const [hydrated, setHydrated] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
+  return (
+    sessionToken ||
+    admin?.token ||
+    admin?.access_token ||
+    admin?.accessToken ||
+    admin?.session_token ||
+    admin?.sessionToken ||
+    (typeof window !== 'undefined' ? window.localStorage.getItem('admin_token') : null) ||
+    null
+  );
+}
+
+export default function AdminKYCPage() {
+  const { admin, isAuthenticated, logout } = useAdminAuthStore();
+
+  // ✅ use same token logic as your Admin Users page
+  const token = useMemo(() => getAdminToken(admin, (admin as any)?.sessionToken ?? null), [admin]);
 
   const [allUsers, setAllUsers] = useState<KYCUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -68,21 +81,14 @@ export default function AdminKYCPage() {
   } | null>(null);
   const [selectedUser, setSelectedUser] = useState<KYCUser | null>(null);
 
-  const hasToken = Boolean(sessionToken);
+  // ✅ token-based guard (NOT sessionToken-based)
+  const tokenOk = Boolean(isAuthenticated && admin && token);
 
   useEffect(() => {
-    setHydrated(true);
-  }, []);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    if (!hasToken) {
-      setLoading(false);
-      return;
-    }
+    if (!tokenOk) return;
     void loadUsers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, hasToken]);
+  }, [tokenOk]);
 
   useEffect(() => {
     if (!notification) return;
@@ -91,15 +97,13 @@ export default function AdminKYCPage() {
   }, [notification]);
 
   const apiFetch = async (path: string, init?: RequestInit) => {
-    if (!sessionToken) throw new Error('Missing admin token. Please log in again.');
+    if (!token) throw new Error('Missing admin token. Please log in again.');
 
     const res = await fetch(path, {
       ...init,
       headers: {
         ...(init?.headers || {}),
-        ...(getAuthHeader?.() || {}),
-        // ✅ force the common format (fixes header mismatch causing 401)
-        Authorization: `Bearer ${sessionToken}`,
+        Authorization: `Bearer ${token}`, // ✅ EXACTLY like your Users page
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
@@ -109,18 +113,11 @@ export default function AdminKYCPage() {
 
     if (!res.ok) {
       const msg = json?.error || `Request failed (${res.status})`;
-
-      // ✅ DO NOT auto-logout (that’s what was throwing you back to login)
-      // Instead show a banner and let user click logout manually.
       if (res.status === 401 || res.status === 403) {
-        setAuthError(msg || 'Session expired. Please log in again.');
+        await logout(); // auto logout on invalid token
       }
-
       throw new Error(msg);
     }
-
-    // clear auth error if a request succeeds
-    if (authError) setAuthError(null);
 
     return json;
   };
@@ -247,12 +244,8 @@ export default function AdminKYCPage() {
       if (filter !== 'all') {
         if (filter === 'pending' && s !== 'pending') return false;
         if (filter === 'rejected' && s !== 'rejected') return false;
-        if (filter === 'verified' && !['verified', 'approved'].includes(s))
-          return false;
-        if (
-          filter === 'none' &&
-          !(s === 'none' || s === 'not_started' || !u.kyc_status)
-        )
+        if (filter === 'verified' && !['verified', 'approved'].includes(s)) return false;
+        if (filter === 'none' && !(s === 'none' || s === 'not_started' || !u.kyc_status))
           return false;
       }
 
@@ -268,30 +261,10 @@ export default function AdminKYCPage() {
     });
   }, [allUsers, filter, search]);
 
-  // ✅ hydration guard
-  if (!hydrated) {
+  if (!tokenOk) {
     return (
-      <div className="text-center py-12">
-        <div className="w-8 h-8 border-2 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-3" />
-        <p className="text-cream/50">Loading...</p>
-      </div>
-    );
-  }
-
-  // ✅ token guard (don’t depend on isAuthenticated/admin flags)
-  if (!hasToken) {
-    return (
-      <div className="p-6 rounded-xl border border-white/10 bg-white/5">
-        <p className="text-cream font-semibold mb-2">Admin session required</p>
-        <p className="text-slate-400 text-sm mb-4">
-          You’re not logged in as admin (no session token found).
-        </p>
-        <Link
-          href="/admin/login"
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gold/20 text-gold border border-gold/30 hover:bg-gold/25"
-        >
-          Go to Admin Login
-        </Link>
+      <div className="flex items-center justify-center h-full">
+        <p className="text-slate-400">Please log in to access this page.</p>
       </div>
     );
   }
@@ -299,28 +272,6 @@ export default function AdminKYCPage() {
   return (
     <div className="space-y-6">
       <AnimatePresence>
-        {authError && (
-          <motion.div
-            initial={{ opacity: 0, y: -12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            className="p-4 rounded-xl border border-loss/20 bg-loss/10 text-loss flex items-start justify-between gap-3"
-          >
-            <div>
-              <p className="font-semibold">Session problem</p>
-              <p className="text-sm opacity-90">{authError}</p>
-            </div>
-            <button
-              onClick={logout}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 border border-white/10 hover:bg-white/10"
-              title="Log out"
-            >
-              <LogOut className="w-4 h-4" />
-              Logout
-            </button>
-          </motion.div>
-        )}
-
         {notification && (
           <motion.div
             initial={{ opacity: 0, y: -20 }}
@@ -342,7 +293,6 @@ export default function AdminKYCPage() {
           <h1 className="text-2xl font-bold text-cream">KYC Verification</h1>
           <p className="text-sm text-slate-400 mt-1">
             Review and manage user identity verification
-            {admin?.email ? ` • ${admin.email}` : ''}
           </p>
         </div>
         <button
