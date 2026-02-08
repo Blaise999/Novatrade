@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -8,7 +8,7 @@ import { useDropzone } from 'react-dropzone';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { 
+import {
   TrendingUp,
   User,
   MapPin,
@@ -23,7 +23,7 @@ import {
   X,
   Shield,
   Clock,
-  Gift
+  Gift,
 } from 'lucide-react';
 import { useKYCStore } from '@/lib/store';
 import { useStore } from '@/lib/supabase/store-supabase';
@@ -51,26 +51,56 @@ const documentSchema = z.object({
 });
 
 const countries = [
-  'United States', 'United Kingdom', 'Canada', 'Australia', 'Germany', 
-  'France', 'Japan', 'Singapore', 'Switzerland', 'Netherlands',
-  'Nigeria', 'South Africa', 'UAE', 'India', 'Brazil'
+  'United States',
+  'United Kingdom',
+  'Canada',
+  'Australia',
+  'Germany',
+  'France',
+  'Japan',
+  'Singapore',
+  'Switzerland',
+  'Netherlands',
+  'Nigeria',
+  'South Africa',
+  'UAE',
+  'India',
+  'Brazil',
 ];
 
 const nationalities = [
-  'American', 'British', 'Canadian', 'Australian', 'German',
-  'French', 'Japanese', 'Singaporean', 'Swiss', 'Dutch',
-  'Nigerian', 'South African', 'Emirati', 'Indian', 'Brazilian'
+  'American',
+  'British',
+  'Canadian',
+  'Australian',
+  'German',
+  'French',
+  'Japanese',
+  'Singaporean',
+  'Swiss',
+  'Dutch',
+  'Nigerian',
+  'South African',
+  'Emirati',
+  'Indian',
+  'Brazilian',
 ];
 
 export default function KYCPage() {
   const router = useRouter();
-  const { user, isLoading, updateKycStatus, updateRegistrationStatus } = useStore();
-  const { currentStep, data, updateData, setStep, setSubmitting, isSubmitting } = useKYCStore();
-  
+  const { user, isLoading, updateKycStatus } = useStore();
+  const { currentStep, data, updateData, setStep, setSubmitting, isSubmitting } =
+    useKYCStore();
+
   const [idFrontFile, setIdFrontFile] = useState<File | null>(null);
   const [idBackFile, setIdBackFile] = useState<File | null>(null);
   const [selfieFile, setSelfieFile] = useState<File | null>(null);
-  const [proofOfAddressFile, setProofOfAddressFile] = useState<File | null>(null);
+  const [proofOfAddressFile, setProofOfAddressFile] = useState<File | null>(
+    null
+  );
+
+  // ✅ NEW: Loud error surface
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // Check authentication (wait for loading to finish first)
   useEffect(() => {
@@ -87,97 +117,120 @@ export default function KYCPage() {
   ];
 
   const handleNext = () => {
-    if (currentStep < 4) {
-      setStep(currentStep + 1);
-    }
+    if (currentStep < 4) setStep(currentStep + 1);
   };
 
   const handleBack = () => {
-    if (currentStep > 1) {
-      setStep(currentStep - 1);
-    }
+    if (currentStep > 1) setStep(currentStep - 1);
   };
 
+  // ✅ FULL FIX: KYC submission that FAILS LOUDLY
   const handleSubmitKYC = async () => {
+    setSubmitError(null);
     setSubmitting(true);
+
     try {
-      // Save KYC data to Supabase
-      if (isSupabaseConfigured() && user?.id) {
-        const kycPayload: Record<string, any> = {
-          kyc_status: 'pending',
-          kyc_submitted_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
+      if (!user?.id) throw new Error('You must be logged in to submit KYC.');
+      if (!isSupabaseConfigured())
+        throw new Error('Supabase is not configured.');
 
-        // Save personal info if available
-        if (data.firstName) kycPayload.first_name = data.firstName;
-        if (data.lastName) kycPayload.last_name = data.lastName;
+      // Required docs (LOUD)
+      if (!idFrontFile) throw new Error('Please upload the FRONT of your ID.');
+      if (!selfieFile)
+        throw new Error('Please upload your selfie holding the ID.');
 
-        // Save KYC form data as JSON metadata
-        const kycMeta: Record<string, any> = {};
-        if (data.dateOfBirth) kycMeta.date_of_birth = data.dateOfBirth;
-        if (data.nationality) kycMeta.nationality = data.nationality;
-        if (data.address) kycMeta.address = data.address;
-        if (data.city) kycMeta.city = data.city;
-        if (data.state) kycMeta.state = data.state;
-        if (data.postalCode) kycMeta.postal_code = data.postalCode;
-        if (data.country) kycMeta.country = data.country;
-        if (data.idType) kycMeta.id_type = data.idType;
-        if (data.idNumber) kycMeta.id_number = data.idNumber;
-        kycPayload.kyc_data = kycMeta;
+      // If not passport, require back file (LOUD)
+      const idType = data?.idType as
+        | 'passport'
+        | 'drivers_license'
+        | 'national_id'
+        | undefined;
 
-        // Upload documents to Supabase storage if files exist
-        const uploadFile = async (file: File | null, path: string) => {
-          if (!file) return null;
-          try {
-            const ext = file.name.split('.').pop();
-            const filePath = `kyc/${user.id}/${path}.${ext}`;
-            const { error } = await supabase.storage.from('documents').upload(filePath, file, { upsert: true });
-            if (!error) return filePath;
-          } catch {}
-          return null;
-        };
-
-        const [idFrontPath, idBackPath, selfiePath, proofPath] = await Promise.all([
-          uploadFile(idFrontFile, 'id-front'),
-          uploadFile(idBackFile, 'id-back'),
-          uploadFile(selfieFile, 'selfie'),
-          uploadFile(proofOfAddressFile, 'proof-of-address'),
-        ]);
-
-        if (idFrontPath) kycMeta.id_front_doc = idFrontPath;
-        if (idBackPath) kycMeta.id_back_doc = idBackPath;
-        if (selfiePath) kycMeta.selfie_doc = selfiePath;
-        if (proofPath) kycMeta.proof_of_address_doc = proofPath;
-
-        kycPayload.kyc_data = kycMeta;
-
-        await supabase.from('users').update(kycPayload).eq('id', user.id);
+      if (idType && idType !== 'passport' && !idBackFile) {
+        throw new Error('Please upload the BACK of your ID.');
       }
 
-      // Update KYC status to pending
+      // Build metadata
+      const kycMeta: Record<string, any> = {
+        ...(data.firstName ? { first_name: data.firstName } : {}),
+        ...(data.lastName ? { last_name: data.lastName } : {}),
+        ...(data.dateOfBirth ? { date_of_birth: data.dateOfBirth } : {}),
+        ...(data.nationality ? { nationality: data.nationality } : {}),
+        ...(data.address ? { address: data.address } : {}),
+        ...(data.city ? { city: data.city } : {}),
+        ...(data.state ? { state: data.state } : {}),
+        ...(data.postalCode ? { postal_code: data.postalCode } : {}),
+        ...(data.country ? { country: data.country } : {}),
+        ...(data.idType ? { id_type: data.idType } : {}),
+        ...(data.idNumber ? { id_number: data.idNumber } : {}),
+      };
+
+      // Upload helper that throws (LOUD)
+      const uploadFile = async (file: File | null, name: string) => {
+        if (!file) return null;
+
+        const ext = file.name.split('.').pop()?.toLowerCase() || 'bin';
+        const filePath = `kyc/${user.id}/${name}.${ext}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('documents')
+          .upload(filePath, file, {
+            upsert: true,
+            contentType: file.type || 'application/octet-stream',
+            cacheControl: '3600',
+          });
+
+        if (uploadError) {
+          throw new Error(`Upload failed for ${name}: ${uploadError.message}`);
+        }
+
+        return filePath;
+      };
+
+      // Upload (LOUD)
+      const idFrontPath = await uploadFile(idFrontFile, 'id-front');
+      const idBackPath = await uploadFile(idBackFile, 'id-back');
+      const selfiePath = await uploadFile(selfieFile, 'selfie');
+      const proofPath = await uploadFile(proofOfAddressFile, 'proof-of-address');
+
+      if (idFrontPath) kycMeta.id_front_doc = idFrontPath;
+      if (idBackPath) kycMeta.id_back_doc = idBackPath;
+      if (selfiePath) kycMeta.selfie_doc = selfiePath;
+      if (proofPath) kycMeta.proof_of_address_doc = proofPath;
+
+      const nowIso = new Date().toISOString();
+
+      // ✅ Use UPSERT so row always exists; VERIFY save
+      const kycPayload: Record<string, any> = {
+        id: user.id,
+        kyc_status: 'pending',
+        kyc_submitted_at: nowIso,
+        updated_at: nowIso,
+        ...(data.firstName ? { first_name: data.firstName } : {}),
+        ...(data.lastName ? { last_name: data.lastName } : {}),
+        kyc_data: kycMeta,
+      };
+
+      const { data: saved, error: saveErr } = await supabase
+        .from('users')
+        .upsert(kycPayload, { onConflict: 'id' })
+        .select('id, kyc_status, kyc_submitted_at')
+        .single();
+
+      if (saveErr) throw new Error(`KYC save failed: ${saveErr.message}`);
+      if (!saved?.id || saved.kyc_status !== 'pending') {
+        throw new Error('KYC save failed: record not persisted correctly.');
+      }
+
+      // Only after DB success:
       await updateKycStatus('pending');
-      
-      setStep(5); // Move to success step
+      setStep(5);
+    } catch (e: any) {
+      console.error('[KYC] Submit failed:', e);
+      setSubmitError(e?.message || 'KYC submission failed. Please try again.');
     } finally {
       setSubmitting(false);
     }
-  };
-
-  // File dropzone configuration
-  const createDropzone = (
-    onDrop: (files: File[]) => void,
-    file: File | null
-  ) => {
-    return useDropzone({
-      onDrop: (acceptedFiles) => onDrop(acceptedFiles),
-      accept: {
-        'image/*': ['.jpeg', '.jpg', '.png', '.webp'],
-        'application/pdf': ['.pdf']
-      },
-      maxFiles: 1,
-      maxSize: 10 * 1024 * 1024, // 10MB
-    });
   };
 
   return (
@@ -193,7 +246,7 @@ export default function KYCPage() {
               NOVA<span className="text-gold">TRADE</span>
             </span>
           </Link>
-          
+
           <button
             onClick={() => router.push('/dashboard')}
             className="text-sm text-slate-400 hover:text-cream transition-colors"
@@ -211,10 +264,13 @@ export default function KYCPage() {
               <Clock className="w-10 h-10 text-yellow-400" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-cream mb-3">Verification Under Review</h2>
+              <h2 className="text-2xl font-bold text-cream mb-3">
+                Verification Under Review
+              </h2>
               <p className="text-slate-400 leading-relaxed max-w-md mx-auto">
-                Your identity verification documents have been submitted and are being reviewed by our team.
-                This process typically takes 1-24 hours.
+                Your identity verification documents have been submitted and are
+                being reviewed by our team. This process typically takes 1-24
+                hours.
               </p>
             </div>
             <div className="bg-yellow-500/5 border border-yellow-500/10 rounded-xl p-5 max-w-sm mx-auto">
@@ -223,7 +279,8 @@ export default function KYCPage() {
                 Awaiting Admin Approval
               </div>
               <p className="text-xs text-slate-500">
-                You&apos;ll be notified once your verification is complete. Trading and deposits will be unlocked after approval.
+                You&apos;ll be notified once your verification is complete.
+                Trading and deposits will be unlocked after approval.
               </p>
             </div>
             <button
@@ -236,117 +293,140 @@ export default function KYCPage() {
         )}
 
         {/* If KYC already verified, show success */}
-        {(user?.kycStatus === 'verified' || user?.kycStatus === 'approved') && currentStep !== 5 && (
-          <div className="text-center py-12 space-y-6">
-            <div className="w-20 h-20 bg-profit/10 rounded-2xl flex items-center justify-center mx-auto">
-              <CheckCircle className="w-10 h-10 text-profit" />
+        {(user?.kycStatus === 'verified' || user?.kycStatus === 'approved') &&
+          currentStep !== 5 && (
+            <div className="text-center py-12 space-y-6">
+              <div className="w-20 h-20 bg-profit/10 rounded-2xl flex items-center justify-center mx-auto">
+                <CheckCircle className="w-10 h-10 text-profit" />
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold text-cream mb-3">
+                  Identity Verified
+                </h2>
+                <p className="text-slate-400">
+                  Your identity has been verified. You have full access to all
+                  trading features.
+                </p>
+              </div>
+              <button
+                onClick={() => router.push('/dashboard')}
+                className="px-8 py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:opacity-90 transition-opacity"
+              >
+                Go to Dashboard
+              </button>
             </div>
-            <div>
-              <h2 className="text-2xl font-bold text-cream mb-3">Identity Verified</h2>
-              <p className="text-slate-400">Your identity has been verified. You have full access to all trading features.</p>
-            </div>
-            <button
-              onClick={() => router.push('/dashboard')}
-              className="px-8 py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:opacity-90 transition-opacity"
-            >
-              Go to Dashboard
-            </button>
-          </div>
-        )}
+          )}
 
         {/* KYC Form - only show if not already pending or verified */}
-        {(!user?.kycStatus || user?.kycStatus === 'none' || user?.kycStatus === 'not_started' || user?.kycStatus === 'rejected' || currentStep === 5) && (
-        <>
-        {/* Progress Steps */}
-        {currentStep <= 4 && (
-          <div className="mb-8">
-            <div className="flex items-center justify-between mb-4">
-              {steps.map((step, index) => (
-                <div key={step.id} className="flex items-center">
-                  <div className={`flex flex-col items-center ${index < steps.length - 1 ? 'flex-1' : ''}`}>
-                    <div className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all ${
-                      currentStep > step.id
-                        ? 'bg-profit border-profit'
-                        : currentStep === step.id
-                          ? 'bg-gold/20 border-gold'
-                          : 'bg-white/5 border-white/10'
-                    }`}>
-                      {currentStep > step.id ? (
-                        <CheckCircle className="w-5 h-5 text-void" />
-                      ) : (
-                        <step.icon className={`w-5 h-5 ${
-                          currentStep === step.id ? 'text-gold' : 'text-slate-500'
-                        }`} />
+        {(!user?.kycStatus ||
+          user?.kycStatus === 'none' ||
+          user?.kycStatus === 'not_started' ||
+          user?.kycStatus === 'rejected' ||
+          currentStep === 5) && (
+          <>
+            {/* Progress Steps */}
+            {currentStep <= 4 && (
+              <div className="mb-8">
+                <div className="flex items-center justify-between mb-4">
+                  {steps.map((step, index) => (
+                    <div key={step.id} className="flex items-center">
+                      <div
+                        className={`flex flex-col items-center ${
+                          index < steps.length - 1 ? 'flex-1' : ''
+                        }`}
+                      >
+                        <div
+                          className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all ${
+                            currentStep > step.id
+                              ? 'bg-profit border-profit'
+                              : currentStep === step.id
+                              ? 'bg-gold/20 border-gold'
+                              : 'bg-white/5 border-white/10'
+                          }`}
+                        >
+                          {currentStep > step.id ? (
+                            <CheckCircle className="w-5 h-5 text-void" />
+                          ) : (
+                            <step.icon
+                              className={`w-5 h-5 ${
+                                currentStep === step.id
+                                  ? 'text-gold'
+                                  : 'text-slate-500'
+                              }`}
+                            />
+                          )}
+                        </div>
+                        <span
+                          className={`text-xs mt-2 ${
+                            currentStep >= step.id ? 'text-cream' : 'text-slate-500'
+                          }`}
+                        >
+                          {step.title}
+                        </span>
+                      </div>
+                      {index < steps.length - 1 && (
+                        <div
+                          className={`h-0.5 w-full mx-2 mt-[-1.5rem] ${
+                            currentStep > step.id ? 'bg-profit' : 'bg-white/10'
+                          }`}
+                        />
                       )}
                     </div>
-                    <span className={`text-xs mt-2 ${
-                      currentStep >= step.id ? 'text-cream' : 'text-slate-500'
-                    }`}>
-                      {step.title}
-                    </span>
-                  </div>
-                  {index < steps.length - 1 && (
-                    <div className={`h-0.5 w-full mx-2 mt-[-1.5rem] ${
-                      currentStep > step.id ? 'bg-profit' : 'bg-white/10'
-                    }`} />
-                  )}
+                  ))}
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
+              </div>
+            )}
 
-        {/* Step Content */}
-        <AnimatePresence mode="wait">
-          {currentStep === 1 && (
-            <Step1PersonalInfo 
-              key="step1"
-              data={data}
-              updateData={updateData}
-              onNext={handleNext}
-              nationalities={nationalities}
-            />
-          )}
-          {currentStep === 2 && (
-            <Step2Address 
-              key="step2"
-              data={data}
-              updateData={updateData}
-              onNext={handleNext}
-              onBack={handleBack}
-              countries={countries}
-            />
-          )}
-          {currentStep === 3 && (
-            <Step3Documents 
-              key="step3"
-              data={data}
-              updateData={updateData}
-              idFrontFile={idFrontFile}
-              setIdFrontFile={setIdFrontFile}
-              idBackFile={idBackFile}
-              setIdBackFile={setIdBackFile}
-              proofOfAddressFile={proofOfAddressFile}
-              setProofOfAddressFile={setProofOfAddressFile}
-              onNext={handleNext}
-              onBack={handleBack}
-            />
-          )}
-          {currentStep === 4 && (
-            <Step4Selfie 
-              key="step4"
-              selfieFile={selfieFile}
-              setSelfieFile={setSelfieFile}
-              onSubmit={handleSubmitKYC}
-              onBack={handleBack}
-              isSubmitting={isSubmitting}
-            />
-          )}
-          {currentStep === 5 && (
-            <SuccessStep key="success" />
-          )}
-        </AnimatePresence>
-        </>
+            {/* Step Content */}
+            <AnimatePresence mode="wait">
+              {currentStep === 1 && (
+                <Step1PersonalInfo
+                  key="step1"
+                  data={data}
+                  updateData={updateData}
+                  onNext={handleNext}
+                  nationalities={nationalities}
+                />
+              )}
+              {currentStep === 2 && (
+                <Step2Address
+                  key="step2"
+                  data={data}
+                  updateData={updateData}
+                  onNext={handleNext}
+                  onBack={handleBack}
+                  countries={countries}
+                />
+              )}
+              {currentStep === 3 && (
+                <Step3Documents
+                  key="step3"
+                  data={data}
+                  updateData={updateData}
+                  idFrontFile={idFrontFile}
+                  setIdFrontFile={setIdFrontFile}
+                  idBackFile={idBackFile}
+                  setIdBackFile={setIdBackFile}
+                  proofOfAddressFile={proofOfAddressFile}
+                  setProofOfAddressFile={setProofOfAddressFile}
+                  onNext={handleNext}
+                  onBack={handleBack}
+                />
+              )}
+              {currentStep === 4 && (
+                <Step4Selfie
+                  key="step4"
+                  selfieFile={selfieFile}
+                  setSelfieFile={setSelfieFile}
+                  onSubmit={handleSubmitKYC}
+                  onBack={handleBack}
+                  isSubmitting={isSubmitting}
+                  submitError={submitError}
+                />
+              )}
+              {currentStep === 5 && <SuccessStep key="success" />}
+            </AnimatePresence>
+          </>
         )}
       </main>
     </div>
@@ -358,7 +438,7 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
   const {
     register,
     handleSubmit,
-    formState: { errors, isValid },
+    formState: { errors },
   } = useForm({
     resolver: zodResolver(personalInfoSchema),
     defaultValues: {
@@ -383,8 +463,12 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
       className="space-y-6"
     >
       <div>
-        <h2 className="text-2xl font-display font-bold text-cream">Personal Information</h2>
-        <p className="mt-2 text-slate-400">Please enter your legal name as it appears on your ID.</p>
+        <h2 className="text-2xl font-display font-bold text-cream">
+          Personal Information
+        </h2>
+        <p className="mt-2 text-slate-400">
+          Please enter your legal name as it appears on your ID.
+        </p>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
@@ -398,7 +482,9 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
               className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
             />
             {errors.firstName && (
-              <p className="text-sm text-loss">{errors.firstName.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.firstName.message as string}
+              </p>
             )}
           </div>
           <div className="space-y-2">
@@ -410,7 +496,9 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
               className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
             />
             {errors.lastName && (
-              <p className="text-sm text-loss">{errors.lastName.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.lastName.message as string}
+              </p>
             )}
           </div>
         </div>
@@ -423,7 +511,9 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
           />
           {errors.dateOfBirth && (
-            <p className="text-sm text-loss">{errors.dateOfBirth.message as string}</p>
+            <p className="text-sm text-loss">
+              {errors.dateOfBirth.message as string}
+            </p>
           )}
         </div>
 
@@ -435,11 +525,15 @@ function Step1PersonalInfo({ data, updateData, onNext, nationalities }: any) {
           >
             <option value="">Select nationality</option>
             {nationalities.map((nat: string) => (
-              <option key={nat} value={nat} className="bg-obsidian">{nat}</option>
+              <option key={nat} value={nat} className="bg-obsidian">
+                {nat}
+              </option>
             ))}
           </select>
           {errors.nationality && (
-            <p className="text-sm text-loss">{errors.nationality.message as string}</p>
+            <p className="text-sm text-loss">
+              {errors.nationality.message as string}
+            </p>
           )}
         </div>
 
@@ -486,8 +580,12 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
       className="space-y-6"
     >
       <div>
-        <h2 className="text-2xl font-display font-bold text-cream">Residential Address</h2>
-        <p className="mt-2 text-slate-400">Enter your current residential address.</p>
+        <h2 className="text-2xl font-display font-bold text-cream">
+          Residential Address
+        </h2>
+        <p className="mt-2 text-slate-400">
+          Enter your current residential address.
+        </p>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
@@ -500,7 +598,9 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
           />
           {errors.address && (
-            <p className="text-sm text-loss">{errors.address.message as string}</p>
+            <p className="text-sm text-loss">
+              {errors.address.message as string}
+            </p>
           )}
         </div>
 
@@ -514,11 +614,15 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
               className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
             />
             {errors.city && (
-              <p className="text-sm text-loss">{errors.city.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.city.message as string}
+              </p>
             )}
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-cream">State/Province</label>
+            <label className="text-sm font-medium text-cream">
+              State/Province
+            </label>
             <input
               {...register('state')}
               type="text"
@@ -526,7 +630,9 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
               className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
             />
             {errors.state && (
-              <p className="text-sm text-loss">{errors.state.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.state.message as string}
+              </p>
             )}
           </div>
         </div>
@@ -541,7 +647,9 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
               className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
             />
             {errors.postalCode && (
-              <p className="text-sm text-loss">{errors.postalCode.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.postalCode.message as string}
+              </p>
             )}
           </div>
           <div className="space-y-2">
@@ -552,11 +660,15 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
             >
               <option value="">Select country</option>
               {countries.map((country: string) => (
-                <option key={country} value={country} className="bg-obsidian">{country}</option>
+                <option key={country} value={country} className="bg-obsidian">
+                  {country}
+                </option>
               ))}
             </select>
             {errors.country && (
-              <p className="text-sm text-loss">{errors.country.message as string}</p>
+              <p className="text-sm text-loss">
+                {errors.country.message as string}
+              </p>
             )}
           </div>
         </div>
@@ -584,17 +696,17 @@ function Step2Address({ data, updateData, onNext, onBack, countries }: any) {
 }
 
 // Step 3: Documents
-function Step3Documents({ 
-  data, 
-  updateData, 
-  idFrontFile, 
+function Step3Documents({
+  data,
+  updateData,
+  idFrontFile,
   setIdFrontFile,
   idBackFile,
   setIdBackFile,
   proofOfAddressFile,
   setProofOfAddressFile,
-  onNext, 
-  onBack 
+  onNext,
+  onBack,
 }: any) {
   const {
     register,
@@ -622,7 +734,7 @@ function Step3Documents({
       onDrop: (acceptedFiles) => setFile(acceptedFiles[0]),
       accept: {
         'image/*': ['.jpeg', '.jpg', '.png', '.webp'],
-        'application/pdf': ['.pdf']
+        'application/pdf': ['.pdf'],
       },
       maxFiles: 1,
       maxSize: 10 * 1024 * 1024,
@@ -635,7 +747,9 @@ function Step3Documents({
           <div className="p-4 bg-profit/10 border border-profit/20 rounded-xl flex items-center justify-between">
             <div className="flex items-center gap-3">
               <CheckCircle className="w-5 h-5 text-profit" />
-              <span className="text-sm text-cream truncate max-w-[200px]">{file.name}</span>
+              <span className="text-sm text-cream truncate max-w-[200px]">
+                {file.name}
+              </span>
             </div>
             <button
               type="button"
@@ -674,8 +788,12 @@ function Step3Documents({
       className="space-y-6"
     >
       <div>
-        <h2 className="text-2xl font-display font-bold text-cream">Identity Documents</h2>
-        <p className="mt-2 text-slate-400">Upload clear photos of your government-issued ID.</p>
+        <h2 className="text-2xl font-display font-bold text-cream">
+          Identity Documents
+        </h2>
+        <p className="mt-2 text-slate-400">
+          Upload clear photos of your government-issued ID.
+        </p>
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
@@ -708,7 +826,9 @@ function Step3Documents({
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium text-cream">Document Number</label>
+          <label className="text-sm font-medium text-cream">
+            Document Number
+          </label>
           <input
             {...register('idNumber')}
             type="text"
@@ -716,7 +836,9 @@ function Step3Documents({
             className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold focus:ring-2 focus:ring-gold/20"
           />
           {errors.idNumber && (
-            <p className="text-sm text-loss">{errors.idNumber.message as string}</p>
+            <p className="text-sm text-loss">
+              {errors.idNumber.message as string}
+            </p>
           )}
         </div>
 
@@ -767,7 +889,14 @@ function Step3Documents({
 }
 
 // Step 4: Selfie Verification
-function Step4Selfie({ selfieFile, setSelfieFile, onSubmit, onBack, isSubmitting }: any) {
+function Step4Selfie({
+  selfieFile,
+  setSelfieFile,
+  onSubmit,
+  onBack,
+  isSubmitting,
+  submitError,
+}: any) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: (acceptedFiles) => setSelfieFile(acceptedFiles[0]),
     accept: { 'image/*': ['.jpeg', '.jpg', '.png', '.webp'] },
@@ -782,13 +911,29 @@ function Step4Selfie({ selfieFile, setSelfieFile, onSubmit, onBack, isSubmitting
       exit={{ opacity: 0, x: -20 }}
       className="space-y-6"
     >
+      {submitError && (
+        <div className="flex items-start gap-3 p-4 rounded-xl border border-red-500/20 bg-red-500/10">
+          <AlertCircle className="w-5 h-5 text-red-400 mt-0.5" />
+          <div>
+            <p className="text-sm font-medium text-red-300">Submission failed</p>
+            <p className="text-sm text-red-200/80">{submitError}</p>
+          </div>
+        </div>
+      )}
+
       <div>
-        <h2 className="text-2xl font-display font-bold text-cream">Selfie Verification</h2>
-        <p className="mt-2 text-slate-400">Take a clear selfie holding your ID next to your face.</p>
+        <h2 className="text-2xl font-display font-bold text-cream">
+          Selfie Verification
+        </h2>
+        <p className="mt-2 text-slate-400">
+          Take a clear selfie holding your ID next to your face.
+        </p>
       </div>
 
       <div className="bg-white/5 rounded-xl p-4 border border-white/5">
-        <h3 className="text-sm font-medium text-cream mb-3">📸 Tips for a good photo:</h3>
+        <h3 className="text-sm font-medium text-cream mb-3">
+          📸 Tips for a good photo:
+        </h3>
         <ul className="space-y-2 text-sm text-slate-400">
           <li className="flex items-center gap-2">
             <CheckCircle className="w-4 h-4 text-profit" />
@@ -892,9 +1037,12 @@ function SuccessStep() {
       </motion.div>
 
       <div>
-        <h2 className="text-3xl font-display font-bold text-cream">Verification Submitted!</h2>
+        <h2 className="text-3xl font-display font-bold text-cream">
+          Verification Submitted!
+        </h2>
         <p className="mt-4 text-slate-400 max-w-md mx-auto">
-          Your documents have been submitted for review. We&apos;ll verify your identity within 24-48 hours.
+          Your documents have been submitted for review. We&apos;ll verify your
+          identity within 24-48 hours.
         </p>
       </div>
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users,
@@ -30,14 +30,13 @@ import { useAdminAuthStore } from '@/lib/admin-store';
 import { useDepositAddressesStore } from '@/lib/trading-store';
 import { adminService, type User as AdminUser } from '@/lib/services/admin-service';
 
-// ✅ keep ONE user shape across the page (fixes: status/name/balance/marginBalance errors)
 interface UserData {
   id: string;
   email: string;
   first_name?: string;
   last_name?: string;
 
-  balance_available: number; // spot/available
+  balance_available: number;
   balance_bonus: number;
 
   total_deposited: number;
@@ -53,7 +52,6 @@ interface UserData {
   last_login_at?: string;
 }
 
-// Mock users for fallback
 const mockUsers: UserData[] = [
   {
     id: '1',
@@ -67,78 +65,28 @@ const mockUsers: UserData[] = [
     role: 'user',
     tier: 'basic',
     is_active: true,
-    kyc_status: 'verified',
+    kyc_status: 'pending',
     created_at: '2024-01-15',
     last_login_at: '2024-01-20',
   },
-  {
-    id: '2',
-    email: 'jane@example.com',
-    first_name: 'Jane',
-    last_name: 'Smith',
-    balance_available: 15000,
-    balance_bonus: 500,
-    total_deposited: 20000,
-    total_withdrawn: 5000,
-    role: 'user',
-    tier: 'pro',
-    is_active: true,
-    kyc_status: 'verified',
-    created_at: '2024-01-10',
-    last_login_at: '2024-01-20',
-  },
-  {
-    id: '3',
-    email: 'bob@example.com',
-    first_name: 'Bob',
-    last_name: 'Wilson',
-    balance_available: 2500,
-    balance_bonus: 50,
-    total_deposited: 3000,
-    total_withdrawn: 500,
-    role: 'user',
-    tier: 'basic',
-    is_active: true,
-    kyc_status: 'pending',
-    created_at: '2024-01-18',
-    last_login_at: '2024-01-19',
-  },
-  {
-    id: '4',
-    email: 'alice@example.com',
-    first_name: 'Alice',
-    last_name: 'Brown',
-    balance_available: 50000,
-    balance_bonus: 2000,
-    total_deposited: 60000,
-    total_withdrawn: 10000,
-    role: 'user',
-    tier: 'elite',
-    is_active: true,
-    kyc_status: 'verified',
-    created_at: '2023-12-01',
-    last_login_at: '2024-01-20',
-  },
-  {
-    id: '5',
-    email: 'charlie@example.com',
-    first_name: 'Charlie',
-    last_name: 'Davis',
-    balance_available: 1000,
-    balance_bonus: 0,
-    total_deposited: 2000,
-    total_withdrawn: 1000,
-    role: 'user',
-    tier: 'basic',
-    is_active: false,
-    kyc_status: 'rejected',
-    created_at: '2024-01-05',
-    last_login_at: '2024-01-10',
-  },
 ];
+
+function getAdminToken(admin: any): string | null {
+  if (!admin) return null;
+  return (
+    admin.token ||
+    admin.access_token ||
+    admin.accessToken ||
+    admin.session_token ||
+    admin.sessionToken ||
+    (typeof window !== 'undefined' ? window.localStorage.getItem('admin_token') : null) ||
+    null
+  );
+}
 
 export default function AdminUsersPage() {
   const { admin, isAuthenticated } = useAdminAuthStore();
+  const token = useMemo(() => getAdminToken(admin), [admin]);
 
   const { addresses, updateAddress, addAddress, toggleActive } = useDepositAddressesStore();
 
@@ -158,14 +106,12 @@ export default function AdminUsersPage() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showUserDetailModal, setShowUserDetailModal] = useState(false);
 
-  // ✅ This was breaking before (“margin” vs “spot|bonus”)
   const [editType, setEditType] = useState<'spot' | 'bonus'>('spot');
   const [editAction, setEditAction] = useState<'add' | 'subtract' | 'set'>('add');
   const [editAmount, setEditAmount] = useState('');
   const [editNote, setEditNote] = useState('');
   const [processing, setProcessing] = useState(false);
 
-  // Addresses modal (fixes your stray JSX + “Cannot find name 'div'” etc)
   const [showAddressModal, setShowAddressModal] = useState(false);
   const [newAddress, setNewAddress] = useState({
     currency: '',
@@ -183,14 +129,37 @@ export default function AdminUsersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [admin?.id]);
 
+  const apiFetch = async (path: string, init?: RequestInit) => {
+    if (!token) throw new Error('Missing admin token. Please log in again.');
+    const res = await fetch(path, {
+      ...init,
+      headers: {
+        ...(init?.headers || {}),
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
+    return json;
+  };
+
   const loadUsers = async () => {
     setLoading(true);
     try {
-      const { data } = await adminService.getAllUsers({ limit: 100 });
-      if (Array.isArray(data) && data.length > 0) setUsers(data as UserData[]);
-      else setUsers(mockUsers);
-    } catch {
+      // ✅ Prefer your adminService (if it’s already wired server-side).
+      const { data } = await adminService.getAllUsers({ limit: 200 });
+      if (Array.isArray(data) && data.length > 0) {
+        setUsers(data as UserData[]);
+      } else {
+        // ✅ Hard fallback: hit our admin route (must exist & return full shape)
+        const json = await apiFetch('/api/admin/users');
+        if (Array.isArray(json?.users)) setUsers(json.users as UserData[]);
+        else setUsers(mockUsers);
+      }
+    } catch (e: any) {
+      console.error('[AdminUsers] loadUsers error:', e);
       setUsers(mockUsers);
+      setNotification({ type: 'error', message: e?.message || 'Failed to load users' });
     } finally {
       setLoading(false);
     }
@@ -252,7 +221,6 @@ export default function AdminUsersPage() {
       editType === 'spot' ? selectedUser.balance_available : selectedUser.balance_bonus;
 
     try {
-      // ✅ spot uses real API methods you already have
       if (editType === 'spot') {
         if (editAction === 'add') {
           await adminService.creditBalance(selectedUser.id, amount, editNote);
@@ -266,12 +234,10 @@ export default function AdminUsersPage() {
         setNotification({ type: 'success', message: 'Spot balance updated successfully' });
         await loadUsers();
       } else {
-        // ✅ bonus endpoints may not exist in your adminService yet
-        // so we fall back to local update (no TS errors, no build crash)
         throw new Error('Bonus adjustment not wired to API yet');
       }
-    } catch {
-      // Local fallback for demo / missing endpoints
+    } catch (e: any) {
+      console.warn('[AdminUsers] edit balance fallback:', e);
       setUsers((prev) =>
         prev.map((u) => {
           if (u.id !== selectedUser.id) return u;
@@ -335,6 +301,26 @@ export default function AdminUsersPage() {
     }
   };
 
+  // ✅ CONNECTED KYC ACTIONS (NO anon supabase)
+  const handleKycAction = async (userId: string, action: 'approve' | 'reject') => {
+    try {
+      if (action === 'approve') {
+        await apiFetch(`/api/admin/kyc/${userId}/approve`, { method: 'POST' });
+        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: 'verified' } : u)));
+        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: 'verified' });
+        setNotification({ type: 'success', message: `KYC approved for ${selectedUser?.email ?? 'user'}` });
+      } else {
+        await apiFetch(`/api/admin/kyc/${userId}/reject`, { method: 'POST' });
+        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: 'rejected' } : u)));
+        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: 'rejected' });
+        setNotification({ type: 'error', message: `KYC rejected for ${selectedUser?.email ?? 'user'}` });
+      }
+    } catch (e: any) {
+      console.error('[AdminUsers] KYC action error:', e);
+      setNotification({ type: 'error', message: e?.message || 'KYC action failed' });
+    }
+  };
+
   const handleSaveAddress = (id: string) => {
     if (admin) updateAddress(id, editingAddressValue, admin.id);
     setEditingAddressId(null);
@@ -362,6 +348,8 @@ export default function AdminUsersPage() {
 
   const displayName = (u: UserData) =>
     `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim() || u.email;
+
+  const kycLabel = (s: string) => (s === 'approved' ? 'verified' : s || 'none');
 
   return (
     <div className="space-y-6">
@@ -463,7 +451,7 @@ export default function AdminUsersPage() {
             <div>
               <p className="text-sm text-slate-400">KYC Verified</p>
               <p className="text-xl font-bold text-cream">
-                {users.filter((u) => u.kyc_status === 'verified').length}
+                {users.filter((u) => kycLabel(u.kyc_status) === 'verified').length}
               </p>
             </div>
           </div>
@@ -538,104 +526,109 @@ export default function AdminUsersPage() {
                   </td>
                 </tr>
               ) : (
-                filteredUsers.map((user) => (
-                  <tr key={user.id} className="border-b border-white/5 hover:bg-white/5">
-                    <td className="p-4">
-                      <div>
-                        <p className="text-cream font-medium">{displayName(user)}</p>
-                        <p className="text-sm text-slate-400">{user.email}</p>
-                      </div>
-                    </td>
+                filteredUsers.map((user) => {
+                  const kyc = kycLabel(user.kyc_status);
 
-                    <td className="p-4 text-right">
-                      <span className="text-cream font-mono">
-                        ${(user.balance_available ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </span>
-                    </td>
+                  return (
+                    <tr key={user.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="p-4">
+                        <div>
+                          <p className="text-cream font-medium">{displayName(user)}</p>
+                          <p className="text-sm text-slate-400">{user.email}</p>
+                        </div>
+                      </td>
 
-                    <td className="p-4 text-right">
-                      <span className="text-gold font-mono">
-                        ${(user.balance_bonus ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </span>
-                    </td>
+                      <td className="p-4 text-right">
+                        <span className="text-cream font-mono">
+                          ${(user.balance_available ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </td>
 
-                    <td className="p-4 text-right">
-                      <span className="text-profit font-mono">
-                        ${(user.total_deposited ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </span>
-                    </td>
+                      <td className="p-4 text-right">
+                        <span className="text-gold font-mono">
+                          ${(user.balance_bonus ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </td>
 
-                    <td className="p-4 text-center">
-                      <select
-                        value={user.role}
-                        onChange={(e) => handleChangeRole(user, e.target.value)}
-                        className="px-2 py-1 bg-white/5 border border-white/10 rounded text-xs text-cream focus:outline-none"
-                      >
-                        <option value="user">User</option>
-                        <option value="support">Support</option>
-                        <option value="admin">Admin</option>
-                        <option value="super_admin">Super Admin</option>
-                      </select>
-                    </td>
+                      <td className="p-4 text-right">
+                        <span className="text-profit font-mono">
+                          ${(user.total_deposited ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      </td>
 
-                    <td className="p-4 text-center">
-                      <span
-                        className={`px-2 py-1 rounded-lg text-xs font-medium ${
-                          user.kyc_status === 'verified'
-                            ? 'bg-profit/20 text-profit'
-                            : user.kyc_status === 'pending'
-                            ? 'bg-gold/20 text-gold'
-                            : user.kyc_status === 'rejected'
-                            ? 'bg-loss/20 text-loss'
-                            : 'bg-white/10 text-slate-400'
-                        }`}
-                      >
-                        {(user.kyc_status || 'none').toUpperCase()}
-                      </span>
-                    </td>
-
-                    <td className="p-4 text-center">
-                      <span
-                        className={`px-2 py-1 rounded-lg text-xs font-medium ${
-                          user.is_active ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                        }`}
-                      >
-                        {user.is_active ? 'ACTIVE' : 'FROZEN'}
-                      </span>
-                    </td>
-                    <td className="p-4">
-                      <div className="flex items-center justify-center gap-2">
-                        <button
-                          onClick={() => openDetailModal(user)}
-                          className="p-1.5 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
-                          title="View Details"
+                      <td className="p-4 text-center">
+                        <select
+                          value={user.role}
+                          onChange={(e) => handleChangeRole(user, e.target.value)}
+                          className="px-2 py-1 bg-white/5 border border-white/10 rounded text-xs text-cream focus:outline-none"
                         >
-                          <Eye className="w-4 h-4" />
-                        </button>
+                          <option value="user">User</option>
+                          <option value="support">Support</option>
+                          <option value="admin">Admin</option>
+                          <option value="super_admin">Super Admin</option>
+                        </select>
+                      </td>
 
-                        <button
-                          onClick={() => openEditModal(user)}
-                          className="p-1.5 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
-                          title="Edit Balance"
-                        >
-                          <DollarSign className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          onClick={() => handleToggleUserStatus(user)}
-                          className={`p-1.5 rounded-lg transition-all ${
-                            user.is_active
-                              ? 'bg-loss/10 text-loss hover:bg-loss/20'
-                              : 'bg-profit/10 text-profit hover:bg-profit/20'
+                      <td className="p-4 text-center">
+                        <span
+                          className={`px-2 py-1 rounded-lg text-xs font-medium ${
+                            kyc === 'verified'
+                              ? 'bg-profit/20 text-profit'
+                              : kyc === 'pending'
+                              ? 'bg-gold/20 text-gold'
+                              : kyc === 'rejected'
+                              ? 'bg-loss/20 text-loss'
+                              : 'bg-white/10 text-slate-400'
                           }`}
-                          title={user.is_active ? 'Freeze User' : 'Unfreeze User'}
                         >
-                          {user.is_active ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                          {kyc.toUpperCase()}
+                        </span>
+                      </td>
+
+                      <td className="p-4 text-center">
+                        <span
+                          className={`px-2 py-1 rounded-lg text-xs font-medium ${
+                            user.is_active ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                          }`}
+                        >
+                          {user.is_active ? 'ACTIVE' : 'FROZEN'}
+                        </span>
+                      </td>
+
+                      <td className="p-4">
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            onClick={() => openDetailModal(user)}
+                            className="p-1.5 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
+                            title="View Details"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            onClick={() => openEditModal(user)}
+                            className="p-1.5 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
+                            title="Edit Balance"
+                          >
+                            <DollarSign className="w-4 h-4" />
+                          </button>
+
+                          <button
+                            onClick={() => handleToggleUserStatus(user)}
+                            className={`p-1.5 rounded-lg transition-all ${
+                              user.is_active
+                                ? 'bg-loss/10 text-loss hover:bg-loss/20'
+                                : 'bg-profit/10 text-profit hover:bg-profit/20'
+                            }`}
+                            title={user.is_active ? 'Freeze User' : 'Unfreeze User'}
+                          >
+                            {user.is_active ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -659,10 +652,7 @@ export default function AdminUsersPage() {
             >
               <div className="flex items-center justify-between mb-5">
                 <h3 className="text-xl font-semibold text-cream">User Details</h3>
-                <button
-                  onClick={() => setShowUserDetailModal(false)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
+                <button onClick={() => setShowUserDetailModal(false)} className="p-2 hover:bg-white/10 rounded-lg">
                   <X className="w-5 h-5 text-slate-400" />
                 </button>
               </div>
@@ -676,98 +666,65 @@ export default function AdminUsersPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Spot</p>
-                    <p className="text-cream font-mono">
-                      ${(selectedUser.balance_available ?? 0).toLocaleString()}
-                    </p>
+                    <p className="text-cream font-mono">${(selectedUser.balance_available ?? 0).toLocaleString()}</p>
                   </div>
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Bonus</p>
-                    <p className="text-gold font-mono">
-                      ${(selectedUser.balance_bonus ?? 0).toLocaleString()}
-                    </p>
+                    <p className="text-gold font-mono">${(selectedUser.balance_bonus ?? 0).toLocaleString()}</p>
                   </div>
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Deposited</p>
-                    <p className="text-profit font-mono">
-                      ${(selectedUser.total_deposited ?? 0).toLocaleString()}
-                    </p>
+                    <p className="text-profit font-mono">${(selectedUser.total_deposited ?? 0).toLocaleString()}</p>
                   </div>
                   <div className="p-3 bg-white/5 rounded-xl">
                     <p className="text-xs text-slate-400">Withdrawn</p>
-                    <p className="text-loss font-mono">
-                      ${(selectedUser.total_withdrawn ?? 0).toLocaleString()}
-                    </p>
+                    <p className="text-loss font-mono">${(selectedUser.total_withdrawn ?? 0).toLocaleString()}</p>
                   </div>
                 </div>
 
                 <div className="p-3 bg-white/5 rounded-xl text-sm text-slate-300 space-y-1">
-                  <p>
-                    <span className="text-slate-400">Role:</span> {selectedUser.role}
-                  </p>
-                  <p>
-                    <span className="text-slate-400">Tier:</span> {selectedUser.tier}
-                  </p>
+                  <p><span className="text-slate-400">Role:</span> {selectedUser.role}</p>
+                  <p><span className="text-slate-400">Tier:</span> {selectedUser.tier}</p>
                   <p>
                     <span className="text-slate-400">KYC:</span>{' '}
-                    <span className={
-                      selectedUser.kyc_status === 'verified' ? 'text-profit font-medium' :
-                      selectedUser.kyc_status === 'pending' ? 'text-yellow-400 font-medium' :
-                      selectedUser.kyc_status === 'rejected' ? 'text-loss font-medium' : ''
-                    }>
-                      {(selectedUser.kyc_status || 'none').toUpperCase()}
+                    <span
+                      className={
+                        kycLabel(selectedUser.kyc_status) === 'verified'
+                          ? 'text-profit font-medium'
+                          : kycLabel(selectedUser.kyc_status) === 'pending'
+                          ? 'text-yellow-400 font-medium'
+                          : kycLabel(selectedUser.kyc_status) === 'rejected'
+                          ? 'text-loss font-medium'
+                          : ''
+                      }
+                    >
+                      {kycLabel(selectedUser.kyc_status).toUpperCase()}
                     </span>
                   </p>
-                  <p>
-                    <span className="text-slate-400">Status:</span> {selectedUser.is_active ? 'active' : 'frozen'}
-                  </p>
-                  <p>
-                    <span className="text-slate-400">Created:</span> {selectedUser.created_at}
-                  </p>
-                  <p>
-                    <span className="text-slate-400">Last login:</span> {selectedUser.last_login_at ?? '—'}
-                  </p>
+                  <p><span className="text-slate-400">Status:</span> {selectedUser.is_active ? 'active' : 'frozen'}</p>
+                  <p><span className="text-slate-400">Created:</span> {selectedUser.created_at}</p>
+                  <p><span className="text-slate-400">Last login:</span> {selectedUser.last_login_at ?? '—'}</p>
                 </div>
 
-                {/* KYC Review Actions */}
-                {(selectedUser.kyc_status === 'pending' || selectedUser.kyc_status === 'rejected' || selectedUser.kyc_status === 'none') && (
+                {/* ✅ KYC Review Actions now call /api/admin/kyc/... */}
+                {(kycLabel(selectedUser.kyc_status) === 'pending' ||
+                  kycLabel(selectedUser.kyc_status) === 'rejected' ||
+                  kycLabel(selectedUser.kyc_status) === 'none') && (
                   <div className="p-3 bg-yellow-500/5 rounded-xl border border-yellow-500/10">
                     <p className="text-xs text-yellow-400 font-medium mb-3">
-                      {selectedUser.kyc_status === 'pending' ? '⏳ KYC Pending Review' : '🔑 KYC Actions'}
+                      {kycLabel(selectedUser.kyc_status) === 'pending' ? '⏳ KYC Pending Review' : '🔑 KYC Actions'}
                     </p>
                     <div className="flex gap-2">
                       <button
-                        onClick={async () => {
-                          try {
-                            const { error } = await (await import('@/lib/supabase/client')).supabase
-                              .from('users')
-                              .update({ kyc_status: 'verified' })
-                              .eq('id', selectedUser.id);
-                            if (!error) {
-                              setUsers(prev => prev.map(u => u.id === selectedUser.id ? { ...u, kyc_status: 'verified' } : u));
-                              setSelectedUser({ ...selectedUser, kyc_status: 'verified' });
-                              setNotification({ type: 'success', message: `KYC approved for ${selectedUser.email}` });
-                            }
-                          } catch {}
-                        }}
+                        onClick={() => handleKycAction(selectedUser.id, 'approve')}
                         className="flex-1 flex items-center justify-center gap-2 py-2 bg-profit/20 text-profit text-sm font-semibold rounded-lg hover:bg-profit/30 transition-all border border-profit/20"
                       >
                         <CheckCircle className="w-4 h-4" /> Approve KYC
                       </button>
-                      {selectedUser.kyc_status !== 'rejected' && (
+
+                      {kycLabel(selectedUser.kyc_status) !== 'rejected' && (
                         <button
-                          onClick={async () => {
-                            try {
-                              const { error } = await (await import('@/lib/supabase/client')).supabase
-                                .from('users')
-                                .update({ kyc_status: 'rejected' })
-                                .eq('id', selectedUser.id);
-                              if (!error) {
-                                setUsers(prev => prev.map(u => u.id === selectedUser.id ? { ...u, kyc_status: 'rejected' } : u));
-                                setSelectedUser({ ...selectedUser, kyc_status: 'rejected' });
-                                setNotification({ type: 'error', message: `KYC rejected for ${selectedUser.email}` });
-                              }
-                            } catch {}
-                          }}
+                          onClick={() => handleKycAction(selectedUser.id, 'reject')}
                           className="flex-1 flex items-center justify-center gap-2 py-2 bg-loss/20 text-loss text-sm font-semibold rounded-lg hover:bg-loss/30 transition-all border border-loss/20"
                         >
                           <XCircle className="w-4 h-4" /> Reject KYC
@@ -777,7 +734,7 @@ export default function AdminUsersPage() {
                   </div>
                 )}
 
-                {selectedUser.kyc_status === 'verified' && (
+                {kycLabel(selectedUser.kyc_status) === 'verified' && (
                   <div className="p-3 bg-profit/5 rounded-xl border border-profit/10 flex items-center gap-2">
                     <CheckCircle className="w-4 h-4 text-profit" />
                     <span className="text-sm text-profit font-medium">KYC Verified ✓</span>
@@ -816,16 +773,11 @@ export default function AdminUsersPage() {
                   <p className="text-sm text-cream font-medium">{displayName(selectedUser)}</p>
                   <p className="text-xs text-slate-400">{selectedUser.email}</p>
                   <div className="flex gap-4 mt-2">
-                    <span className="text-xs text-slate-400">
-                      Spot: ${selectedUser.balance_available.toLocaleString()}
-                    </span>
-                    <span className="text-xs text-slate-400">
-                      Bonus: ${selectedUser.balance_bonus.toLocaleString()}
-                    </span>
+                    <span className="text-xs text-slate-400">Spot: ${selectedUser.balance_available.toLocaleString()}</span>
+                    <span className="text-xs text-slate-400">Bonus: ${selectedUser.balance_bonus.toLocaleString()}</span>
                   </div>
                 </div>
 
-                {/* Account Type */}
                 <div>
                   <label className="block text-sm text-slate-400 mb-2">Account Type</label>
                   <div className="grid grid-cols-2 gap-2">
@@ -857,7 +809,6 @@ export default function AdminUsersPage() {
                   )}
                 </div>
 
-                {/* Action Type */}
                 <div>
                   <label className="block text-sm text-slate-400 mb-2">Action</label>
                   <div className="grid grid-cols-3 gap-2">
@@ -897,7 +848,6 @@ export default function AdminUsersPage() {
                   </div>
                 </div>
 
-                {/* Amount */}
                 <div>
                   <label className="block text-sm text-slate-400 mb-2">Amount</label>
                   <div className="relative">
@@ -912,7 +862,6 @@ export default function AdminUsersPage() {
                   </div>
                 </div>
 
-                {/* Note */}
                 <div>
                   <label className="block text-sm text-slate-400 mb-2">Note (for audit)</label>
                   <input
@@ -924,7 +873,6 @@ export default function AdminUsersPage() {
                   />
                 </div>
 
-                {/* Actions */}
                 <div className="flex gap-3 pt-2">
                   <button
                     onClick={() => setShowEditModal(false)}
@@ -946,7 +894,7 @@ export default function AdminUsersPage() {
         )}
       </AnimatePresence>
 
-      {/* Manage Addresses Modal */}
+      {/* Manage Addresses Modal (unchanged) */}
       <AnimatePresence>
         {showAddressModal && (
           <motion.div
@@ -968,7 +916,6 @@ export default function AdminUsersPage() {
                 </button>
               </div>
 
-              {/* Addresses table */}
               <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="w-full">
@@ -1032,16 +979,10 @@ export default function AdminUsersPage() {
                                 </button>
                               </div>
                             )}
-                            {addr.memo ? (
-                              <p className="text-xs text-slate-500 mt-1">Memo: {addr.memo}</p>
-                            ) : null}
+                            {addr.memo ? <p className="text-xs text-slate-500 mt-1">Memo: {addr.memo}</p> : null}
                           </td>
                           <td className="p-4 text-center">
-                            <span
-                              className={`px-2 py-1 text-xs rounded-full ${
-                                addr.isActive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
-                              }`}
-                            >
+                            <span className={`px-2 py-1 text-xs rounded-full ${addr.isActive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'}`}>
                               {addr.isActive ? 'Active' : 'Inactive'}
                             </span>
                           </td>
@@ -1062,11 +1003,7 @@ export default function AdminUsersPage() {
                                 className="p-2 hover:bg-white/10 rounded-lg transition-colors"
                                 title={addr.isActive ? 'Deactivate' : 'Activate'}
                               >
-                                {addr.isActive ? (
-                                  <EyeOff className="w-4 h-4 text-slate-400" />
-                                ) : (
-                                  <Eye className="w-4 h-4 text-slate-400" />
-                                )}
+                                {addr.isActive ? <EyeOff className="w-4 h-4 text-slate-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
                               </button>
                             </div>
                           </td>
@@ -1085,7 +1022,6 @@ export default function AdminUsersPage() {
                 </div>
               </div>
 
-              {/* Add new address */}
               <div className="mt-5 grid grid-cols-1 md:grid-cols-4 gap-3">
                 <input
                   className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold uppercase"
