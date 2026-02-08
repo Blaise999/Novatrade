@@ -1,78 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
-
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
+function supabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function requireAdmin(request: NextRequest) {
-  const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return null;
-  const token = auth.slice(7).trim();
-  if (!token) return null;
+async function requireAdmin(req: NextRequest) {
+  const auth = req.headers.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token) return { ok: false, status: 401, error: 'Missing admin token' };
 
-  const tokenHash = hashToken(token);
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const sb = supabaseAdmin();
 
-  const { data, error } = await supabaseAdmin
+  const { data: session } = await sb
     .from('admin_sessions')
-    .select('id, admin_id, revoked_at, expires_at')
+    .select('admin_id, expires_at, revoked_at')
     .eq('token_hash', tokenHash)
     .maybeSingle();
 
-  if (error || !data || data.revoked_at) return null;
-  if (data.expires_at && new Date(data.expires_at) <= new Date()) return null;
-
-  return { adminId: (data as any).admin_id ?? null };
-}
-
-export async function POST(request: NextRequest, ctx: { params: { userId: string } }) {
-  try {
-    const admin = await requireAdmin(request);
-    if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const userId = ctx.params.userId;
-
-    const { error } = await supabaseAdmin
-      .from('users')
-      .update({
-        kyc_status: 'verified',
-        kyc_reviewed_at: new Date().toISOString(),
-        kyc_reviewed_by: admin.adminId,
-      } as any)
-      .eq('id', userId);
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-
-    // optional audit (only if table exists)
-    // optional audit (don’t break the endpoint if logging fails)
-try {
-  const { error: logError } = await supabaseAdmin.from('admin_logs').insert({
-    admin_id: admin.adminId,
-    action: 'kyc_approve',
-    target_type: 'user',
-    target_id: userId,
-    created_at: new Date().toISOString(),
-  } as any);
-
-  // ignore logError on purpose
-} catch {
-  // ignore
-}
-
-
-    return NextResponse.json({ success: true });
-  } catch (e: any) {
-    console.error('[AdminKYC] approve error:', e);
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
+  if (!session || session.revoked_at) return { ok: false, status: 401, error: 'Invalid admin session' };
+  if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
+    return { ok: false, status: 401, error: 'Session expired' };
   }
+
+  return { ok: true, adminId: session.admin_id as string };
+}
+
+export async function POST(req: NextRequest, { params }: { params: { userId: string } }) {
+  const guard = await requireAdmin(req);
+  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
+
+  const sb = supabaseAdmin();
+  const userId = params.userId;
+  const now = new Date().toISOString();
+
+  const { data, error } = await sb
+    .from('users')
+    .update({
+      kyc_status: 'verified',
+      kyc_reviewed_at: now,
+      kyc_reviewed_by: guard.adminId,
+      updated_at: now,
+    })
+    .eq('id', userId)
+    .select('id, kyc_status')
+    .single();
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  return NextResponse.json({ ok: true, user: data });
 }
