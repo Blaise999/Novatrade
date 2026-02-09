@@ -588,6 +588,7 @@ export default function AdminSupportPage() {
                       className="px-4 py-3 bg-gold text-void rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
                       aria-label="Send"
                     >
+                      
                       {isSending ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                     </button>
                   </div>
