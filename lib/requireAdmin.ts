@@ -1,4 +1,4 @@
-// lib/admin/requireAdmin.ts
+// lib/requireAdmin.ts
 import 'server-only';
 
 import { NextRequest } from 'next/server';
