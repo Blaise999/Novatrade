@@ -586,7 +586,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const session = localStorage.getItem('novatrade_session');
+        const session = sessionStorage.getItem('novatrade_session');
         if (session) set({ user: normalizeUser(JSON.parse(session)), isAuthenticated: true });
         else set({ user: null, isAuthenticated: false });
         return;

@@ -21,6 +21,11 @@ async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
 }
 
 // ============================================
+// STORAGE HELPER (client only)
+// ============================================
+const storage = typeof window !== 'undefined' ? window.sessionStorage : null;
+
+// ============================================
 // TYPES
 // ============================================
 export type RegistrationStatus =
@@ -210,14 +215,14 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+        const users = JSON.parse(storage?.getItem('novatrade_users') || '[]');
         const found = users.find(
           (u: any) => u.email === email.toLowerCase() && u.password === password
         );
         if (!found) return { success: false, error: 'Invalid email or password' };
 
         const { password: _pw, ...userWithoutPw } = found;
-        localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
+        storage?.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: userWithoutPw, isAuthenticated: true });
         return { success: true, redirect: '/dashboard' };
@@ -317,7 +322,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+        const users = JSON.parse(storage?.getItem('novatrade_users') || '[]');
         if (users.find((u: any) => u.email === email.toLowerCase())) {
           set({ error: 'Email already registered' });
           return { success: false, error: 'Email already registered' };
@@ -340,8 +345,8 @@ export const useStore = create<AuthStore>((set, get) => ({
         };
 
         users.push({ ...newUser, password });
-        localStorage.setItem('novatrade_users', JSON.stringify(users));
-        localStorage.setItem('novatrade_session', JSON.stringify(newUser));
+        storage?.setItem('novatrade_users', JSON.stringify(users));
+        storage?.setItem('novatrade_session', JSON.stringify(newUser));
 
         set({ user: newUser, isAuthenticated: true });
         return { success: true };
@@ -381,7 +386,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
   logout: async () => {
     try {
-      if (!isSupabaseConfigured()) localStorage.removeItem('novatrade_session');
+      if (!isSupabaseConfigured()) storage?.removeItem('novatrade_session');
       else await supabase.auth.signOut();
     } finally {
       set({
@@ -401,7 +406,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const session = localStorage.getItem('novatrade_session');
+        const session = storage?.getItem('novatrade_session');
         if (session) set({ user: JSON.parse(session), isAuthenticated: true });
         else set({ user: null, isAuthenticated: false });
         return;
@@ -444,7 +449,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, ...updates };
-        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        storage?.setItem('novatrade_session', JSON.stringify(updatedUser));
         set({ user: updatedUser });
         return true;
       }
@@ -481,7 +486,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, registrationStatus: status };
-        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        storage?.setItem('novatrade_session', JSON.stringify(updatedUser));
         set({ user: updatedUser });
         return true;
       }
@@ -513,7 +518,6 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  // ✅ THIS IS THE ONE YOUR SCREENSHOT IS COMPLAINING ABOUT
   updateKycStatus: async (status) => {
     const { user } = get();
     if (!user) return false;
@@ -530,7 +534,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           kycStatus: status,
           registrationStatus: nextRegistrationStatus,
         };
-        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        storage?.setItem('novatrade_session', JSON.stringify(updatedUser));
         set({ user: updatedUser });
         return true;
       }

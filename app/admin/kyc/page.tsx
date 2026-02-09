@@ -49,26 +49,14 @@ interface KYCUser {
 
 type Filter = 'all' | 'pending' | 'verified' | 'rejected' | 'none';
 
-function getAdminToken(admin: any, sessionToken?: string | null): string | null {
-  if (!admin && !sessionToken) return null;
-
-  return (
-    sessionToken ||
-    admin?.token ||
-    admin?.access_token ||
-    admin?.accessToken ||
-    admin?.session_token ||
-    admin?.sessionToken ||
-    (typeof window !== 'undefined' ? window.localStorage.getItem('admin_token') : null) ||
-    null
-  );
-}
-
 export default function AdminKYCPage() {
-  const { admin, isAuthenticated, logout } = useAdminAuthStore();
+  const { admin, isAuthenticated, sessionToken, logout } = useAdminAuthStore();
 
-  // ✅ use same token logic as your Admin Users page
-  const token = useMemo(() => getAdminToken(admin, (admin as any)?.sessionToken ?? null), [admin]);
+  // ✅ The ONLY token you actually create + persist in your store
+  const token = sessionToken;
+
+  // ✅ token-based guard
+  const tokenOk = Boolean(isAuthenticated && admin && token);
 
   const [allUsers, setAllUsers] = useState<KYCUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,9 +68,6 @@ export default function AdminKYCPage() {
     message: string;
   } | null>(null);
   const [selectedUser, setSelectedUser] = useState<KYCUser | null>(null);
-
-  // ✅ token-based guard (NOT sessionToken-based)
-  const tokenOk = Boolean(isAuthenticated && admin && token);
 
   useEffect(() => {
     if (!tokenOk) return;
@@ -103,7 +88,7 @@ export default function AdminKYCPage() {
       ...init,
       headers: {
         ...(init?.headers || {}),
-        Authorization: `Bearer ${token}`, // ✅ EXACTLY like your Users page
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
@@ -113,8 +98,9 @@ export default function AdminKYCPage() {
 
     if (!res.ok) {
       const msg = json?.error || `Request failed (${res.status})`;
+      // ✅ If token is invalid, auto logout
       if (res.status === 401 || res.status === 403) {
-        await logout(); // auto logout on invalid token
+        await logout();
       }
       throw new Error(msg);
     }
@@ -182,9 +168,7 @@ export default function AdminKYCPage() {
     return {
       all: allUsers.length,
       pending: allUsers.filter((u) => norm(u.kyc_status) === 'pending').length,
-      verified: allUsers.filter((u) =>
-        ['verified', 'approved'].includes(norm(u.kyc_status))
-      ).length,
+      verified: allUsers.filter((u) => ['verified', 'approved'].includes(norm(u.kyc_status))).length,
       rejected: allUsers.filter((u) => norm(u.kyc_status) === 'rejected').length,
       none: allUsers.filter((u) => {
         const s = norm(u.kyc_status);
@@ -245,8 +229,7 @@ export default function AdminKYCPage() {
         if (filter === 'pending' && s !== 'pending') return false;
         if (filter === 'rejected' && s !== 'rejected') return false;
         if (filter === 'verified' && !['verified', 'approved'].includes(s)) return false;
-        if (filter === 'none' && !(s === 'none' || s === 'not_started' || !u.kyc_status))
-          return false;
+        if (filter === 'none' && !(s === 'none' || s === 'not_started' || !u.kyc_status)) return false;
       }
 
       if (search) {
@@ -299,41 +282,30 @@ export default function AdminKYCPage() {
           onClick={loadUsers}
           className="p-2 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
         >
-          <RefreshCw
-            className={`w-5 h-5 text-cream/60 ${loading ? 'animate-spin' : ''}`}
-          />
+          <RefreshCw className={`w-5 h-5 text-cream/60 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        {(['all', 'pending', 'verified', 'rejected', 'none'] as Filter[]).map(
-          (key) => {
-            const sc =
-              key === 'all'
-                ? {
-                    color: 'text-cream',
-                    bg: 'bg-white/5',
-                    Icon: User,
-                    label: 'All Users',
-                  }
-                : statusConfig[key];
+        {(['all', 'pending', 'verified', 'rejected', 'none'] as Filter[]).map((key) => {
+          const sc =
+            key === 'all'
+              ? { color: 'text-cream', bg: 'bg-white/5', Icon: User, label: 'All Users' }
+              : statusConfig[key];
 
-            return (
-              <button
-                key={key}
-                onClick={() => setFilter(key)}
-                className={`p-4 rounded-xl border transition-all text-left ${
-                  filter === key
-                    ? 'border-gold/50 bg-gold/5'
-                    : 'border-white/5 bg-white/5 hover:border-white/10'
-                }`}
-              >
-                <p className="text-2xl font-bold text-cream">{counts[key]}</p>
-                <p className={`text-xs ${sc.color}`}>{sc.label}</p>
-              </button>
-            );
-          }
-        )}
+          return (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              className={`p-4 rounded-xl border transition-all text-left ${
+                filter === key ? 'border-gold/50 bg-gold/5' : 'border-white/5 bg-white/5 hover:border-white/10'
+              }`}
+            >
+              <p className="text-2xl font-bold text-cream">{counts[key]}</p>
+              <p className={`text-xs ${sc.color}`}>{sc.label}</p>
+            </button>
+          );
+        })}
       </div>
 
       <div className="relative">
@@ -386,16 +358,11 @@ export default function AdminKYCPage() {
                   </div>
 
                   <div className="flex items-center gap-3 flex-wrap">
-                    <span
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${sc.bg} ${sc.color}`}
-                    >
+                    <span className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${sc.bg} ${sc.color}`}>
                       <sc.Icon className="w-3.5 h-3.5" /> {sc.label}
                     </span>
 
-                    {(s === 'pending' ||
-                      s === 'none' ||
-                      s === 'rejected' ||
-                      s === 'not_started') && (
+                    {(s === 'pending' || s === 'none' || s === 'rejected' || s === 'not_started') && (
                       <div className="flex gap-2">
                         <button
                           onClick={() => updateKYC(u.id, 'verified')}
@@ -419,13 +386,10 @@ export default function AdminKYCPage() {
 
                     {(u.kyc_data || u.kyc_docs) && (
                       <button
-                        onClick={() =>
-                          setSelectedUser(selectedUser?.id === u.id ? null : u)
-                        }
+                        onClick={() => setSelectedUser(selectedUser?.id === u.id ? null : u)}
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 text-cream/60 text-xs font-medium rounded-lg hover:bg-white/10 transition-all border border-white/5"
                       >
-                        <User className="w-3.5 h-3.5" />{' '}
-                        {selectedUser?.id === u.id ? 'Hide' : 'View'} Details
+                        <User className="w-3.5 h-3.5" /> {selectedUser?.id === u.id ? 'Hide' : 'View'} Details
                       </button>
                     )}
                   </div>
@@ -485,8 +449,7 @@ export default function AdminKYCPage() {
                               rel="noreferrer"
                               className="inline-flex items-center gap-1.5 px-2 py-1 bg-electric/10 text-electric text-xs rounded-md"
                             >
-                              <ExternalLink className="w-3.5 h-3.5" /> Proof of
-                              Address
+                              <ExternalLink className="w-3.5 h-3.5" /> Proof of Address
                             </a>
                           )}
 

@@ -35,14 +35,20 @@ function getSupabaseClient(): SupabaseClient {
     return supabaseInstance;
   }
 
-  supabaseInstance = createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      autoRefreshToken: true,
-      persistSession: true,
-      detectSessionInUrl: true,
-      flowType: 'pkce',
-    },
-  });
+ supabaseInstance = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: true,
+    persistSession: true,
+    detectSessionInUrl: true,
+    flowType: 'pkce',
+
+    // ✅ KEY FIX: per-tab auth session (4 tabs = 4 users)
+    storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
+
+    // optional but nice (avoids collisions if you run multiple apps on same domain)
+    storageKey: 'novatrade-sb-auth',
+  },
+});
 
   return supabaseInstance;
 }

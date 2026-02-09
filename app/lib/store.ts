@@ -351,12 +351,12 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+        const users = JSON.parse(sessionStorage.getItem('novatrade_users') || '[]');
         const found = users.find((u: any) => u.email === email.toLowerCase() && u.password === password);
         if (!found) return { success: false, error: 'Invalid email or password' };
 
         const { password: _pw, ...userWithoutPw } = found;
-        localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
+        sessionStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: normalizeUser(userWithoutPw), isAuthenticated: true });
         return { success: true, redirect: '/dashboard' };
@@ -454,7 +454,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+        const users = JSON.parse(sessionStorage.getItem('novatrade_users') || '[]');
         if (users.find((u: any) => u.email === email.toLowerCase())) {
           set({ error: 'Email already registered' });
           return { success: false, error: 'Email already registered' };
@@ -477,8 +477,8 @@ export const useStore = create<AuthStore>((set, get) => ({
         });
 
         users.push({ ...newUser, password });
-        localStorage.setItem('novatrade_users', JSON.stringify(users));
-        localStorage.setItem('novatrade_session', JSON.stringify(newUser));
+        sessionStorage.setItem('novatrade_users', JSON.stringify(users));
+        sessionStorage.setItem('novatrade_session', JSON.stringify(newUser));
 
         set({ user: newUser, isAuthenticated: true });
         return { success: true };
@@ -518,7 +518,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
   logout: async () => {
     try {
-      if (!isSupabaseConfigured()) localStorage.removeItem('novatrade_session');
+      if (!isSupabaseConfigured()) sessionStorage.removeItem('novatrade_session');
       else await supabase.auth.signOut();
     } finally {
       set({
@@ -542,7 +542,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const session = localStorage.getItem('novatrade_session');
+        const session = sessionStorage.getItem('novatrade_session')
         if (session) set({ user: normalizeUser(JSON.parse(session)), isAuthenticated: true });
         else set({ user: null, isAuthenticated: false });
         return;
@@ -585,7 +585,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updated = normalizeUser({ ...user, ...updates });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
+        sessionStorage.setItem('novatrade_session', JSON.stringify(updated));
         set({ user: updated });
         return true;
       }
@@ -626,7 +626,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updated = normalizeUser({ ...user, registrationStatus: status });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
+        sessionStorage.setItem('novatrade_session', JSON.stringify(updated));
         set({ user: updated });
         return true;
       }
@@ -676,7 +676,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           kycStatus: status,
           registrationStatus: nextRegistrationStatus,
         });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
+        sessionStorage.setItem('novatrade_session', JSON.stringify(updated));
         set({ user: updated });
         return true;
       }
