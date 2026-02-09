@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageCircle,
   Search,
@@ -11,26 +12,10 @@ import {
   X,
   RefreshCw,
   Inbox,
+  AlertCircle,
 } from 'lucide-react';
+
 import { useAdminAuthStore } from '@/lib/admin-store';
-
-// ============================================
-// TOKEN HELPER (migration-safe)
-// ============================================
-function getAdminToken() {
-  const key = 'novatrade_admin_token';
-  if (typeof window === 'undefined') return null;
-
-  const s = sessionStorage.getItem(key);
-  if (s) return s;
-
-  const l = localStorage.getItem(key);
-  if (l) {
-    sessionStorage.setItem(key, l);
-    return l;
-  }
-  return null;
-}
 
 // ============================================
 // TYPES (DB SHAPE)
@@ -49,6 +34,8 @@ type DbTicket = {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+
+  // Optional joins that your API may return
   users?: { id: string; email: string; first_name?: string | null; last_name?: string | null } | null;
   last_message?: { message: string; sender_type: string; created_at: string } | null;
 };
@@ -78,10 +65,15 @@ function formatTime(ts: string) {
 }
 
 function statusBadge(status: DbTicketStatus) {
-  if (status === 'open' || status === 'in_progress')
+  if (status === 'open' || status === 'in_progress') {
     return { cls: 'bg-yellow-500/20 text-yellow-500', label: 'open' };
-  if (status === 'waiting_user') return { cls: 'bg-blue-500/20 text-blue-500', label: 'pending' };
-  if (status === 'resolved') return { cls: 'bg-profit/20 text-profit', label: 'resolved' };
+  }
+  if (status === 'waiting_user') {
+    return { cls: 'bg-blue-500/20 text-blue-500', label: 'pending' };
+  }
+  if (status === 'resolved') {
+    return { cls: 'bg-profit/20 text-profit', label: 'resolved' };
+  }
   return { cls: 'bg-profit/20 text-profit', label: 'closed' };
 }
 
@@ -96,7 +88,11 @@ function priorityLabel(p: DbPriority) {
 // ADMIN SUPPORT PAGE
 // ============================================
 export default function AdminSupportPage() {
-  const { admin, isAuthenticated } = useAdminAuthStore();
+  const { admin, isAuthenticated, sessionToken, logout } = useAdminAuthStore();
+
+  // ✅ use the same token pattern as KYC page
+  const token = sessionToken;
+  const tokenOk = Boolean(isAuthenticated && admin && token);
 
   const [tickets, setTickets] = useState<DbTicket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<DbTicket | null>(null);
@@ -110,7 +106,7 @@ export default function AdminSupportPage() {
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
 
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -123,122 +119,141 @@ export default function AdminSupportPage() {
     'Your deposit/withdrawal is being processed. Thank you for your patience.',
   ];
 
+  useEffect(() => {
+    if (!notification) return;
+    const t = setTimeout(() => setNotification(null), 3000);
+    return () => clearTimeout(t);
+  }, [notification]);
+
   // --------------------------------------------
-  // API helpers (always read fresh token)
+  // API helper (same as your KYC page)
   // --------------------------------------------
-  async function apiGet<T>(url: string): Promise<T> {
-    const token = getAdminToken();
+  const apiFetch = async (path: string, init?: RequestInit) => {
     if (!token) throw new Error('Missing admin token. Please log in again.');
 
-    const res = await fetch(url, {
-      headers: { authorization: `Bearer ${token}` },
-      cache: 'no-store',
-    });
-
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json?.error ?? `Request failed (${res.status})`);
-    return json as T;
-  }
-
-  async function apiPost<T>(url: string, body: any): Promise<T> {
-    const token = getAdminToken();
-    if (!token) throw new Error('Missing admin token. Please log in again.');
-
-    const res = await fetch(url, {
-      method: 'POST',
+    const res = await fetch(path, {
+      ...init,
       headers: {
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
+        ...(init?.headers || {}),
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
       cache: 'no-store',
     });
 
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json?.error ?? `Request failed (${res.status})`);
-    return json as T;
-  }
+
+    if (!res.ok) {
+      const msg = json?.error || `Request failed (${res.status})`;
+      if (res.status === 401 || res.status === 403) {
+        await logout();
+      }
+      throw new Error(msg);
+    }
+
+    return json;
+  };
 
   // --------------------------------------------
   // Load tickets
   // --------------------------------------------
-  async function loadTickets() {
+  const loadTickets = async () => {
+    if (!tokenOk) return;
+
     setLoadingTickets(true);
-    setApiError(null);
     try {
-      const data = await apiGet<{ tickets: DbTicket[] }>(`/api/admin/support/tickets?filter=${statusFilter}`);
-      setTickets(data.tickets ?? []);
+      const q = new URLSearchParams();
+      q.set('filter', statusFilter); // server can interpret: all|open|pending|closed
+
+      const json = await apiFetch(`/api/admin/support/tickets?${q.toString()}`);
+      const list = Array.isArray(json?.tickets) ? (json.tickets as DbTicket[]) : [];
+
+      setTickets(list);
     } catch (e: any) {
       console.error('[AdminSupport] loadTickets error:', e);
       setTickets([]);
-      setApiError(e?.message ?? 'Failed to load tickets');
+      setNotification({ type: 'error', message: e?.message || 'Failed to load tickets' });
     } finally {
       setLoadingTickets(false);
     }
-  }
+  };
 
   // --------------------------------------------
-  // Open ticket by id (safer than passing stale objects)
+  // Open ticket + messages
   // --------------------------------------------
-  async function openTicketById(ticketId: string) {
+  const openTicketById = async (ticketId: string) => {
+    if (!tokenOk) return;
+
     setLoadingMessages(true);
-    setApiError(null);
     try {
-      const data = await apiGet<{ ticket: DbTicket; messages: DbMessage[] }>(`/api/admin/support/tickets/${ticketId}`);
-      setSelectedTicket(data.ticket);
-      setMessages(data.messages ?? []);
+      const json = await apiFetch(`/api/admin/support/tickets/${ticketId}`);
+      const ticket = (json?.ticket ?? null) as DbTicket | null;
+      const msgs = Array.isArray(json?.messages) ? (json.messages as DbMessage[]) : [];
+
+      setSelectedTicket(ticket);
+      setMessages(msgs);
+
       requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
     } catch (e: any) {
       console.error('[AdminSupport] openTicket error:', e);
-      setApiError(e?.message ?? 'Failed to open ticket');
+      setNotification({ type: 'error', message: e?.message || 'Failed to open ticket' });
     } finally {
       setLoadingMessages(false);
     }
-  }
+  };
 
   // --------------------------------------------
-  // Send admin reply
+  // Send reply
   // --------------------------------------------
-  async function sendAdminReply(text: string) {
-    const body = text.trim();
-    if (!selectedTicket || !body) return;
+  const sendAdminReply = async (text: string) => {
+    if (!selectedTicket || !text.trim() || !tokenOk) return;
 
     setIsSending(true);
-    setApiError(null);
     try {
-      await apiPost(`/api/admin/support/tickets/${selectedTicket.id}/messages`, {
-        message: body,
-        adminId: admin?.id ?? null,
+      await apiFetch(`/api/admin/support/tickets/${selectedTicket.id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          message: text.trim(),
+          adminId: admin?.id ?? null,
+        }),
       });
 
       setMessage('');
       await openTicketById(selectedTicket.id);
       await loadTickets();
+
+      setNotification({ type: 'success', message: 'Reply sent' });
     } catch (e: any) {
       console.error('[AdminSupport] sendAdminReply error:', e);
-      setApiError(e?.message ?? 'Failed to send message');
+      setNotification({ type: 'error', message: e?.message || 'Failed to send message' });
     } finally {
       setIsSending(false);
     }
-  }
+  };
 
   // --------------------------------------------
   // Status actions
   // --------------------------------------------
-  async function setTicketStatus(status: DbTicketStatus) {
-    if (!selectedTicket) return;
-    setApiError(null);
+  const setTicketStatus = async (status: DbTicketStatus) => {
+    if (!selectedTicket || !tokenOk) return;
+
     try {
-      const data = await apiPost<{ ticket: DbTicket }>(`/api/admin/support/tickets/${selectedTicket.id}/status`, {
-        status,
+      const json = await apiFetch(`/api/admin/support/tickets/${selectedTicket.id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status }),
       });
-      setSelectedTicket(data.ticket);
+
+      const ticket = (json?.ticket ?? null) as DbTicket | null;
+      if (ticket) setSelectedTicket(ticket);
+
       await loadTickets();
+
+      setNotification({ type: 'success', message: `Ticket marked ${status}` });
     } catch (e: any) {
       console.error('[AdminSupport] setTicketStatus error:', e);
-      setApiError(e?.message ?? 'Failed to update status');
+      setNotification({ type: 'error', message: e?.message || 'Failed to update ticket' });
     }
-  }
+  };
 
   const closeTicket = () => setTicketStatus('closed');
   const reopenTicket = () => setTicketStatus('open');
@@ -247,13 +262,13 @@ export default function AdminSupportPage() {
   // Effects
   // --------------------------------------------
   useEffect(() => {
-    if (!isAuthenticated || !admin) return;
+    if (!tokenOk) return;
 
-    loadTickets();
+    void loadTickets();
     const interval = setInterval(loadTickets, 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter, isAuthenticated, admin?.id]);
+  }, [tokenOk, statusFilter]);
 
   useEffect(() => {
     requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
@@ -262,15 +277,7 @@ export default function AdminSupportPage() {
   // --------------------------------------------
   // Guards
   // --------------------------------------------
-  if (!getAdminToken()) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <p className="text-slate-400">Missing admin token. Please log in again.</p>
-      </div>
-    );
-  }
-
-  if (!isAuthenticated || !admin) {
+  if (!tokenOk) {
     return (
       <div className="flex items-center justify-center h-full">
         <p className="text-slate-400">Please log in to access this page.</p>
@@ -278,29 +285,50 @@ export default function AdminSupportPage() {
     );
   }
 
-  const filteredTickets = tickets.filter((t) => {
-    const email = t.users?.email ?? '';
-    const name = `${t.users?.first_name ?? ''} ${t.users?.last_name ?? ''}`.trim();
-    const subj = t.subject ?? '';
+  // --------------------------------------------
+  // Search filtering
+  // --------------------------------------------
+  const filteredTickets = useMemo(() => {
     const q = searchQuery.toLowerCase();
-    return email.toLowerCase().includes(q) || name.toLowerCase().includes(q) || subj.toLowerCase().includes(q);
-  });
+
+    return tickets.filter((t) => {
+      const email = t.users?.email ?? '';
+      const name = `${t.users?.first_name ?? ''} ${t.users?.last_name ?? ''}`.trim();
+      const subj = t.subject ?? '';
+      return (
+        email.toLowerCase().includes(q) ||
+        name.toLowerCase().includes(q) ||
+        subj.toLowerCase().includes(q)
+      );
+    });
+  }, [tickets, searchQuery]);
 
   return (
     <div className="h-[calc(100vh-120px)] flex flex-col">
+      <AnimatePresence>
+        {notification && (
+          <motion.div
+            initial={{ opacity: 0, y: -14 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -14 }}
+            className={`mb-4 p-4 rounded-xl border ${
+              notification.type === 'success'
+                ? 'bg-profit/10 border-profit/20 text-profit'
+                : 'bg-loss/10 border-loss/20 text-loss'
+            }`}
+          >
+            {notification.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <div className="mb-4">
         <h1 className="text-2xl font-bold text-cream">Support Center</h1>
         <p className="text-slate-400 mt-1">Manage customer support tickets and live chat</p>
       </div>
 
-      {apiError && (
-        <div className="mb-4 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-          {apiError}
-        </div>
-      )}
-
-      {/* Stats (based on currently loaded list) */}
+      {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white/5 rounded-xl p-4 border border-white/10">
           <div className="flex items-center gap-3">
@@ -379,9 +407,7 @@ export default function AdminSupportPage() {
                   key={s}
                   onClick={() => setStatusFilter(s)}
                   className={`px-3 py-1.5 text-xs rounded-lg transition-all ${
-                    statusFilter === s
-                      ? 'bg-gold text-void font-medium'
-                      : 'bg-white/5 text-slate-400 hover:bg-white/10'
+                    statusFilter === s ? 'bg-gold text-void font-medium' : 'bg-white/5 text-slate-400 hover:bg-white/10'
                   }`}
                 >
                   {s.charAt(0).toUpperCase() + s.slice(1)}
@@ -451,10 +477,10 @@ export default function AdminSupportPage() {
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gold/20 to-electric/20 flex items-center justify-center">
                     <User className="w-5 h-5 text-gold" />
                   </div>
+
                   <div>
                     <p className="text-cream font-medium">
-                      {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() ||
-                        'User'}
+                      {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() || 'User'}
                     </p>
                     <p className="text-xs text-slate-500">{selectedTicket.users?.email ?? '—'}</p>
                     <p className="text-xs text-slate-500 mt-0.5">
@@ -491,6 +517,11 @@ export default function AdminSupportPage() {
                   <div className="flex items-center justify-center h-28">
                     <RefreshCw className="w-6 h-6 text-gold animate-spin" />
                   </div>
+                ) : messages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-28 text-slate-500">
+                    <AlertCircle className="w-10 h-10 mb-2 opacity-30" />
+                    <p className="text-sm">No messages yet</p>
+                  </div>
                 ) : (
                   messages.map((m) => {
                     const isAdminMsg = m.sender_type === 'admin';
@@ -507,16 +538,8 @@ export default function AdminSupportPage() {
                               : 'bg-white/10 text-cream rounded-2xl rounded-bl-md'
                           } px-4 py-3`}
                         >
-                          {!isAdminMsg && !isSystem && (
-                            <p className="text-xs opacity-70 mb-1">
-                              {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() ||
-                                'User'}
-                            </p>
-                          )}
                           {isSystem && <p className="text-xs opacity-70 mb-1">System</p>}
-
                           <p className="text-sm">{m.message}</p>
-
                           <div className="flex items-center gap-1 mt-1 opacity-60">
                             <Clock className="w-3 h-3" />
                             <span className="text-xs">{formatTime(m.created_at)}</span>
@@ -555,12 +578,12 @@ export default function AdminSupportPage() {
                       value={message}
                       onChange={(e) => setMessage(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') sendAdminReply(message);
+                        if (e.key === 'Enter') void sendAdminReply(message);
                       }}
                       className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream text-sm placeholder:text-slate-500 focus:outline-none focus:border-gold"
                     />
                     <button
-                      onClick={() => sendAdminReply(message)}
+                      onClick={() => void sendAdminReply(message)}
                       disabled={!message.trim() || isSending}
                       className="px-4 py-3 bg-gold text-void rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
                       aria-label="Send"
