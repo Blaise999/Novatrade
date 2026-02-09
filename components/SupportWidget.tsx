@@ -7,10 +7,17 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 type SupportMessage = {
   id: string;
-  thread_id: string;
-  sender_role: 'user' | 'admin' | 'system';
-  body: string;
+  ticket_id: string;
+  sender_type: 'user' | 'admin' | 'system';
+  message: string;
   created_at: string;
+};
+
+type SupportTicket = {
+  id: string;
+  user_id: string;
+  status: 'open' | 'in_progress' | 'waiting_user' | 'resolved' | 'closed';
+  updated_at: string;
 };
 
 export default function SupportWidget() {
@@ -18,16 +25,20 @@ export default function SupportWidget() {
   const [authReady, setAuthReady] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
 
-  const [threadId, setThreadId] = useState<string | null>(null);
+  const [ticketId, setTicketId] = useState<string | null>(null);
   const [messages, setMessages] = useState<SupportMessage[]>([]);
   const [loading, setLoading] = useState(false);
 
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  const canUse = useMemo(() => isSupabaseConfigured() && !!supabase, []);
+  const canUse = useMemo(() => {
+    const ok = typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured;
+    return ok && !!supabase;
+  }, []);
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -37,49 +48,95 @@ export default function SupportWidget() {
     });
   }
 
+  async function getOrCreateTicket(userId: string) {
+    // Try to reuse latest active ticket
+    const { data: existing, error: qErr } = await supabase
+      .from('support_tickets')
+      .select('id, user_id, status, updated_at')
+      .eq('user_id', userId)
+      .in('status', ['open', 'in_progress', 'waiting_user'])
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (qErr) throw qErr;
+    if (existing?.id) return existing.id as string;
+
+    // Create a new ticket (subject required)
+    const { data: created, error: cErr } = await supabase
+      .from('support_tickets')
+      .insert({
+        user_id: userId,
+        subject: 'Support Chat',
+        category: 'general',
+        priority: 'normal',
+        status: 'open',
+      })
+      .select('id')
+      .single();
+
+    if (cErr) throw cErr;
+
+    // Optional greeting message (system)
+    await supabase.from('support_messages').insert({
+      ticket_id: created.id,
+      sender_id: userId,
+      sender_type: 'user',
+      message: 'Hi 👋 I need help.',
+      attachments: [],
+    });
+
+    return created.id as string;
+  }
+
+  async function loadMessages(tid: string) {
+    const { data, error } = await supabase
+      .from('support_messages')
+      .select('id, ticket_id, sender_type, message, created_at')
+      .eq('ticket_id', tid)
+      .order('created_at', { ascending: true })
+      .limit(200);
+
+    if (error) throw error;
+    setMessages((data ?? []) as SupportMessage[]);
+    scrollToBottom();
+  }
+
   useEffect(() => {
     if (!open) return;
+
     let cancelled = false;
 
     async function init() {
       if (!canUse) return;
 
+      setErr(null);
       setLoading(true);
+
       try {
         const { data } = await supabase.auth.getSession();
         if (cancelled) return;
 
-        const ok = !!data.session?.user?.id;
+        const userId = data.session?.user?.id ?? null;
+        const ok = !!userId;
+
         setSignedIn(ok);
         setAuthReady(true);
 
         if (!ok) {
-          setThreadId(null);
+          setTicketId(null);
           setMessages([]);
           return;
         }
 
-        // 1) Get or create thread
-        const { data: tid, error: rpcErr } = await supabase.rpc('get_or_create_support_thread');
-        if (rpcErr) throw rpcErr;
+        const tid = await getOrCreateTicket(userId);
+        if (cancelled) return;
 
-        const thread = String(tid);
-        setThreadId(thread);
-
-        // 2) Load messages
-        const { data: msgs, error: msgErr } = await supabase
-          .from('support_messages')
-          .select('id, thread_id, sender_role, body, created_at')
-          .eq('thread_id', thread)
-          .order('created_at', { ascending: true })
-          .limit(200);
-
-        if (msgErr) throw msgErr;
-
-        setMessages((msgs ?? []) as SupportMessage[]);
-        scrollToBottom();
-      } catch (e) {
+        setTicketId(tid);
+        await loadMessages(tid);
+      } catch (e: any) {
         console.error('[SupportWidget] init error:', e);
+        setErr(e?.message ?? 'Failed to open support chat');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -93,23 +150,22 @@ export default function SupportWidget() {
 
   // Realtime subscription (admin replies show instantly)
   useEffect(() => {
-    if (!open || !threadId || !canUse) return;
+    if (!open || !ticketId || !canUse) return;
 
     const channel = supabase
-      .channel(`support:${threadId}`)
+      .channel(`support:ticket:${ticketId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'support_messages',
-          filter: `thread_id=eq.${threadId}`,
+          filter: `ticket_id=eq.${ticketId}`,
         },
         (payload) => {
           const row = payload.new as SupportMessage;
 
           setMessages((prev) => {
-            // prevent duplicates if we optimistically added
             if (prev.some((m) => m.id === row.id)) return prev;
             return [...prev, row];
           });
@@ -122,34 +178,47 @@ export default function SupportWidget() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [open, threadId, canUse]);
+  }, [open, ticketId, canUse]);
 
   async function sendMessage() {
-    const body = text.trim();
-    if (!body || !threadId) return;
+    setErr(null);
+
+    const msg = text.trim();
+    if (!msg || !ticketId) return;
 
     setSending(true);
     try {
+      const { data: sess } = await supabase.auth.getSession();
+      const userId = sess.session?.user?.id;
+      if (!userId) {
+        setSignedIn(false);
+        setAuthReady(true);
+        return;
+      }
+
       const { data, error } = await supabase
         .from('support_messages')
         .insert({
-          thread_id: threadId,
-          sender_role: 'user',
-          body,
-          read_by_user: true,
-          read_by_admin: false,
+          ticket_id: ticketId,
+          sender_id: userId,
+          sender_type: 'user',
+          message: msg,
+          attachments: [],
+          read_at: null,
         })
-        .select('id, thread_id, sender_role, body, created_at')
+        .select('id, ticket_id, sender_type, message, created_at')
         .single();
 
       if (error) throw error;
 
       setText('');
-      // Add immediately (realtime will also come; we de-dupe by id)
-      if (data) setMessages((prev) => [...prev, data as SupportMessage]);
+      if (data) {
+        setMessages((prev) => (prev.some((m) => m.id === data.id) ? prev : [...prev, data as SupportMessage]));
+      }
       scrollToBottom();
-    } catch (e) {
+    } catch (e: any) {
       console.error('[SupportWidget] send error:', e);
+      setErr(e?.message ?? 'Failed to send message');
     } finally {
       setSending(false);
     }
@@ -175,6 +244,12 @@ export default function SupportWidget() {
                 Support chat isn’t configured. Email{' '}
                 <span className="text-cream font-medium">support@novatrade.com</span>
               </p>
+            )}
+
+            {canUse && err && (
+              <div className="mb-2 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                {err}
+              </div>
             )}
 
             {canUse && !authReady && (
@@ -211,8 +286,8 @@ export default function SupportWidget() {
                     <p className="text-sm text-cream/50">No messages yet.</p>
                   ) : (
                     messages.map((m) => {
-                      const isUser = m.sender_role === 'user';
-                      const isSystem = m.sender_role === 'system';
+                      const isUser = m.sender_type === 'user';
+                      const isSystem = m.sender_type === 'system';
                       return (
                         <div
                           key={m.id}
@@ -225,7 +300,7 @@ export default function SupportWidget() {
                               : 'mr-auto bg-white/10 text-cream',
                           ].join(' ')}
                         >
-                          {m.body}
+                          {m.message}
                         </div>
                       );
                     })
