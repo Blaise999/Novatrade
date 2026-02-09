@@ -53,7 +53,9 @@ export default function DashboardOverview() {
   const activeBots = bots.filter((b) => b.status === 'running').length;
   const totalBotPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
 
-  const kycStatus = user?.kycStatus ?? 'none';
+const kycRaw = String((user as any)?.kycStatus ?? (user as any)?.kyc_status ?? 'none').toLowerCase();
+const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
+
 
   // ✅ show connected if either:
   // - wallet is live connected (wagmi)
