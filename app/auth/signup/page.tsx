@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -19,7 +19,6 @@ import {
   Sparkles,
   ShieldCheck,
   Check,
-  CheckCircle2,
 } from 'lucide-react';
 import { useAuthStore } from '@/lib/store';
 import { useEmail } from '@/hooks/useEmail';
@@ -27,23 +26,34 @@ import { useEmail } from '@/hooks/useEmail';
 // ============================================
 // VALIDATION SCHEMA
 // ============================================
-const signupSchema = z.object({
-  firstName: z.string().min(2, 'First name must be at least 2 characters'),
-  lastName: z.string().min(2, 'Last name must be at least 2 characters'),
-  email: z.string().email('Please enter a valid email'),
-  password: z
-    .string()
-    .min(8, 'Password must be at least 8 characters')
-    .regex(/[A-Z]/, 'Password must contain an uppercase letter')
-    .regex(/[a-z]/, 'Password must contain a lowercase letter')
-    .regex(/[0-9]/, 'Password must contain a number')
-    .regex(/[^A-Za-z0-9]/, 'Password must contain a special character'),
-  confirmPassword: z.string(),
-  acceptTerms: z.boolean().refine(val => val === true, 'You must accept the terms'),
-}).refine(data => data.password === data.confirmPassword, {
-  message: "Passwords don't match",
-  path: ['confirmPassword'],
-});
+const signupSchema = z
+  .object({
+    firstName: z.string().min(2, 'First name must be at least 2 characters'),
+    lastName: z.string().min(2, 'Last name must be at least 2 characters'),
+    email: z.string().email('Please enter a valid email'),
+
+    // ✅ Referral code (optional)
+    referralCode: z
+      .string()
+      .trim()
+      .max(32, 'Referral code is too long')
+      .optional()
+      .or(z.literal('')),
+
+    password: z
+      .string()
+      .min(8, 'Password must be at least 8 characters')
+      .regex(/[A-Z]/, 'Password must contain an uppercase letter')
+      .regex(/[a-z]/, 'Password must contain a lowercase letter')
+      .regex(/[0-9]/, 'Password must contain a number')
+      .regex(/[^A-Za-z0-9]/, 'Password must contain a special character'),
+    confirmPassword: z.string(),
+    acceptTerms: z.boolean().refine(val => val === true, 'You must accept the terms'),
+  })
+  .refine(data => data.password === data.confirmPassword, {
+    message: "Passwords don't match",
+    path: ['confirmPassword'],
+  });
 
 type SignupForm = z.infer<typeof signupSchema>;
 
@@ -54,7 +64,7 @@ function AnimatedBackground() {
   return (
     <div className="absolute inset-0 overflow-hidden pointer-events-none">
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_-20%,rgba(212,175,55,0.15),rgba(0,0,0,0))]" />
-      
+
       <motion.div
         className="absolute top-1/4 -left-32 w-96 h-96 bg-gold/10 rounded-full blur-[120px]"
         animate={{
@@ -79,7 +89,7 @@ function AnimatedBackground() {
         transition={{ duration: 12, repeat: Infinity, ease: 'easeInOut' }}
       />
 
-      <div 
+      <div
         className="absolute inset-0 opacity-[0.02]"
         style={{
           backgroundImage: `linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px),
@@ -105,11 +115,15 @@ function PasswordStrength({ password }: { password: string }) {
 
   const strength = requirements.filter(r => r.met).length;
   const strengthPercent = (strength / requirements.length) * 100;
-  
-  const strengthColor = 
-    strength <= 2 ? 'bg-red-500' :
-    strength <= 3 ? 'bg-yellow-500' :
-    strength <= 4 ? 'bg-emerald-400' : 'bg-emerald-500';
+
+  const strengthColor =
+    strength <= 2
+      ? 'bg-red-500'
+      : strength <= 3
+        ? 'bg-yellow-500'
+        : strength <= 4
+          ? 'bg-emerald-400'
+          : 'bg-emerald-500';
 
   if (!password) return null;
 
@@ -129,7 +143,7 @@ function PasswordStrength({ password }: { password: string }) {
           transition={{ duration: 0.3 }}
         />
       </div>
-      
+
       {/* Requirements grid */}
       <div className="grid grid-cols-3 gap-2">
         {requirements.map((req, i) => (
@@ -139,9 +153,11 @@ function PasswordStrength({ password }: { password: string }) {
               req.met ? 'text-emerald-400' : 'text-slate-500'
             }`}
           >
-            <div className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-colors ${
-              req.met ? 'bg-emerald-500/20' : 'bg-white/5'
-            }`}>
+            <div
+              className={`w-3.5 h-3.5 rounded-full flex items-center justify-center transition-colors ${
+                req.met ? 'bg-emerald-500/20' : 'bg-white/5'
+              }`}
+            >
               {req.met && <Check className="w-2.5 h-2.5" />}
             </div>
             <span>{req.label}</span>
@@ -157,6 +173,9 @@ function PasswordStrength({ password }: { password: string }) {
 // ============================================
 export default function SignupPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const refFromUrl = (searchParams.get('ref') || '').trim();
+
   const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useAuthStore();
   const { sendOTP } = useEmail();
 
@@ -173,6 +192,9 @@ export default function SignupPage() {
   } = useForm<SignupForm>({
     resolver: zodResolver(signupSchema),
     mode: 'onChange',
+    defaultValues: {
+      referralCode: refFromUrl,
+    },
   });
 
   const password = watch('password', '');
@@ -183,24 +205,31 @@ export default function SignupPage() {
 
     try {
       // Store signup data in auth store for verify-otp page
-      // NOTE: Use the dedicated OTP fields — NOT setUser (which sets
-      // isAuthenticated:true prematurely and leaks password into user state)
+      // NOTE: Use dedicated OTP fields — do NOT setUser here.
       setOtpEmail(data.email.toLowerCase());
       setOtpName(`${data.firstName} ${data.lastName}`);
       setOtpPassword(data.password);
       setRedirectUrl('/kyc');
 
       // Send OTP email
-      const otpResult = await sendOTP(data.email.toLowerCase(), `${data.firstName} ${data.lastName}`);
-      
+      const otpResult = await sendOTP(
+        data.email.toLowerCase(),
+        `${data.firstName} ${data.lastName}`
+      );
+
       if (!otpResult.success) {
         setError(otpResult.error || 'Failed to send verification code. Please try again.');
         setIsLoading(false);
         return;
       }
 
-      // Redirect to OTP verification page
-      router.push('/auth/verify-otp');
+      // ✅ Carry referral to verify page (so backend can attach it on final account creation)
+      const ref = (data.referralCode || '').trim();
+      const nextUrl = ref
+        ? `/auth/verify-otp?ref=${encodeURIComponent(ref)}`
+        : '/auth/verify-otp';
+
+      router.push(nextUrl);
     } catch (err: any) {
       console.error('Signup error:', err);
       setError(err?.message || 'Something went wrong. Please try again.');
@@ -212,7 +241,7 @@ export default function SignupPage() {
   return (
     <div className="relative min-h-[calc(100vh-200px)] flex items-center justify-center py-8">
       <AnimatedBackground />
-      
+
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -223,7 +252,7 @@ export default function SignupPage() {
         <div className="relative">
           {/* Glow effect */}
           <div className="absolute -inset-1 bg-gradient-to-r from-gold/20 via-transparent to-emerald-500/20 rounded-3xl blur-xl opacity-50" />
-          
+
           {/* Main card */}
           <div className="relative bg-[#0a0a0f]/80 backdrop-blur-2xl border border-white/[0.08] rounded-2xl p-8 shadow-2xl">
             {/* Header */}
@@ -236,7 +265,7 @@ export default function SignupPage() {
               >
                 <Sparkles className="w-7 h-7 text-gold" />
               </motion.div>
-              
+
               <motion.h1
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -245,7 +274,7 @@ export default function SignupPage() {
               >
                 Create your account
               </motion.h1>
-              
+
               <motion.p
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -294,7 +323,7 @@ export default function SignupPage() {
                     <p className="mt-1.5 text-xs text-red-400">{errors.firstName.message}</p>
                   )}
                 </div>
-                
+
                 <div>
                   <label className="block text-sm font-medium text-slate-300 mb-2">
                     Last Name
@@ -334,6 +363,26 @@ export default function SignupPage() {
                 </div>
                 {errors.email && (
                   <p className="mt-1.5 text-xs text-red-400">{errors.email.message}</p>
+                )}
+              </div>
+
+              {/* ✅ Referral Code (optional) */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Referral Code <span className="text-slate-500">(optional)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    {...register('referralCode')}
+                    type="text"
+                    placeholder="e.g. WEST123"
+                    className={`w-full px-4 py-3.5 bg-white/[0.03] border ${
+                      errors.referralCode ? 'border-red-500/50' : 'border-white/[0.08]'
+                    } rounded-xl text-white placeholder:text-slate-600 focus:outline-none focus:border-gold/50 focus:ring-1 focus:ring-gold/20 transition-all`}
+                  />
+                </div>
+                {errors.referralCode && (
+                  <p className="mt-1.5 text-xs text-red-400">{errors.referralCode.message}</p>
                 )}
               </div>
 
@@ -445,10 +494,7 @@ export default function SignupPage() {
             {/* Sign in link */}
             <p className="mt-6 text-center text-sm text-slate-400">
               Already have an account?{' '}
-              <Link
-                href="/auth/login"
-                className="text-gold font-medium hover:underline"
-              >
+              <Link href="/auth/login" className="text-gold font-medium hover:underline">
                 Sign in
               </Link>
             </p>

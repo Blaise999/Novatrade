@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from "lucide-react";
@@ -33,6 +33,16 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 export default function VerifyOTPPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // ✅ referral code from URL (?ref=WEST123)
+  const referralCode = useMemo(() => {
+    try {
+      return (searchParams.get("ref") || "").trim().toUpperCase();
+    } catch {
+      return "";
+    }
+  }, [searchParams]);
 
   const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useAuthStore();
   const { signup } = useStore();
@@ -85,7 +95,14 @@ export default function VerifyOTPPage() {
   }, [countdown]);
 
   useEffect(() => {
-    pushLog("mount state", { otpEmail, otpName, hasPassword: !!otpPassword, redirectUrl });
+    pushLog("mount state", {
+      otpEmail,
+      otpName,
+      hasPassword: !!otpPassword,
+      redirectUrl,
+      referralCode,
+    });
+
     if (!otpEmail || !otpPassword) {
       pushLog("missing otpEmail/otpPassword -> redirect /auth/signup");
       router.push("/auth/signup");
@@ -141,6 +158,33 @@ export default function VerifyOTPPage() {
     }
   };
 
+  // ✅ attach referral + generate user referral_code + mark email_verified (server-side)
+  const completeReferral = async (userId: string) => {
+    // No referral? still call to ensure referral_code/email_verified are set.
+    try {
+      pushLog("referral complete start", { userId, referralCode });
+
+      const res = await withTimeout(
+        fetch("/api/referrals/complete", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId, ref: referralCode || "" }),
+        }),
+        20000,
+        "referrals.complete"
+      );
+
+      const json = await res.json().catch(() => ({}));
+      pushLog("referral complete result", { ok: res.ok, status: res.status, json });
+
+      // Don’t block user if this fails
+      return;
+    } catch (e: any) {
+      pushLog("referral complete failed (ignored)", e?.message || e);
+      return;
+    }
+  };
+
   const handleVerify = async (source: "auto" | "manual" = "manual") => {
     const code = otp.join("");
 
@@ -170,13 +214,17 @@ export default function VerifyOTPPage() {
     setError(null);
 
     const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-    pushLog("verify start", { source, otpEmail, code });
+    pushLog("verify start", { source, otpEmail, code, referralCode });
 
     try {
       if (source === "auto") lastAutoSubmittedCodeRef.current = code;
 
       // 1) Verify OTP
-      const result = await withTimeout(verifyOTP(otpEmail, code, "email_verification"), 25000, "verifyOTP");
+      const result = await withTimeout(
+        verifyOTP(otpEmail, code, "email_verification"),
+        25000,
+        "verifyOTP"
+      );
       const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
       pushLog("verifyOTP result", result, `elapsed_ms=${Math.round(t1 - t0)}`);
 
@@ -200,16 +248,36 @@ export default function VerifyOTPPage() {
 
       pushLog("signup start", { email: otpEmail, firstName, lastName });
 
-      const signupResult = await withTimeout(signup(otpEmail, otpPassword, firstName, lastName), 25000, "supabase.signup");
+      const signupResult = await withTimeout(
+        signup(otpEmail, otpPassword, firstName, lastName),
+        25000,
+        "supabase.signup"
+      );
 
       pushLog("signup result", { signupResult });
 
       if (!signupResult || !signupResult.success) {
-        // ✅ IMPORTANT: don't let it auto-verify again with same code forever
-        setError(signupResult?.error || "Account creation failed. If this email already exists, go to Login.");
+        setError(
+          signupResult?.error ||
+            "Account creation failed. If this email already exists, go to Login."
+        );
         pushLog("signup failed -> redirect login in 2s");
         setTimeout(() => router.push("/auth/login"), 2000);
         return;
+      }
+
+      // ✅ Try to extract the new userId (handles different return shapes)
+      const userId =
+        (signupResult as any)?.user?.id ||
+        (signupResult as any)?.data?.user?.id ||
+        (signupResult as any)?.data?.id ||
+        (signupResult as any)?.id ||
+        "";
+
+      if (userId) {
+        await completeReferral(userId);
+      } else {
+        pushLog("no userId from signupResult (referral attach skipped)");
       }
 
       setIsVerified(true);
@@ -250,7 +318,11 @@ export default function VerifyOTPPage() {
     pushLog("resend start", { otpEmail });
 
     try {
-      const result = await withTimeout(sendOTP(otpEmail, otpName || "User", "email_verification"), 20000, "sendOTP");
+      const result = await withTimeout(
+        sendOTP(otpEmail, otpName || "User", "email_verification"),
+        20000,
+        "sendOTP"
+      );
       pushLog("sendOTP result", result);
 
       if (result.success) {
@@ -281,7 +353,11 @@ export default function VerifyOTPPage() {
 
   if (isVerified) {
     return (
-      <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center space-y-6">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="text-center space-y-6"
+      >
         <motion.div
           initial={{ scale: 0 }}
           animate={{ scale: 1 }}
@@ -292,7 +368,9 @@ export default function VerifyOTPPage() {
         </motion.div>
         <div>
           <h2 className="text-2xl font-display font-bold text-cream">Email Verified!</h2>
-          <p className="mt-2 text-slate-400">Your account has been created successfully. Redirecting...</p>
+          <p className="mt-2 text-slate-400">
+            Your account has been created successfully. Redirecting...
+          </p>
         </div>
         <div className="flex items-center justify-center gap-2 text-gold">
           <Loader2 className="w-5 h-5 animate-spin" />
@@ -302,7 +380,9 @@ export default function VerifyOTPPage() {
         {debug && (
           <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4 text-left">
             <p className="text-xs uppercase tracking-wide text-slate-400">OTP Debug</p>
-            <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{debugLog.join("\n")}</pre>
+            <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
+              {debugLog.join("\n")}
+            </pre>
           </div>
         )}
       </motion.div>
@@ -310,8 +390,16 @@ export default function VerifyOTPPage() {
   }
 
   return (
-    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="space-y-8">
-      <Link href="/auth/signup" className="inline-flex items-center gap-2 text-slate-400 hover:text-cream transition-colors">
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.5 }}
+      className="space-y-8"
+    >
+      <Link
+        href="/auth/signup"
+        className="inline-flex items-center gap-2 text-slate-400 hover:text-cream transition-colors"
+      >
         <ArrowLeft className="w-4 h-4" />
         Back to sign up
       </Link>
@@ -332,7 +420,9 @@ export default function VerifyOTPPage() {
               Copy log
             </button>
           </div>
-          <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{debugLog.join("\n")}</pre>
+          <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
+            {debugLog.join("\n")}
+          </pre>
         </div>
       )}
 
@@ -382,7 +472,11 @@ export default function VerifyOTPPage() {
         </div>
 
         {error && (
-          <motion.p initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="text-center text-sm text-loss">
+          <motion.p
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center text-sm text-loss"
+          >
             {error}
           </motion.p>
         )}
