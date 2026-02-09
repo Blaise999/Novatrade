@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   MessageCircle,
   Search,
@@ -15,7 +15,7 @@ import {
 import { useAdminAuthStore } from '@/lib/admin-store';
 
 // ============================================
-// TOKEN HELPER (migration-safe: sessionStorage first, fallback localStorage)
+// TOKEN HELPER (migration-safe)
 // ============================================
 function getAdminToken() {
   const key = 'novatrade_admin_token';
@@ -37,7 +37,6 @@ function getAdminToken() {
 // ============================================
 type DbTicketStatus = 'open' | 'in_progress' | 'waiting_user' | 'resolved' | 'closed';
 type UiFilter = 'all' | 'open' | 'pending' | 'closed';
-
 type DbPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 type DbTicket = {
@@ -79,7 +78,8 @@ function formatTime(ts: string) {
 }
 
 function statusBadge(status: DbTicketStatus) {
-  if (status === 'open' || status === 'in_progress') return { cls: 'bg-yellow-500/20 text-yellow-500', label: 'open' };
+  if (status === 'open' || status === 'in_progress')
+    return { cls: 'bg-yellow-500/20 text-yellow-500', label: 'open' };
   if (status === 'waiting_user') return { cls: 'bg-blue-500/20 text-blue-500', label: 'pending' };
   if (status === 'resolved') return { cls: 'bg-profit/20 text-profit', label: 'resolved' };
   return { cls: 'bg-profit/20 text-profit', label: 'closed' };
@@ -98,7 +98,6 @@ function priorityLabel(p: DbPriority) {
 export default function AdminSupportPage() {
   const { admin, isAuthenticated } = useAdminAuthStore();
 
-  const token = useMemo(() => getAdminToken(), []);
   const [tickets, setTickets] = useState<DbTicket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<DbTicket | null>(null);
   const [messages, setMessages] = useState<DbMessage[]>([]);
@@ -110,6 +109,8 @@ export default function AdminSupportPage() {
   const [statusFilter, setStatusFilter] = useState<UiFilter>('open');
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
+
+  const [apiError, setApiError] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -123,19 +124,26 @@ export default function AdminSupportPage() {
   ];
 
   // --------------------------------------------
-  // API helpers
+  // API helpers (always read fresh token)
   // --------------------------------------------
   async function apiGet<T>(url: string): Promise<T> {
+    const token = getAdminToken();
+    if (!token) throw new Error('Missing admin token. Please log in again.');
+
     const res = await fetch(url, {
       headers: { authorization: `Bearer ${token}` },
       cache: 'no-store',
     });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json?.error ?? 'Request failed');
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error ?? `Request failed (${res.status})`);
     return json as T;
   }
 
   async function apiPost<T>(url: string, body: any): Promise<T> {
+    const token = getAdminToken();
+    if (!token) throw new Error('Missing admin token. Please log in again.');
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -145,8 +153,9 @@ export default function AdminSupportPage() {
       body: JSON.stringify(body),
       cache: 'no-store',
     });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json?.error ?? 'Request failed');
+
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error ?? `Request failed (${res.status})`);
     return json as T;
   }
 
@@ -154,59 +163,60 @@ export default function AdminSupportPage() {
   // Load tickets
   // --------------------------------------------
   async function loadTickets() {
-    if (!token) return;
     setLoadingTickets(true);
+    setApiError(null);
     try {
       const data = await apiGet<{ tickets: DbTicket[] }>(`/api/admin/support/tickets?filter=${statusFilter}`);
       setTickets(data.tickets ?? []);
-    } catch (e) {
+    } catch (e: any) {
       console.error('[AdminSupport] loadTickets error:', e);
+      setTickets([]);
+      setApiError(e?.message ?? 'Failed to load tickets');
     } finally {
       setLoadingTickets(false);
     }
   }
 
   // --------------------------------------------
-  // Load selected ticket + messages
+  // Open ticket by id (safer than passing stale objects)
   // --------------------------------------------
-  async function openTicket(ticket: DbTicket) {
-    if (!token) return;
-
-    setSelectedTicket(ticket);
+  async function openTicketById(ticketId: string) {
     setLoadingMessages(true);
-
+    setApiError(null);
     try {
-      const data = await apiGet<{ ticket: DbTicket; messages: DbMessage[] }>(
-        `/api/admin/support/tickets/${ticket.id}`
-      );
+      const data = await apiGet<{ ticket: DbTicket; messages: DbMessage[] }>(`/api/admin/support/tickets/${ticketId}`);
       setSelectedTicket(data.ticket);
       setMessages(data.messages ?? []);
       requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
-    } catch (e) {
+    } catch (e: any) {
       console.error('[AdminSupport] openTicket error:', e);
+      setApiError(e?.message ?? 'Failed to open ticket');
     } finally {
       setLoadingMessages(false);
     }
   }
 
   // --------------------------------------------
-  // Send reply (writes to support_messages)
+  // Send admin reply
   // --------------------------------------------
   async function sendAdminReply(text: string) {
-    if (!selectedTicket || !text.trim() || !token) return;
+    const body = text.trim();
+    if (!selectedTicket || !body) return;
 
     setIsSending(true);
+    setApiError(null);
     try {
       await apiPost(`/api/admin/support/tickets/${selectedTicket.id}/messages`, {
-        message: text.trim(),
+        message: body,
         adminId: admin?.id ?? null,
       });
 
       setMessage('');
-      await openTicket(selectedTicket); // refresh messages
-      await loadTickets(); // refresh list + preview
-    } catch (e) {
+      await openTicketById(selectedTicket.id);
+      await loadTickets();
+    } catch (e: any) {
       console.error('[AdminSupport] sendAdminReply error:', e);
+      setApiError(e?.message ?? 'Failed to send message');
     } finally {
       setIsSending(false);
     }
@@ -216,15 +226,17 @@ export default function AdminSupportPage() {
   // Status actions
   // --------------------------------------------
   async function setTicketStatus(status: DbTicketStatus) {
-    if (!selectedTicket || !token) return;
+    if (!selectedTicket) return;
+    setApiError(null);
     try {
       const data = await apiPost<{ ticket: DbTicket }>(`/api/admin/support/tickets/${selectedTicket.id}/status`, {
         status,
       });
       setSelectedTicket(data.ticket);
       await loadTickets();
-    } catch (e) {
+    } catch (e: any) {
       console.error('[AdminSupport] setTicketStatus error:', e);
+      setApiError(e?.message ?? 'Failed to update status');
     }
   }
 
@@ -235,11 +247,13 @@ export default function AdminSupportPage() {
   // Effects
   // --------------------------------------------
   useEffect(() => {
+    if (!isAuthenticated || !admin) return;
+
     loadTickets();
     const interval = setInterval(loadTickets, 10000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusFilter]);
+  }, [statusFilter, isAuthenticated, admin?.id]);
 
   useEffect(() => {
     requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
@@ -248,7 +262,7 @@ export default function AdminSupportPage() {
   // --------------------------------------------
   // Guards
   // --------------------------------------------
-  if (!token) {
+  if (!getAdminToken()) {
     return (
       <div className="flex items-center justify-center h-full">
         <p className="text-slate-400">Missing admin token. Please log in again.</p>
@@ -264,19 +278,12 @@ export default function AdminSupportPage() {
     );
   }
 
-  // --------------------------------------------
-  // Filter client-side search (email/name/subject)
-  // --------------------------------------------
   const filteredTickets = tickets.filter((t) => {
     const email = t.users?.email ?? '';
     const name = `${t.users?.first_name ?? ''} ${t.users?.last_name ?? ''}`.trim();
     const subj = t.subject ?? '';
     const q = searchQuery.toLowerCase();
-    return (
-      email.toLowerCase().includes(q) ||
-      name.toLowerCase().includes(q) ||
-      subj.toLowerCase().includes(q)
-    );
+    return email.toLowerCase().includes(q) || name.toLowerCase().includes(q) || subj.toLowerCase().includes(q);
   });
 
   return (
@@ -287,7 +294,13 @@ export default function AdminSupportPage() {
         <p className="text-slate-400 mt-1">Manage customer support tickets and live chat</p>
       </div>
 
-      {/* Stats */}
+      {apiError && (
+        <div className="mb-4 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+          {apiError}
+        </div>
+      )}
+
+      {/* Stats (based on currently loaded list) */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white/5 rounded-xl p-4 border border-white/10">
           <div className="flex items-center gap-3">
@@ -348,7 +361,6 @@ export default function AdminSupportPage() {
       <div className="flex-1 flex gap-4 min-h-0">
         {/* Ticket List */}
         <div className="w-96 flex flex-col bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-          {/* Search & Filter */}
           <div className="p-4 border-b border-white/10 space-y-3">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -378,7 +390,6 @@ export default function AdminSupportPage() {
             </div>
           </div>
 
-          {/* Tickets */}
           <div className="flex-1 overflow-y-auto">
             {loadingTickets ? (
               <div className="flex items-center justify-center h-32">
@@ -399,7 +410,7 @@ export default function AdminSupportPage() {
                 return (
                   <button
                     key={t.id}
-                    onClick={() => openTicket(t)}
+                    onClick={() => openTicketById(t.id)}
                     className={`w-full p-4 text-left border-b border-white/5 hover:bg-white/5 transition-all ${
                       selectedTicket?.id === t.id ? 'bg-gold/10' : ''
                     }`}
@@ -412,13 +423,10 @@ export default function AdminSupportPage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-sm font-medium text-cream truncate">{name}</p>
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${badge.cls}`}>
-                            {badge.label}
-                          </span>
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${badge.cls}`}>{badge.label}</span>
                         </div>
 
                         <p className="text-xs text-slate-500 truncate mt-0.5">{email}</p>
-
                         <p className="text-xs text-slate-400 mt-1 truncate">{last}</p>
 
                         <div className="flex items-center justify-between mt-1">
@@ -438,16 +446,15 @@ export default function AdminSupportPage() {
         <div className="flex-1 flex flex-col bg-white/5 rounded-xl border border-white/10 overflow-hidden">
           {selectedTicket ? (
             <>
-              {/* Header */}
               <div className="p-4 border-b border-white/10 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gold/20 to-electric/20 flex items-center justify-center">
                     <User className="w-5 h-5 text-gold" />
                   </div>
-
                   <div>
                     <p className="text-cream font-medium">
-                      {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() || 'User'}
+                      {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() ||
+                        'User'}
                     </p>
                     <p className="text-xs text-slate-500">{selectedTicket.users?.email ?? '—'}</p>
                     <p className="text-xs text-slate-500 mt-0.5">
@@ -479,7 +486,6 @@ export default function AdminSupportPage() {
                 </div>
               </div>
 
-              {/* Messages */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4">
                 {loadingMessages ? (
                   <div className="flex items-center justify-center h-28">
@@ -503,10 +509,10 @@ export default function AdminSupportPage() {
                         >
                           {!isAdminMsg && !isSystem && (
                             <p className="text-xs opacity-70 mb-1">
-                              {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() || 'User'}
+                              {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() ||
+                                'User'}
                             </p>
                           )}
-
                           {isSystem && <p className="text-xs opacity-70 mb-1">System</p>}
 
                           <p className="text-sm">{m.message}</p>
@@ -523,7 +529,6 @@ export default function AdminSupportPage() {
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Quick Replies */}
               {selectedTicket.status !== 'closed' && (
                 <div className="px-4 py-2 border-t border-white/5">
                   <p className="text-xs text-slate-500 mb-2">Quick Replies</p>
@@ -541,7 +546,6 @@ export default function AdminSupportPage() {
                 </div>
               )}
 
-              {/* Input */}
               {selectedTicket.status !== 'closed' && (
                 <div className="p-4 border-t border-white/10">
                   <div className="flex gap-2">
