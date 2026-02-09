@@ -1,26 +1,32 @@
-// Secure Admin Authentication API
 // POST /api/admin/auth/login
-// Authenticates admin users and creates a hashed admin session in admin_sessions
-
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
-// Rate limiting store (in production, use Redis)
-const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
-const MAX_ATTEMPTS = 5;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Initialize Supabase admin client (server-side only)
-const supabaseAdmin = createClient(
+// Auth client (anon) for sign-in
+const supabaseAuth = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!, // Server-side only!
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// Admin DB client (service role) for privileged writes
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
+
+const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
+const RATE_LIMIT_WINDOW = 15 * 60 * 1000;
+const MAX_ATTEMPTS = 5;
+
 function getClientIP(request: NextRequest): string {
   return (
-    request.headers.get("x-forwarded-for")?.split(",")[0] ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     request.headers.get("x-real-ip") ||
     "unknown"
   );
@@ -41,9 +47,7 @@ function checkRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
   }
 
   if (record.count >= MAX_ATTEMPTS) {
-    const retryAfter = Math.ceil(
-      (RATE_LIMIT_WINDOW - (now - record.lastAttempt)) / 1000
-    );
+    const retryAfter = Math.ceil((RATE_LIMIT_WINDOW - (now - record.lastAttempt)) / 1000);
     return { allowed: false, retryAfter };
   }
 
@@ -62,17 +66,20 @@ function hashToken(token: string): string {
 
 export async function POST(request: NextRequest) {
   try {
-    const ip = getClientIP(request);
-
-    // Rate limiting
-    const rateLimit = checkRateLimit(ip);
-    if (!rateLimit.allowed) {
+    // hard fail if service role missing (this is the #1 real-world cause)
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
-        {
-          success: false,
-          error: `Too many login attempts. Please try again in ${rateLimit.retryAfter} seconds.`,
-        },
-        { status: 429, headers: { "Retry-After": String(rateLimit.retryAfter) } }
+        { success: false, error: "Server misconfig: SUPABASE_SERVICE_ROLE_KEY is missing (set on Vercel Preview + Production)." },
+        { status: 500 }
+      );
+    }
+
+    const ip = getClientIP(request);
+    const rate = checkRateLimit(ip);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { success: false, error: `Too many login attempts. Try again in ${rate.retryAfter}s.` },
+        { status: 429, headers: { "Retry-After": String(rate.retryAfter) } }
       );
     }
 
@@ -81,128 +88,89 @@ export async function POST(request: NextRequest) {
     const password = String(body?.password ?? "");
 
     if (!email || !password) {
-      return NextResponse.json(
-        { success: false, error: "Email and password are required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: "Email and password are required" }, { status: 400 });
     }
 
-    // Authenticate via Supabase Auth
-    const { data: authData, error: authError } =
-      await supabaseAdmin.auth.signInWithPassword({
-        email,
-        password,
-      });
+    // 1) Auth sign-in (anon)
+    const { data: authData, error: authError } = await supabaseAuth.auth.signInWithPassword({
+      email,
+      password,
+    });
 
     if (authError || !authData.user) {
-      console.log(`[Admin Auth] Failed login attempt for ${email} from ${ip}`);
-      return NextResponse.json(
-        { success: false, error: "Invalid credentials" },
-        { status: 401 }
-      );
+      return NextResponse.json({ success: false, error: "Invalid credentials" }, { status: 401 });
     }
 
-    // Check admin role in users table
-    const { data: userData, error: userError } = await supabaseAdmin
+    // 2) Validate role in users table (service role read)
+    const { data: userRow, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, email, first_name, last_name, role, is_active")
       .eq("id", authData.user.id)
-      .single();
+      .maybeSingle();
 
-    if (userError || !userData) {
-      return NextResponse.json(
-        { success: false, error: "User profile not found" },
-        { status: 404 }
-      );
+    if (userError || !userRow) {
+      return NextResponse.json({ success: false, error: "User profile not found" }, { status: 404 });
     }
 
-    // Only allow admin roles
-    if (userData.role !== "admin") {
-      console.log(
-        `[Admin Auth] Non-admin user ${email} attempted admin login from ${ip}`
-      );
-      return NextResponse.json(
-        { success: false, error: "Access denied. Admin privileges required." },
-        { status: 403 }
-      );
+    const role = String(userRow.role || "").toLowerCase();
+    const allowed = role === "admin" || role === "super_admin";
+    if (!allowed) {
+      return NextResponse.json({ success: false, error: "Access denied. Admin privileges required." }, { status: 403 });
+    }
+    if (userRow.is_active === false) {
+      return NextResponse.json({ success: false, error: "Account is disabled" }, { status: 403 });
     }
 
-    if (!userData.is_active) {
-      return NextResponse.json(
-        { success: false, error: "Account is disabled" },
-        { status: 403 }
-      );
-    }
-
-    // ✅ Generate session token and persist hashed session in admin_sessions
+    // 3) Create admin session (service role write)
     const sessionToken = generateSessionToken();
     const tokenHash = hashToken(sessionToken);
-    const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
 
-    const { error: sessionErr } = await supabaseAdmin
-      .from("admin_sessions")
-      .insert({
-        admin_id: userData.id,
-        token_hash: tokenHash,
-        created_at: now,
-        last_activity_at: now,
-        expires_at: expiresAt,
-      });
+    const nowIso = new Date().toISOString();
+    const expiresIso = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
 
-    if (sessionErr) {
-      console.error("[Admin Auth] Failed to create admin session:", sessionErr);
+    const { error: sessErr } = await supabaseAdmin.from("admin_sessions").insert({
+      admin_id: userRow.id,
+      token_hash: tokenHash,
+      created_at: nowIso,
+      last_activity_at: nowIso,
+      expires_at: expiresIso,
+      revoked_at: null,
+      ip_address: ip,
+      user_agent: request.headers.get("user-agent") || null,
+    });
+
+    if (sessErr) {
       return NextResponse.json(
-        { success: false, error: `Failed to create session: ${sessionErr.message}` },
+        { success: false, error: `Failed to create session: ${sessErr.message}` },
         { status: 500 }
       );
     }
 
-    // Log successful login (non-blocking)
-    try {
-      await supabaseAdmin.from("admin_logs").insert({
-        admin_id: userData.id,
+    // fire-and-forget audit
+    void Promise.resolve(
+      supabaseAdmin.from("admin_logs").insert({
+        admin_id: userRow.id,
         action: "admin_login",
-        details: {
-          ip_address: ip,
-          user_agent: request.headers.get("user-agent"),
-        },
-      });
-    } catch (logErr) {
-      console.warn("[Admin Auth] Failed to write audit log:", logErr);
-    }
+        details: { ip_address: ip, user_agent: request.headers.get("user-agent") },
+      })
+    ).catch(() => {});
 
-    // Update last login / updated_at (non-blocking)
-    try {
-      await supabaseAdmin
-        .from("users")
-        .update({ updated_at: now })
-        .eq("id", userData.id);
-    } catch {}
-
-    // Reset rate limit on success
     loginAttempts.delete(ip);
-
-    console.log(`[Admin Auth] Successful login for ${email} from ${ip}`);
 
     return NextResponse.json({
       success: true,
       admin: {
-        id: userData.id,
-        email: userData.email,
-        name: userData.first_name || "Admin",
-        first_name: userData.first_name,
-        last_name: userData.last_name,
-        role: userData.role,
+        id: userRow.id,
+        email: userRow.email,
+        name: userRow.first_name || "Admin",
+        first_name: userRow.first_name,
+        last_name: userRow.last_name,
+        role: userRow.role,
         created_at: authData.user.created_at,
       },
       sessionToken,
     });
-  } catch (error: any) {
-    console.error("[Admin Auth] Login error:", error);
-    return NextResponse.json(
-      { success: false, error: "Authentication failed" },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    return NextResponse.json({ success: false, error: e?.message || "Authentication failed" }, { status: 500 });
   }
 }
