@@ -71,22 +71,58 @@ const mockUsers: UserData[] = [
   },
 ];
 
-function getAdminToken(admin: any): string | null {
-  if (!admin) return null;
-  return (
-    admin.token ||
-    admin.access_token ||
-    admin.accessToken ||
-    admin.session_token ||
-    admin.sessionToken ||
-    (typeof window !== 'undefined' ? window.localStorage.getItem('admin_token') : null) ||
-    null
-  );
+function getStorageToken(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  // ✅ prefer sessionStorage (new behavior)
+  const ss =
+    window.sessionStorage.getItem('novatrade_admin_token') ||
+    window.sessionStorage.getItem('admin_token');
+
+  if (ss) return ss;
+
+  // fallback: old localStorage keys
+  const ls =
+    window.localStorage.getItem('novatrade_admin_token') ||
+    window.localStorage.getItem('admin_token');
+
+  // ✅ migrate localStorage -> sessionStorage so refreshes stop breaking
+  if (ls) {
+    try {
+      window.sessionStorage.setItem('novatrade_admin_token', ls);
+    } catch {}
+    return ls;
+  }
+
+  return null;
+}
+
+function getAdminToken(admin: any, sessionToken?: string | null): string | null {
+  // ✅ best case: store exposes sessionToken directly
+  if (sessionToken) return sessionToken;
+
+  // fallback: token inside admin object variants
+  const fromAdmin =
+    admin?.sessionToken ||
+    admin?.session_token ||
+    admin?.token ||
+    admin?.access_token ||
+    admin?.accessToken ||
+    null;
+
+  if (fromAdmin) return fromAdmin;
+
+  // fallback: browser storage
+  return getStorageToken();
 }
 
 export default function AdminUsersPage() {
-  const { admin, isAuthenticated } = useAdminAuthStore();
-  const token = useMemo(() => getAdminToken(admin), [admin]);
+  // some codebases type the store narrowly; we read it safely
+  const store: any = useAdminAuthStore();
+  const { admin, isAuthenticated } = store;
+  const sessionToken: string | null = store?.sessionToken ?? store?.token ?? null;
+
+  const token = useMemo(() => getAdminToken(admin, sessionToken), [admin, sessionToken]);
 
   const { addresses, updateAddress, addAddress, toggleActive } = useDepositAddressesStore();
 
@@ -123,6 +159,15 @@ export default function AdminUsersPage() {
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [editingAddressValue, setEditingAddressValue] = useState('');
 
+  // ✅ keep token in sessionStorage so navigation/refresh doesn't drop it
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!token) return;
+    try {
+      window.sessionStorage.setItem('novatrade_admin_token', token);
+    } catch {}
+  }, [token]);
+
   useEffect(() => {
     if (admin?.id) adminService.setAdminId(admin.id);
     void loadUsers();
@@ -131,13 +176,23 @@ export default function AdminUsersPage() {
 
   const apiFetch = async (path: string, init?: RequestInit) => {
     if (!token) throw new Error('Missing admin token. Please log in again.');
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers as any),
+    };
+
+    // add JSON content-type if we send a body and none provided
+    if (init?.body && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+
     const res = await fetch(path, {
       ...init,
-      headers: {
-        ...(init?.headers || {}),
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
+      cache: 'no-store',
     });
+
     const json = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(json?.error || `Request failed (${res.status})`);
     return json;
@@ -146,15 +201,24 @@ export default function AdminUsersPage() {
   const loadUsers = async () => {
     setLoading(true);
     try {
-      // ✅ Prefer your adminService (if it’s already wired server-side).
+      // ✅ First choice: your server admin route (prevents anon-token [] issue)
+      try {
+        const json = await apiFetch('/api/admin/users');
+        if (Array.isArray(json?.users)) {
+          setUsers(json.users as UserData[]);
+          return;
+        }
+      } catch (routeErr) {
+        // ignore and fallback to adminService
+        console.warn('[AdminUsers] /api/admin/users failed, falling back:', routeErr);
+      }
+
+      // ✅ Second choice: adminService (if it's wired properly)
       const { data } = await adminService.getAllUsers({ limit: 200 });
-      if (Array.isArray(data) && data.length > 0) {
+      if (Array.isArray(data)) {
         setUsers(data as UserData[]);
       } else {
-        // ✅ Hard fallback: hit our admin route (must exist & return full shape)
-        const json = await apiFetch('/api/admin/users');
-        if (Array.isArray(json?.users)) setUsers(json.users as UserData[]);
-        else setUsers(mockUsers);
+        setUsers([]); // don't force mockUsers if backend is empty
       }
     } catch (e: any) {
       console.error('[AdminUsers] loadUsers error:', e);
@@ -301,19 +365,32 @@ export default function AdminUsersPage() {
     }
   };
 
-  // ✅ CONNECTED KYC ACTIONS (NO anon supabase)
+  // ✅ CONNECTED KYC ACTIONS (calls your server routes)
   const handleKycAction = async (userId: string, action: 'approve' | 'reject') => {
     try {
+      const target = users.find((u) => u.id === userId);
+      const who = target?.email ?? selectedUser?.email ?? 'user';
+
       if (action === 'approve') {
-        await apiFetch(`/api/admin/kyc/${userId}/approve`, { method: 'POST' });
-        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: 'verified' } : u)));
-        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: 'verified' });
-        setNotification({ type: 'success', message: `KYC approved for ${selectedUser?.email ?? 'user'}` });
+        const json = await apiFetch(`/api/admin/kyc/${userId}/approve`, { method: 'POST' });
+
+        const next = String(json?.user?.kyc_status ?? 'verified');
+        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: next } : u)));
+        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: next });
+
+        setNotification({ type: 'success', message: `KYC approved for ${who}` });
       } else {
-        await apiFetch(`/api/admin/kyc/${userId}/reject`, { method: 'POST' });
-        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: 'rejected' } : u)));
-        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: 'rejected' });
-        setNotification({ type: 'error', message: `KYC rejected for ${selectedUser?.email ?? 'user'}` });
+        const reason = prompt('Reason for rejection (optional):') || '';
+        const json = await apiFetch(`/api/admin/kyc/${userId}/reject`, {
+          method: 'POST',
+          body: JSON.stringify({ reason }),
+        });
+
+        const next = String(json?.user?.kyc_status ?? 'rejected');
+        setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, kyc_status: next } : u)));
+        if (selectedUser?.id === userId) setSelectedUser({ ...selectedUser, kyc_status: next });
+
+        setNotification({ type: 'error', message: `KYC rejected for ${who}` });
       }
     } catch (e: any) {
       console.error('[AdminUsers] KYC action error:', e);
@@ -349,7 +426,12 @@ export default function AdminUsersPage() {
   const displayName = (u: UserData) =>
     `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim() || u.email;
 
-  const kycLabel = (s: string) => (s === 'approved' ? 'verified' : s || 'none');
+  const kycLabel = (s: string) => {
+    const v = String(s || '').toLowerCase();
+    // DB might store 'approved' while UI wants 'verified'
+    if (v === 'approved') return 'verified';
+    return v || 'none';
+  };
 
   return (
     <div className="space-y-6">
@@ -706,7 +788,7 @@ export default function AdminUsersPage() {
                   <p><span className="text-slate-400">Last login:</span> {selectedUser.last_login_at ?? '—'}</p>
                 </div>
 
-                {/* ✅ KYC Review Actions now call /api/admin/kyc/... */}
+                {/* ✅ KYC Review Actions */}
                 {(kycLabel(selectedUser.kyc_status) === 'pending' ||
                   kycLabel(selectedUser.kyc_status) === 'rejected' ||
                   kycLabel(selectedUser.kyc_status) === 'none') && (
