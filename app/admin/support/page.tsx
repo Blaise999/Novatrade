@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageCircle,
   Search,
@@ -11,39 +10,86 @@ import {
   User,
   X,
   RefreshCw,
-  ChevronRight,
-  AlertCircle,
   Inbox,
-  Archive
 } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 // ============================================
-// TYPES
+// TOKEN HELPER (migration-safe: sessionStorage first, fallback localStorage)
 // ============================================
-interface SupportMessage {
-  id: string;
-  content: string;
-  sender: 'user' | 'admin' | 'bot';
-  sender_id?: string;
-  sender_name?: string;
-  timestamp: string;
-  read: boolean;
+function getAdminToken() {
+  const key = 'novatrade_admin_token';
+  if (typeof window === 'undefined') return null;
+
+  const s = sessionStorage.getItem(key);
+  if (s) return s;
+
+  const l = localStorage.getItem(key);
+  if (l) {
+    sessionStorage.setItem(key, l);
+    return l;
+  }
+  return null;
 }
 
-interface SupportTicket {
+// ============================================
+// TYPES (DB SHAPE)
+// ============================================
+type DbTicketStatus = 'open' | 'in_progress' | 'waiting_user' | 'resolved' | 'closed';
+type UiFilter = 'all' | 'open' | 'pending' | 'closed';
+
+type DbPriority = 'low' | 'normal' | 'high' | 'urgent';
+
+type DbTicket = {
   id: string;
   user_id: string;
-  user_email: string;
-  user_name: string;
-  status: 'open' | 'closed' | 'pending';
-  priority: 'low' | 'medium' | 'high';
-  subject?: string;
-  messages: SupportMessage[];
+  subject: string;
+  category: string;
+  priority: DbPriority;
+  status: DbTicketStatus;
   created_at: string;
   updated_at: string;
-  assigned_to?: string;
+  resolved_at: string | null;
+  users?: { id: string; email: string; first_name?: string | null; last_name?: string | null } | null;
+  last_message?: { message: string; sender_type: string; created_at: string } | null;
+};
+
+type DbMessage = {
+  id: string;
+  ticket_id: string;
+  sender_id: string | null;
+  sender_type: 'user' | 'admin' | 'system';
+  message: string;
+  attachments: any[] | null;
+  read_at: string | null;
+  created_at: string;
+};
+
+function formatTime(ts: string) {
+  const date = new Date(ts);
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  const minutes = Math.floor(diff / (1000 * 60));
+  const hours = Math.floor(diff / (1000 * 60 * 60));
+
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return date.toLocaleDateString();
+}
+
+function statusBadge(status: DbTicketStatus) {
+  if (status === 'open' || status === 'in_progress') return { cls: 'bg-yellow-500/20 text-yellow-500', label: 'open' };
+  if (status === 'waiting_user') return { cls: 'bg-blue-500/20 text-blue-500', label: 'pending' };
+  if (status === 'resolved') return { cls: 'bg-profit/20 text-profit', label: 'resolved' };
+  return { cls: 'bg-profit/20 text-profit', label: 'closed' };
+}
+
+function priorityLabel(p: DbPriority) {
+  if (p === 'urgent') return 'high';
+  if (p === 'high') return 'high';
+  if (p === 'normal') return 'medium';
+  return 'low';
 }
 
 // ============================================
@@ -51,196 +97,164 @@ interface SupportTicket {
 // ============================================
 export default function AdminSupportPage() {
   const { admin, isAuthenticated } = useAdminAuthStore();
-  const [tickets, setTickets] = useState<SupportTicket[]>([]);
-  const [selectedTicket, setSelectedTicket] = useState<SupportTicket | null>(null);
-  const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'closed' | 'pending'>('open');
-  const [isSending, setIsSending] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Quick reply templates
+  const token = useMemo(() => getAdminToken(), []);
+  const [tickets, setTickets] = useState<DbTicket[]>([]);
+  const [selectedTicket, setSelectedTicket] = useState<DbTicket | null>(null);
+  const [messages, setMessages] = useState<DbMessage[]>([]);
+
+  const [loadingTickets, setLoadingTickets] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<UiFilter>('open');
+  const [message, setMessage] = useState('');
+  const [isSending, setIsSending] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
   const quickReplies = [
-    "Thank you for contacting us! How can I help you today?",
-    "I understand your concern. Let me look into this for you.",
-    "Your request has been processed. Is there anything else I can help with?",
-    "Please allow 24-48 hours for this to be resolved.",
-    "Could you please provide more details about the issue?",
-    "Your deposit/withdrawal is being processed. Thank you for your patience.",
+    'Thank you for contacting us! How can I help you today?',
+    'I understand your concern. Let me look into this for you.',
+    'Your request has been processed. Is there anything else I can help with?',
+    'Please allow 24-48 hours for this to be resolved.',
+    'Could you please provide more details about the issue?',
+    'Your deposit/withdrawal is being processed. Thank you for your patience.',
   ];
 
+  // --------------------------------------------
+  // API helpers
+  // --------------------------------------------
+  async function apiGet<T>(url: string): Promise<T> {
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error ?? 'Request failed');
+    return json as T;
+  }
+
+  async function apiPost<T>(url: string, body: any): Promise<T> {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error ?? 'Request failed');
+    return json as T;
+  }
+
+  // --------------------------------------------
   // Load tickets
-  useEffect(() => {
-    loadTickets();
-    // Poll for updates every 10 seconds
-    const interval = setInterval(loadTickets, 10000);
-    return () => clearInterval(interval);
-  }, [statusFilter]);
-
-  // Scroll to bottom when viewing messages
-  useEffect(() => {
-    if (selectedTicket && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [selectedTicket?.messages]);
-
-  const loadTickets = async () => {
+  // --------------------------------------------
+  async function loadTickets() {
+    if (!token) return;
+    setLoadingTickets(true);
     try {
-      if (isSupabaseConfigured()) {
-        let query = supabase
-          .from('support_tickets')
-          .select('*')
-          .order('updated_at', { ascending: false });
-
-        if (statusFilter !== 'all') {
-          query = query.eq('status', statusFilter);
-        }
-
-        const { data, error } = await query;
-        if (error) throw error;
-        setTickets(data || []);
-      } else {
-        // Load from localStorage for demo
-        const stored = localStorage.getItem('novatrade_support_tickets');
-        if (stored) {
-          const allTickets = JSON.parse(stored);
-          setTickets(statusFilter === 'all' ? allTickets : allTickets.filter((t: SupportTicket) => t.status === statusFilter));
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load tickets:', error);
+      const data = await apiGet<{ tickets: DbTicket[] }>(`/api/admin/support/tickets?filter=${statusFilter}`);
+      setTickets(data.tickets ?? []);
+    } catch (e) {
+      console.error('[AdminSupport] loadTickets error:', e);
+    } finally {
+      setLoadingTickets(false);
     }
-    setLoading(false);
-  };
+  }
 
-  const sendAdminReply = async (content: string) => {
-    if (!selectedTicket || !content.trim()) return;
+  // --------------------------------------------
+  // Load selected ticket + messages
+  // --------------------------------------------
+  async function openTicket(ticket: DbTicket) {
+    if (!token) return;
+
+    setSelectedTicket(ticket);
+    setLoadingMessages(true);
+
+    try {
+      const data = await apiGet<{ ticket: DbTicket; messages: DbMessage[] }>(
+        `/api/admin/support/tickets/${ticket.id}`
+      );
+      setSelectedTicket(data.ticket);
+      setMessages(data.messages ?? []);
+      requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
+    } catch (e) {
+      console.error('[AdminSupport] openTicket error:', e);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }
+
+  // --------------------------------------------
+  // Send reply (writes to support_messages)
+  // --------------------------------------------
+  async function sendAdminReply(text: string) {
+    if (!selectedTicket || !text.trim() || !token) return;
 
     setIsSending(true);
-    const newMessage: SupportMessage = {
-      id: `msg-${Date.now()}`,
-      content: content.trim(),
-      sender: 'admin',
-      sender_id: admin?.id,
-      sender_name: admin?.name || 'Support',
-      timestamp: new Date().toISOString(),
-      read: true,
-    };
-
     try {
-      if (isSupabaseConfigured()) {
-        const updatedMessages = [...selectedTicket.messages, newMessage];
-        const { error } = await supabase
-          .from('support_tickets')
-          .update({
-            messages: updatedMessages,
-            updated_at: new Date().toISOString(),
-            status: 'pending', // Mark as awaiting user response
-          })
-          .eq('id', selectedTicket.id);
-
-        if (error) throw error;
-      } else {
-        // Update localStorage for demo
-        const stored = localStorage.getItem('novatrade_support_tickets') || '[]';
-        const allTickets = JSON.parse(stored);
-        const ticketIndex = allTickets.findIndex((t: SupportTicket) => t.id === selectedTicket.id);
-        if (ticketIndex >= 0) {
-          allTickets[ticketIndex].messages.push(newMessage);
-          allTickets[ticketIndex].updated_at = new Date().toISOString();
-          allTickets[ticketIndex].status = 'pending';
-          localStorage.setItem('novatrade_support_tickets', JSON.stringify(allTickets));
-        }
-      }
-
-      // Update local state
-      setSelectedTicket(prev => prev ? {
-        ...prev,
-        messages: [...prev.messages, newMessage],
-        updated_at: new Date().toISOString(),
-        status: 'pending',
-      } : null);
+      await apiPost(`/api/admin/support/tickets/${selectedTicket.id}/messages`, {
+        message: text.trim(),
+        adminId: admin?.id ?? null,
+      });
 
       setMessage('');
-      loadTickets();
-    } catch (error) {
-      console.error('Failed to send message:', error);
+      await openTicket(selectedTicket); // refresh messages
+      await loadTickets(); // refresh list + preview
+    } catch (e) {
+      console.error('[AdminSupport] sendAdminReply error:', e);
+    } finally {
+      setIsSending(false);
     }
+  }
 
-    setIsSending(false);
-  };
-
-  const closeTicket = async () => {
-    if (!selectedTicket) return;
-
+  // --------------------------------------------
+  // Status actions
+  // --------------------------------------------
+  async function setTicketStatus(status: DbTicketStatus) {
+    if (!selectedTicket || !token) return;
     try {
-      if (isSupabaseConfigured()) {
-        await supabase
-          .from('support_tickets')
-          .update({ status: 'closed', updated_at: new Date().toISOString() })
-          .eq('id', selectedTicket.id);
-      } else {
-        const stored = localStorage.getItem('novatrade_support_tickets') || '[]';
-        const allTickets = JSON.parse(stored);
-        const ticketIndex = allTickets.findIndex((t: SupportTicket) => t.id === selectedTicket.id);
-        if (ticketIndex >= 0) {
-          allTickets[ticketIndex].status = 'closed';
-          localStorage.setItem('novatrade_support_tickets', JSON.stringify(allTickets));
-        }
-      }
-
-      setSelectedTicket(null);
-      loadTickets();
-    } catch (error) {
-      console.error('Failed to close ticket:', error);
+      const data = await apiPost<{ ticket: DbTicket }>(`/api/admin/support/tickets/${selectedTicket.id}/status`, {
+        status,
+      });
+      setSelectedTicket(data.ticket);
+      await loadTickets();
+    } catch (e) {
+      console.error('[AdminSupport] setTicketStatus error:', e);
     }
-  };
+  }
 
-  const reopenTicket = async () => {
-    if (!selectedTicket) return;
+  const closeTicket = () => setTicketStatus('closed');
+  const reopenTicket = () => setTicketStatus('open');
 
-    try {
-      if (isSupabaseConfigured()) {
-        await supabase
-          .from('support_tickets')
-          .update({ status: 'open', updated_at: new Date().toISOString() })
-          .eq('id', selectedTicket.id);
-      } else {
-        const stored = localStorage.getItem('novatrade_support_tickets') || '[]';
-        const allTickets = JSON.parse(stored);
-        const ticketIndex = allTickets.findIndex((t: SupportTicket) => t.id === selectedTicket.id);
-        if (ticketIndex >= 0) {
-          allTickets[ticketIndex].status = 'open';
-          localStorage.setItem('novatrade_support_tickets', JSON.stringify(allTickets));
-        }
-      }
+  // --------------------------------------------
+  // Effects
+  // --------------------------------------------
+  useEffect(() => {
+    loadTickets();
+    const interval = setInterval(loadTickets, 10000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter]);
 
-      setSelectedTicket(prev => prev ? { ...prev, status: 'open' } : null);
-      loadTickets();
-    } catch (error) {
-      console.error('Failed to reopen ticket:', error);
-    }
-  };
+  useEffect(() => {
+    requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }));
+  }, [messages.length]);
 
-  const filteredTickets = tickets.filter(t =>
-    t.user_email?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    t.user_name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    t.subject?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  const formatTime = (timestamp: string) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const hours = Math.floor(diff / (1000 * 60 * 60));
-    const minutes = Math.floor(diff / (1000 * 60));
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return date.toLocaleDateString();
-  };
+  // --------------------------------------------
+  // Guards
+  // --------------------------------------------
+  if (!token) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-slate-400">Missing admin token. Please log in again.</p>
+      </div>
+    );
+  }
 
   if (!isAuthenticated || !admin) {
     return (
@@ -249,6 +263,21 @@ export default function AdminSupportPage() {
       </div>
     );
   }
+
+  // --------------------------------------------
+  // Filter client-side search (email/name/subject)
+  // --------------------------------------------
+  const filteredTickets = tickets.filter((t) => {
+    const email = t.users?.email ?? '';
+    const name = `${t.users?.first_name ?? ''} ${t.users?.last_name ?? ''}`.trim();
+    const subj = t.subject ?? '';
+    const q = searchQuery.toLowerCase();
+    return (
+      email.toLowerCase().includes(q) ||
+      name.toLowerCase().includes(q) ||
+      subj.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div className="h-[calc(100vh-120px)] flex flex-col">
@@ -266,33 +295,42 @@ export default function AdminSupportPage() {
               <Inbox className="w-5 h-5 text-yellow-500" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-cream">{tickets.filter(t => t.status === 'open').length}</p>
+              <p className="text-2xl font-bold text-cream">
+                {tickets.filter((t) => t.status === 'open' || t.status === 'in_progress').length}
+              </p>
               <p className="text-sm text-yellow-500">Open</p>
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl p-4 border border-white/10">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-500/20 rounded-lg">
               <Clock className="w-5 h-5 text-blue-500" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-cream">{tickets.filter(t => t.status === 'pending').length}</p>
+              <p className="text-2xl font-bold text-cream">
+                {tickets.filter((t) => t.status === 'waiting_user').length}
+              </p>
               <p className="text-sm text-blue-500">Pending</p>
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl p-4 border border-white/10">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-profit/20 rounded-lg">
               <CheckCircle className="w-5 h-5 text-profit" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-cream">{tickets.filter(t => t.status === 'closed').length}</p>
+              <p className="text-2xl font-bold text-cream">
+                {tickets.filter((t) => t.status === 'closed' || t.status === 'resolved').length}
+              </p>
               <p className="text-sm text-profit">Resolved</p>
             </div>
           </div>
         </div>
+
         <div className="bg-white/5 rounded-xl p-4 border border-white/10">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-purple-500/20 rounded-lg">
@@ -306,11 +344,11 @@ export default function AdminSupportPage() {
         </div>
       </div>
 
-      {/* Main Content */}
+      {/* Main */}
       <div className="flex-1 flex gap-4 min-h-0">
         {/* Ticket List */}
         <div className="w-96 flex flex-col bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-          {/* Search & Filters */}
+          {/* Search & Filter */}
           <div className="p-4 border-b border-white/10 space-y-3">
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -322,26 +360,27 @@ export default function AdminSupportPage() {
                 className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-cream text-sm focus:outline-none focus:border-gold"
               />
             </div>
+
             <div className="flex gap-2">
-              {(['all', 'open', 'pending', 'closed'] as const).map(status => (
+              {(['all', 'open', 'pending', 'closed'] as const).map((s) => (
                 <button
-                  key={status}
-                  onClick={() => setStatusFilter(status)}
+                  key={s}
+                  onClick={() => setStatusFilter(s)}
                   className={`px-3 py-1.5 text-xs rounded-lg transition-all ${
-                    statusFilter === status
+                    statusFilter === s
                       ? 'bg-gold text-void font-medium'
                       : 'bg-white/5 text-slate-400 hover:bg-white/10'
                   }`}
                 >
-                  {status.charAt(0).toUpperCase() + status.slice(1)}
+                  {s.charAt(0).toUpperCase() + s.slice(1)}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Ticket List */}
+          {/* Tickets */}
           <div className="flex-1 overflow-y-auto">
-            {loading ? (
+            {loadingTickets ? (
               <div className="flex items-center justify-center h-32">
                 <RefreshCw className="w-6 h-6 text-gold animate-spin" />
               </div>
@@ -351,38 +390,46 @@ export default function AdminSupportPage() {
                 <p className="text-sm">No tickets found</p>
               </div>
             ) : (
-              filteredTickets.map(ticket => (
-                <button
-                  key={ticket.id}
-                  onClick={() => setSelectedTicket(ticket)}
-                  className={`w-full p-4 text-left border-b border-white/5 hover:bg-white/5 transition-all ${
-                    selectedTicket?.id === ticket.id ? 'bg-gold/10' : ''
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gold/20 to-electric/20 flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-gold" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-cream truncate">{ticket.user_name || 'User'}</p>
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${
-                          ticket.status === 'open' ? 'bg-yellow-500/20 text-yellow-500' :
-                          ticket.status === 'pending' ? 'bg-blue-500/20 text-blue-500' :
-                          'bg-profit/20 text-profit'
-                        }`}>
-                          {ticket.status}
-                        </span>
+              filteredTickets.map((t) => {
+                const name = `${t.users?.first_name ?? ''} ${t.users?.last_name ?? ''}`.trim() || 'User';
+                const email = t.users?.email ?? '—';
+                const last = t.last_message?.message ?? t.subject ?? '—';
+                const badge = statusBadge(t.status);
+
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => openTicket(t)}
+                    className={`w-full p-4 text-left border-b border-white/5 hover:bg-white/5 transition-all ${
+                      selectedTicket?.id === t.id ? 'bg-gold/10' : ''
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gold/20 to-electric/20 flex items-center justify-center flex-shrink-0">
+                        <User className="w-5 h-5 text-gold" />
                       </div>
-                      <p className="text-xs text-slate-500 truncate mt-0.5">{ticket.user_email}</p>
-                      <p className="text-xs text-slate-400 mt-1 truncate">
-                        {ticket.messages[ticket.messages.length - 1]?.content || 'No messages'}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">{formatTime(ticket.updated_at)}</p>
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium text-cream truncate">{name}</p>
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${badge.cls}`}>
+                            {badge.label}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-500 truncate mt-0.5">{email}</p>
+
+                        <p className="text-xs text-slate-400 mt-1 truncate">{last}</p>
+
+                        <div className="flex items-center justify-between mt-1">
+                          <p className="text-xs text-slate-500">{formatTime(t.updated_at)}</p>
+                          <p className="text-xs text-slate-500">Priority: {priorityLabel(t.priority)}</p>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </button>
-              ))
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
@@ -391,17 +438,24 @@ export default function AdminSupportPage() {
         <div className="flex-1 flex flex-col bg-white/5 rounded-xl border border-white/10 overflow-hidden">
           {selectedTicket ? (
             <>
-              {/* Chat Header */}
+              {/* Header */}
               <div className="p-4 border-b border-white/10 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-gold/20 to-electric/20 flex items-center justify-center">
                     <User className="w-5 h-5 text-gold" />
                   </div>
+
                   <div>
-                    <p className="text-cream font-medium">{selectedTicket.user_name || 'User'}</p>
-                    <p className="text-xs text-slate-500">{selectedTicket.user_email}</p>
+                    <p className="text-cream font-medium">
+                      {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() || 'User'}
+                    </p>
+                    <p className="text-xs text-slate-500">{selectedTicket.users?.email ?? '—'}</p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {selectedTicket.subject} • {selectedTicket.category}
+                    </p>
                   </div>
                 </div>
+
                 <div className="flex items-center gap-2">
                   {selectedTicket.status !== 'closed' ? (
                     <button
@@ -418,10 +472,8 @@ export default function AdminSupportPage() {
                       Reopen Ticket
                     </button>
                   )}
-                  <button
-                    onClick={() => setSelectedTicket(null)}
-                    className="p-2 hover:bg-white/10 rounded-lg"
-                  >
+
+                  <button onClick={() => setSelectedTicket(null)} className="p-2 hover:bg-white/10 rounded-lg">
                     <X className="w-4 h-4 text-slate-400" />
                   </button>
                 </div>
@@ -429,33 +481,45 @@ export default function AdminSupportPage() {
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {selectedTicket.messages.map(msg => (
-                  <div
-                    key={msg.id}
-                    className={`flex ${msg.sender === 'admin' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[70%] ${
-                        msg.sender === 'admin'
-                          ? 'bg-gold text-void rounded-2xl rounded-br-md'
-                          : msg.sender === 'user'
-                          ? 'bg-white/10 text-cream rounded-2xl rounded-bl-md'
-                          : 'bg-electric/20 text-cream rounded-2xl rounded-bl-md'
-                      } px-4 py-3`}
-                    >
-                      {msg.sender !== 'admin' && (
-                        <p className="text-xs opacity-70 mb-1">
-                          {msg.sender === 'user' ? selectedTicket.user_name || 'User' : 'Bot'}
-                        </p>
-                      )}
-                      <p className="text-sm">{msg.content}</p>
-                      <div className="flex items-center gap-1 mt-1 opacity-60">
-                        <Clock className="w-3 h-3" />
-                        <span className="text-xs">{formatTime(msg.timestamp)}</span>
-                      </div>
-                    </div>
+                {loadingMessages ? (
+                  <div className="flex items-center justify-center h-28">
+                    <RefreshCw className="w-6 h-6 text-gold animate-spin" />
                   </div>
-                ))}
+                ) : (
+                  messages.map((m) => {
+                    const isAdminMsg = m.sender_type === 'admin';
+                    const isSystem = m.sender_type === 'system';
+
+                    return (
+                      <div key={m.id} className={`flex ${isAdminMsg ? 'justify-end' : 'justify-start'}`}>
+                        <div
+                          className={`max-w-[70%] ${
+                            isSystem
+                              ? 'bg-electric/20 text-cream rounded-2xl rounded-bl-md'
+                              : isAdminMsg
+                              ? 'bg-gold text-void rounded-2xl rounded-br-md'
+                              : 'bg-white/10 text-cream rounded-2xl rounded-bl-md'
+                          } px-4 py-3`}
+                        >
+                          {!isAdminMsg && !isSystem && (
+                            <p className="text-xs opacity-70 mb-1">
+                              {`${selectedTicket.users?.first_name ?? ''} ${selectedTicket.users?.last_name ?? ''}`.trim() || 'User'}
+                            </p>
+                          )}
+
+                          {isSystem && <p className="text-xs opacity-70 mb-1">System</p>}
+
+                          <p className="text-sm">{m.message}</p>
+
+                          <div className="flex items-center gap-1 mt-1 opacity-60">
+                            <Clock className="w-3 h-3" />
+                            <span className="text-xs">{formatTime(m.created_at)}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
                 <div ref={messagesEndRef} />
               </div>
 
@@ -468,9 +532,9 @@ export default function AdminSupportPage() {
                       <button
                         key={i}
                         onClick={() => setMessage(reply)}
-                        className="px-3 py-1 bg-white/5 text-slate-400 text-xs rounded-full hover:bg-white/10 hover:text-cream transition-all truncate max-w-[200px]"
+                        className="px-3 py-1 bg-white/5 text-slate-400 text-xs rounded-full hover:bg-white/10 hover:text-cream transition-all truncate max-w-[240px]"
                       >
-                        {reply.substring(0, 40)}...
+                        {reply.length > 44 ? `${reply.slice(0, 44)}…` : reply}
                       </button>
                     ))}
                   </div>
@@ -486,19 +550,18 @@ export default function AdminSupportPage() {
                       placeholder="Type your reply..."
                       value={message}
                       onChange={(e) => setMessage(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && sendAdminReply(message)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') sendAdminReply(message);
+                      }}
                       className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream text-sm placeholder:text-slate-500 focus:outline-none focus:border-gold"
                     />
                     <button
                       onClick={() => sendAdminReply(message)}
                       disabled={!message.trim() || isSending}
                       className="px-4 py-3 bg-gold text-void rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
+                      aria-label="Send"
                     >
-                      {isSending ? (
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                      ) : (
-                        <Send className="w-5 h-5" />
-                      )}
+                      {isSending ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
                     </button>
                   </div>
                 </div>

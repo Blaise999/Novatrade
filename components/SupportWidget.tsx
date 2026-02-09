@@ -27,7 +27,7 @@ export default function SupportWidget() {
 
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  const canUse = useMemo(() => isSupabaseConfigured && !!supabase, []);
+  const canUse = useMemo(() => isSupabaseConfigured() && !!supabase, []);
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
