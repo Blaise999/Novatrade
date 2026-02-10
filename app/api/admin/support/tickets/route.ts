@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdmin } from '@/lib/requireAdmin';
+import { requireAdmin, supabaseAdmin } from '@/lib/requireAdmin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,35 +14,60 @@ function mapFilterToStatuses(filter: string | null): DbTicketStatus[] | null {
   return null;
 }
 
+type TicketRow = {
+  id: string;
+  user_id: string;
+  assigned_to: string | null;
+  subject: string;
+  category: string;
+  priority: 'low' | 'normal' | 'high' | 'urgent';
+  status: DbTicketStatus;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+};
+
+type MsgRow = {
+  ticket_id: string;
+  message: string;
+  sender_type: string;
+  created_at: string;
+};
+
+type UserRow = {
+  id: string;
+  email: string;
+  first_name: string | null;
+  last_name: string | null;
+};
+
 export async function GET(request: NextRequest) {
   const admin = await requireAdmin(request);
-  if (!admin.ok) return NextResponse.json({ error: admin.error }, { status: admin.status });
+  if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
     const { searchParams } = request.nextUrl;
     const filter = searchParams.get('filter');
     const statuses = mapFilterToStatuses(filter);
 
-    let q = admin.supabaseAdmin
+    let q = supabaseAdmin
       .from('support_tickets')
-      .select(
-        'id,user_id,assigned_to,subject,category,priority,status,created_at,updated_at,resolved_at'
-      )
+      .select('id,user_id,assigned_to,subject,category,priority,status,created_at,updated_at,resolved_at')
       .order('updated_at', { ascending: false })
       .limit(200);
 
     if (statuses) q = q.in('status', statuses);
 
-    const { data: tickets, error } = await q;
-    if (error) throw error;
+    const { data: tickets, error: tErr } = await q;
+    if (tErr) throw tErr;
 
-    const list = tickets ?? [];
+    const list = (tickets ?? []) as TicketRow[];
     const ticketIds = list.map((t) => t.id);
 
-    // ---- pull latest message for each ticket (single query, no N+1)
-    let lastByTicket: Record<string, any> = {};
+    // last message per ticket (no embeds)
+    const lastByTicket: Record<string, MsgRow> = {};
     if (ticketIds.length) {
-      const { data: msgs, error: mErr } = await admin.supabaseAdmin
+      const { data: msgs, error: mErr } = await supabaseAdmin
         .from('support_messages')
         .select('ticket_id,message,sender_type,created_at')
         .in('ticket_id', ticketIds)
@@ -51,36 +76,32 @@ export async function GET(request: NextRequest) {
 
       if (mErr) throw mErr;
 
-      for (const m of msgs ?? []) {
-        if (!lastByTicket[m.ticket_id]) lastByTicket[m.ticket_id] = m; // first seen = newest (we sorted desc)
+      for (const m of (msgs ?? []) as MsgRow[]) {
+        if (!lastByTicket[m.ticket_id]) lastByTicket[m.ticket_id] = m; // first seen is newest
       }
     }
 
-    // ---- fetch users referenced by user_id / assigned_to (single query)
+    // users lookup for user_id + assigned_to
     const userIds = Array.from(
-      new Set(
-        list
-          .flatMap((t) => [t.user_id, t.assigned_to])
-          .filter(Boolean) as string[]
-      )
+      new Set(list.flatMap((t) => [t.user_id, t.assigned_to]).filter(Boolean) as string[])
     );
 
-    let usersById: Record<string, any> = {};
+    const usersById: Record<string, UserRow> = {};
     if (userIds.length) {
-      const { data: users, error: uErr } = await admin.supabaseAdmin
+      const { data: users, error: uErr } = await supabaseAdmin
         .from('users')
         .select('id,email,first_name,last_name')
         .in('id', userIds);
 
       if (uErr) throw uErr;
 
-      for (const u of users ?? []) usersById[u.id] = u;
+      for (const u of (users ?? []) as UserRow[]) usersById[u.id] = u;
     }
 
-    const out = list.map((t: any) => ({
+    const out = list.map((t) => ({
       ...t,
-      users: usersById[t.user_id] ?? null,          // keep same shape your UI expects
-      assignee: usersById[t.assigned_to] ?? null,   // optional, for later
+      users: usersById[t.user_id] ?? null,
+      assignee: t.assigned_to ? usersById[t.assigned_to] ?? null : null,
       last_message: lastByTicket[t.id] ?? null,
     }));
 
