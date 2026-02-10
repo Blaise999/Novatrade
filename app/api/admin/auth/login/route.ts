@@ -1,4 +1,4 @@
-// POST /api/admin/auth/login
+// app/api/admin/auth/login/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
@@ -13,13 +13,14 @@ const supabaseAuth = createClient(
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
-// Admin DB client (service role) for privileged writes
+// Admin DB client (service role) for privileged reads/writes
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
   { auth: { autoRefreshToken: false, persistSession: false } }
 );
 
+// NOTE: serverless instances may reset this Map between requests — ok as “best effort”
 const loginAttempts = new Map<string, { count: number; lastAttempt: number }>();
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -66,10 +67,14 @@ function hashToken(token: string): string {
 
 export async function POST(request: NextRequest) {
   try {
-    // hard fail if service role missing (this is the #1 real-world cause)
+    // hard fail if service role missing
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
       return NextResponse.json(
-        { success: false, error: "Server misconfig: SUPABASE_SERVICE_ROLE_KEY is missing (set on Vercel Preview + Production)." },
+        {
+          success: false,
+          error:
+            "Server misconfig: SUPABASE_SERVICE_ROLE_KEY is missing (set on Vercel Preview + Production).",
+        },
         { status: 500 }
       );
     }
@@ -97,18 +102,23 @@ export async function POST(request: NextRequest) {
       password,
     });
 
-    if (authError || !authData.user) {
+    if (authError || !authData?.user?.id) {
       return NextResponse.json({ success: false, error: "Invalid credentials" }, { status: 401 });
     }
 
-    // 2) Validate role in users table (service role read)
+    const userId = authData.user.id;
+
+    // 2) Validate admin role in users table (service role read)
     const { data: userRow, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, email, first_name, last_name, role, is_active")
-      .eq("id", authData.user.id)
+      .eq("id", userId)
       .maybeSingle();
 
-    if (userError || !userRow) {
+    if (userError) {
+      return NextResponse.json({ success: false, error: `Failed to load profile: ${userError.message}` }, { status: 500 });
+    }
+    if (!userRow) {
       return NextResponse.json({ success: false, error: "User profile not found" }, { status: 404 });
     }
 
@@ -128,13 +138,24 @@ export async function POST(request: NextRequest) {
     const nowIso = new Date().toISOString();
     const expiresIso = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
 
+    // OPTIONAL: revoke existing active sessions for this admin (keeps it clean)
+    // await supabaseAdmin.from("admin_sessions")
+    //   .update({ revoked_at: nowIso })
+    //   .eq("admin_id", userRow.id)
+    //   .is("revoked_at", null);
+
     const { error: sessErr } = await supabaseAdmin.from("admin_sessions").insert({
+      // ✅ write both so old/new code paths work
       admin_id: userRow.id,
+      user_id: userRow.id,
+
       token_hash: tokenHash,
+
       created_at: nowIso,
       last_activity_at: nowIso,
       expires_at: expiresIso,
       revoked_at: null,
+
       ip_address: ip,
       user_agent: request.headers.get("user-agent") || null,
     });
@@ -146,14 +167,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // fire-and-forget audit
-    void Promise.resolve(
-      supabaseAdmin.from("admin_logs").insert({
-        admin_id: userRow.id,
-        action: "admin_login",
-        details: { ip_address: ip, user_agent: request.headers.get("user-agent") },
-      })
-    ).catch(() => {});
+    // fire-and-forget audit (don’t fail login if admin_logs/table missing)
+   // fire-and-forget audit (don’t fail login if admin_logs/table missing)
+void (async () => {
+  try {
+    await supabaseAdmin.from("admin_logs").insert({
+      admin_id: userRow.id,
+      action: "admin_login",
+      details: { ip_address: ip, user_agent: request.headers.get("user-agent") },
+      created_at: nowIso,
+    });
+  } catch {
+    // ignore
+  }
+})();
+
 
     loginAttempts.delete(ip);
 
@@ -166,7 +194,7 @@ export async function POST(request: NextRequest) {
         first_name: userRow.first_name,
         last_name: userRow.last_name,
         role: userRow.role,
-        created_at: authData.user.created_at,
+        created_at: (authData.user as any)?.created_at ?? null,
       },
       sessionToken,
     });

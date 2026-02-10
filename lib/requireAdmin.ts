@@ -1,4 +1,3 @@
-// lib/requireAdmin.ts
 import 'server-only';
 
 import { NextRequest } from 'next/server';
@@ -15,20 +14,18 @@ function hashToken(token: string) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-export type RequireAdminOk = {
-  ok: true;
-  adminSessionId: string;
-  adminId: string; // ✅ not null (so sender_id never null)
-  supabaseAdmin: SupabaseClient;
-};
-
-export type RequireAdminFail = {
-  ok: false;
-  status: 401 | 403;
-  error: string;
-};
-
-export type RequireAdminResult = RequireAdminOk | RequireAdminFail;
+export type RequireAdminResult =
+  | {
+      ok: true;
+      adminSessionId: string;
+      adminId: string; // ✅ required (NOT nullable)
+      supabaseAdmin: SupabaseClient;
+    }
+  | {
+      ok: false;
+      status: 401 | 403;
+      error: string;
+    };
 
 export async function requireAdmin(req: NextRequest): Promise<RequireAdminResult> {
   const auth = req.headers.get('authorization') || req.headers.get('Authorization');
@@ -58,9 +55,9 @@ export async function requireAdmin(req: NextRequest): Promise<RequireAdminResult
     return { ok: false, status: 403, error: 'Admin session revoked. Please log in again.' };
   }
 
+  // ✅ must exist
   const adminId = String((data as any).admin_id ?? (data as any).user_id ?? '').trim();
   if (!adminId) {
-    // ✅ this is the root cause of your sender_id null
     return { ok: false, status: 403, error: 'Admin session missing admin_id. Please log in again.' };
   }
 
