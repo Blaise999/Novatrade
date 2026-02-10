@@ -563,39 +563,40 @@ export default function FXTradingPage() {
       await refreshUser?.();
 
       // ✅ Save to trades table for history (schema-correct)
-      if (user?.id) {
-        const sessionId =
-          (result as any)?.positionId ??
-          (result as any)?.id ??
-          undefined;
+     // ✅ Save to trades table for history (schema-correct)
+if (user?.id) {
+  const sessionId =
+    (result as any)?.positionId ??
+    (result as any)?.id ??
+    undefined;
 
-        const saved = await saveTradeToHistory({
-          userId: user.id,
-          symbol: selectedAsset.symbol,
+  const saved = await saveTradeToHistory({
+    userId: user.id,
+    symbol: selectedAsset.symbol,
 
-          // ✅ MUST match your table checks
-          marketType: 'fx',
-          assetType: 'forex',
-          tradeType: 'margin',
-          direction: tradeDirection, // buy/sell allowed
+    // ✅ MUST match your TradeMarketType union
+    marketType: 'forex',     // <-- FIX: was 'fx'
+    assetType: 'forex',
+    tradeType: 'margin',
+    direction: tradeDirection, // buy/sell allowed
 
-          amount: positionValue,
-          quantity: lotSize * 100000,
-          entryPrice,
-          leverage,
+    amount: positionValue,
+    quantity: lotSize * 100000,
+    entryPrice,
+    leverage,
 
-          fee,
-          stopLoss: stopLoss || undefined,
-          takeProfit: takeProfit || undefined,
+    fee,
+    stopLoss: stopLoss || undefined,
+    takeProfit: takeProfit || undefined,
 
-          status: 'active', // ✅ NOT "open"
-          sessionId,
-        });
+    status: 'active',
+    sessionId,
+  });
 
-        if (!(saved as any)?.success) {
-          console.warn('[FX] trade saved locally but history insert failed:', (saved as any)?.error);
-        }
-      }
+  if (!(saved as any)?.success) {
+    console.warn('[FX] trade saved locally but history insert failed:', (saved as any)?.error);
+  }
+}
 
       setNotification({
         type: 'success',
