@@ -39,7 +39,6 @@ export async function requireAdmin(req: NextRequest): Promise<RequireAdminResult
 
   const tokenHash = hashToken(token);
 
-  // Use select('*') so we don't crash if your table columns differ
   const { data, error } = await supabaseAdmin
     .from('admin_sessions')
     .select('*')
@@ -50,14 +49,14 @@ export async function requireAdmin(req: NextRequest): Promise<RequireAdminResult
     return { ok: false, status: 403, error: 'Invalid admin token. Please log in again.' };
   }
 
-  if (data.revoked_at) {
+  if ((data as any).revoked_at) {
     return { ok: false, status: 403, error: 'Admin session revoked. Please log in again.' };
   }
 
   return {
     ok: true,
-    adminSessionId: String(data.id),
-    adminId: (data.admin_id ?? data.user_id ?? null) as string | null,
+    adminSessionId: String((data as any).id),
+    adminId: ((data as any).admin_id ?? (data as any).user_id ?? null) as string | null,
     supabaseAdmin,
   };
 }
