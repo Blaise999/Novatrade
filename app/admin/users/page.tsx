@@ -98,10 +98,8 @@ function getStorageToken(): string | null {
 }
 
 function getAdminToken(admin: any, sessionToken?: string | null): string | null {
-  // ✅ best case: store exposes sessionToken directly
   if (sessionToken) return sessionToken;
 
-  // fallback: token inside admin object variants
   const fromAdmin =
     admin?.sessionToken ||
     admin?.session_token ||
@@ -112,12 +110,10 @@ function getAdminToken(admin: any, sessionToken?: string | null): string | null 
 
   if (fromAdmin) return fromAdmin;
 
-  // fallback: browser storage
   return getStorageToken();
 }
 
 export default function AdminUsersPage() {
-  // some codebases type the store narrowly; we read it safely
   const store: any = useAdminAuthStore();
   const { admin, isAuthenticated } = store;
   const sessionToken: string | null = store?.sessionToken ?? store?.token ?? null;
@@ -168,12 +164,6 @@ export default function AdminUsersPage() {
     } catch {}
   }, [token]);
 
-  useEffect(() => {
-    if (admin?.id) adminService.setAdminId(admin.id);
-    void loadUsers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [admin?.id]);
-
   const apiFetch = async (path: string, init?: RequestInit) => {
     if (!token) throw new Error('Missing admin token. Please log in again.');
 
@@ -182,7 +172,6 @@ export default function AdminUsersPage() {
       ...(init?.headers as any),
     };
 
-    // add JSON content-type if we send a body and none provided
     if (init?.body && !headers['Content-Type']) {
       headers['Content-Type'] = 'application/json';
     }
@@ -199,26 +188,14 @@ export default function AdminUsersPage() {
   };
 
   const loadUsers = async () => {
+    if (!token) return; // ✅ prevent noise while token is still hydrating
     setLoading(true);
     try {
-      // ✅ First choice: your server admin route (prevents anon-token [] issue)
-      try {
-        const json = await apiFetch('/api/admin/users');
-        if (Array.isArray(json?.users)) {
-          setUsers(json.users as UserData[]);
-          return;
-        }
-      } catch (routeErr) {
-        // ignore and fallback to adminService
-        console.warn('[AdminUsers] /api/admin/users failed, falling back:', routeErr);
-      }
-
-      // ✅ Second choice: adminService (if it's wired properly)
-      const { data } = await adminService.getAllUsers({ limit: 200 });
-      if (Array.isArray(data)) {
-        setUsers(data as UserData[]);
+      const json = await apiFetch('/api/admin/users');
+      if (Array.isArray(json?.users)) {
+        setUsers(json.users as UserData[]);
       } else {
-        setUsers([]); // don't force mockUsers if backend is empty
+        setUsers([]);
       }
     } catch (e: any) {
       console.error('[AdminUsers] loadUsers error:', e);
@@ -229,6 +206,13 @@ export default function AdminUsersPage() {
     }
   };
 
+  useEffect(() => {
+    if (!token) return;
+    if (admin?.id) adminService.setAdminId(admin.id);
+    void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [admin?.id, token]);
+
   if (!isAuthenticated || !admin) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -237,21 +221,23 @@ export default function AdminUsersPage() {
     );
   }
 
-  const filteredUsers = users.filter((user) => {
-    if (statusFilter === 'active' && !user.is_active) return false;
-    if (statusFilter === 'inactive' && user.is_active) return false;
-    if (roleFilter && user.role !== roleFilter) return false;
+  const filteredUsers = useMemo(() => {
+    return users.filter((user) => {
+      if (statusFilter === 'active' && !user.is_active) return false;
+      if (statusFilter === 'inactive' && user.is_active) return false;
+      if (roleFilter && user.role !== roleFilter) return false;
 
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      return (
-        user.email.toLowerCase().includes(q) ||
-        (user.first_name?.toLowerCase().includes(q) ?? false) ||
-        (user.last_name?.toLowerCase().includes(q) ?? false)
-      );
-    }
-    return true;
-  });
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        return (
+          user.email.toLowerCase().includes(q) ||
+          (user.first_name?.toLowerCase().includes(q) ?? false) ||
+          (user.last_name?.toLowerCase().includes(q) ?? false)
+        );
+      }
+      return true;
+    });
+  }, [users, statusFilter, roleFilter, searchQuery]);
 
   const openEditModal = (u: UserData) => {
     setSelectedUser(u);
@@ -281,50 +267,25 @@ export default function AdminUsersPage() {
 
     setProcessing(true);
 
-    const current =
-      editType === 'spot' ? selectedUser.balance_available : selectedUser.balance_bonus;
-
     try {
-      if (editType === 'spot') {
-        if (editAction === 'add') {
-          await adminService.creditBalance(selectedUser.id, amount, editNote);
-        } else if (editAction === 'subtract') {
-          await adminService.debitBalance(selectedUser.id, amount, editNote);
-        } else {
-          const diff = amount - current;
-          if (diff > 0) await adminService.creditBalance(selectedUser.id, diff, editNote);
-          if (diff < 0) await adminService.debitBalance(selectedUser.id, Math.abs(diff), editNote);
-        }
-        setNotification({ type: 'success', message: 'Spot balance updated successfully' });
-        await loadUsers();
-      } else {
-        throw new Error('Bonus adjustment not wired to API yet');
-      }
-    } catch (e: any) {
-      console.warn('[AdminUsers] edit balance fallback:', e);
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id !== selectedUser.id) return u;
-
-          const field = editType === 'spot' ? 'balance_available' : 'balance_bonus';
-          const base = editType === 'spot' ? u.balance_available : u.balance_bonus;
-
-          let next = base;
-          if (editAction === 'add') next = base + amount;
-          if (editAction === 'subtract') next = Math.max(0, base - amount);
-          if (editAction === 'set') next = amount;
-
-          return { ...u, [field]: next } as UserData;
-        })
-      );
-
-      setNotification({
-        type: 'success',
-        message:
-          editType === 'spot'
-            ? 'Spot balance updated locally'
-            : 'Bonus balance updated locally (API not wired yet)',
+      // ✅ IMPORTANT: match the server route contract:
+      // POST /api/admin/users/[id]/balance
+      // body: { type: 'spot'|'bonus', action: 'add'|'subtract'|'set', amount, note }
+      await apiFetch(`/api/admin/users/${selectedUser.id}/balance`, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: editType,
+          action: editAction,
+          amount,
+          note: editNote,
+        }),
       });
+
+      setNotification({ type: 'success', message: 'Balance updated successfully' });
+      await loadUsers();
+    } catch (e: any) {
+      console.error('[AdminUsers] edit balance error:', e);
+      setNotification({ type: 'error', message: e?.message || 'Failed to update balance' });
     } finally {
       setProcessing(false);
       setShowEditModal(false);
@@ -339,13 +300,16 @@ export default function AdminUsersPage() {
     const reason = `User ${action}d by admin`;
 
     try {
+      // NOTE: if adminService hits Supabase REST directly, move this to /api/admin/* too.
       if (user.is_active) await adminService.freezeUser(user.id, reason);
       else await adminService.unfreezeUser(user.id, reason);
 
       setNotification({ type: 'success', message: `User ${action}d successfully` });
       await loadUsers();
     } catch {
-      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, is_active: !u.is_active } : u)));
+      setUsers((prev) =>
+        prev.map((u) => (u.id === user.id ? { ...u, is_active: !u.is_active } : u))
+      );
       setNotification({ type: 'success', message: `User ${action}d locally` });
     }
   };
@@ -365,7 +329,6 @@ export default function AdminUsersPage() {
     }
   };
 
-  // ✅ CONNECTED KYC ACTIONS (calls your server routes)
   const handleKycAction = async (userId: string, action: 'approve' | 'reject') => {
     try {
       const target = users.find((u) => u.id === userId);
@@ -428,7 +391,6 @@ export default function AdminUsersPage() {
 
   const kycLabel = (s: string) => {
     const v = String(s || '').toLowerCase();
-    // DB might store 'approved' while UI wants 'verified'
     if (v === 'approved') return 'verified';
     return v || 'none';
   };
@@ -622,19 +584,28 @@ export default function AdminUsersPage() {
 
                       <td className="p-4 text-right">
                         <span className="text-cream font-mono">
-                          ${(user.balance_available ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                          $
+                          {(user.balance_available ?? 0).toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                          })}
                         </span>
                       </td>
 
                       <td className="p-4 text-right">
                         <span className="text-gold font-mono">
-                          ${(user.balance_bonus ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                          $
+                          {(user.balance_bonus ?? 0).toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                          })}
                         </span>
                       </td>
 
                       <td className="p-4 text-right">
                         <span className="text-profit font-mono">
-                          ${(user.total_deposited ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                          $
+                          {(user.total_deposited ?? 0).toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                          })}
                         </span>
                       </td>
 
@@ -734,7 +705,10 @@ export default function AdminUsersPage() {
             >
               <div className="flex items-center justify-between mb-5">
                 <h3 className="text-xl font-semibold text-cream">User Details</h3>
-                <button onClick={() => setShowUserDetailModal(false)} className="p-2 hover:bg-white/10 rounded-lg">
+                <button
+                  onClick={() => setShowUserDetailModal(false)}
+                  className="p-2 hover:bg-white/10 rounded-lg"
+                >
                   <X className="w-5 h-5 text-slate-400" />
                 </button>
               </div>
@@ -788,7 +762,6 @@ export default function AdminUsersPage() {
                   <p><span className="text-slate-400">Last login:</span> {selectedUser.last_login_at ?? '—'}</p>
                 </div>
 
-                {/* ✅ KYC Review Actions */}
                 {(kycLabel(selectedUser.kyc_status) === 'pending' ||
                   kycLabel(selectedUser.kyc_status) === 'rejected' ||
                   kycLabel(selectedUser.kyc_status) === 'none') && (
@@ -884,11 +857,6 @@ export default function AdminUsersPage() {
                       Bonus
                     </button>
                   </div>
-                  {editType === 'bonus' && (
-                    <p className="mt-2 text-xs text-slate-500">
-                      Bonus edits are currently local fallback unless you wire bonus endpoints.
-                    </p>
-                  )}
                 </div>
 
                 <div>
@@ -976,7 +944,7 @@ export default function AdminUsersPage() {
         )}
       </AnimatePresence>
 
-      {/* Manage Addresses Modal (unchanged) */}
+      {/* Manage Addresses Modal */}
       <AnimatePresence>
         {showAddressModal && (
           <motion.div
@@ -1064,7 +1032,11 @@ export default function AdminUsersPage() {
                             {addr.memo ? <p className="text-xs text-slate-500 mt-1">Memo: {addr.memo}</p> : null}
                           </td>
                           <td className="p-4 text-center">
-                            <span className={`px-2 py-1 text-xs rounded-full ${addr.isActive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'}`}>
+                            <span
+                              className={`px-2 py-1 text-xs rounded-full ${
+                                addr.isActive ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                              }`}
+                            >
                               {addr.isActive ? 'Active' : 'Inactive'}
                             </span>
                           </td>
@@ -1085,7 +1057,11 @@ export default function AdminUsersPage() {
                                 className="p-2 hover:bg-white/10 rounded-lg transition-colors"
                                 title={addr.isActive ? 'Deactivate' : 'Activate'}
                               >
-                                {addr.isActive ? <EyeOff className="w-4 h-4 text-slate-400" /> : <Eye className="w-4 h-4 text-slate-400" />}
+                                {addr.isActive ? (
+                                  <EyeOff className="w-4 h-4 text-slate-400" />
+                                ) : (
+                                  <Eye className="w-4 h-4 text-slate-400" />
+                                )}
                               </button>
                             </div>
                           </td>
