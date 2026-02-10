@@ -2,7 +2,7 @@
 import 'server-only';
 
 import { NextRequest } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 
 export const supabaseAdmin = createClient(
@@ -15,32 +15,59 @@ function hashToken(token: string) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-/**
- * Validates your custom admin session token (admin_sessions.token_hash).
- * Expects: Authorization: Bearer <token>
- */
-export async function requireAdmin(req: NextRequest): Promise<{ adminSessionId: string } | null> {
-  const auth = req.headers.get('authorization') || '';
-  if (!auth.startsWith('Bearer ')) return null;
+export type RequireAdminOk = {
+  ok: true;
+  adminSessionId: string;
+  adminId: string; // ✅ not null (so sender_id never null)
+  supabaseAdmin: SupabaseClient;
+};
+
+export type RequireAdminFail = {
+  ok: false;
+  status: 401 | 403;
+  error: string;
+};
+
+export type RequireAdminResult = RequireAdminOk | RequireAdminFail;
+
+export async function requireAdmin(req: NextRequest): Promise<RequireAdminResult> {
+  const auth = req.headers.get('authorization') || req.headers.get('Authorization');
+
+  if (!auth?.startsWith('Bearer ')) {
+    return { ok: false, status: 401, error: 'Missing admin token. Please log in again.' };
+  }
 
   const token = auth.slice(7).trim();
-  if (!token) return null;
+  if (!token) {
+    return { ok: false, status: 401, error: 'Missing admin token. Please log in again.' };
+  }
 
   const tokenHash = hashToken(token);
 
   const { data, error } = await supabaseAdmin
     .from('admin_sessions')
-    .select('id, revoked_at, expires_at')
+    .select('id, revoked_at, admin_id, user_id')
     .eq('token_hash', tokenHash)
     .maybeSingle();
 
-  if (error || !data) return null;
-  if (data.revoked_at) return null;
-
-  if (data.expires_at) {
-    const exp = new Date(data.expires_at).getTime();
-    if (Number.isFinite(exp) && exp < Date.now()) return null;
+  if (error || !data) {
+    return { ok: false, status: 403, error: 'Invalid admin token. Please log in again.' };
   }
 
-  return { adminSessionId: data.id };
+  if ((data as any).revoked_at) {
+    return { ok: false, status: 403, error: 'Admin session revoked. Please log in again.' };
+  }
+
+  const adminId = String((data as any).admin_id ?? (data as any).user_id ?? '').trim();
+  if (!adminId) {
+    // ✅ this is the root cause of your sender_id null
+    return { ok: false, status: 403, error: 'Admin session missing admin_id. Please log in again.' };
+  }
+
+  return {
+    ok: true,
+    adminSessionId: String((data as any).id),
+    adminId,
+    supabaseAdmin,
+  };
 }
