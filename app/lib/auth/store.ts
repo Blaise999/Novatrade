@@ -13,7 +13,7 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 // ============================================
 // TIMEOUT HELPER (Accept PromiseLike so Postgrest builders work)
 // ============================================
-async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
+async function withTimeout<T>(p: PromiseLike<T>, ms = 12000): Promise<T> {
   return await Promise.race([
     Promise.resolve(p),
     new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout_${ms}ms`)), ms)),
@@ -112,12 +112,12 @@ function dbRowToUser(row: any): User {
     phone: row.phone || undefined,
     avatarUrl: row.avatar_url || undefined,
     role: row.role || 'user',
-    tier: row.tier || 'basic',
+    tier: row.tier || row.tier_code || 'basic',
     balance: Number(row.balance_available ?? 0) || 0,
     bonusBalance: Number(row.balance_bonus ?? 0) || 0,
     totalDeposited: Number(row.total_deposited ?? 0) || 0,
-    kycStatus: row.kyc_status || 'none',
-    registrationStatus: row.registration_status || 'complete',
+    kycStatus: (row.kyc_status || 'none') as KycStatus,
+    registrationStatus: (row.registration_status || 'complete') as RegistrationStatus,
     walletAddress: row.wallet_address || undefined,
     isActive: row.is_active !== false,
     createdAt: row.created_at || new Date().toISOString(),
@@ -167,12 +167,15 @@ interface AuthStore {
     email: string,
     password: string
   ) => Promise<{ success: boolean; redirect?: string; error?: string }>;
+
   signup: (
     email: string,
     password: string,
     firstName?: string,
-    lastName?: string
-  ) => Promise<{ success: boolean; error?: string }>;
+    lastName?: string,
+    referralCode?: string
+  ) => Promise<{ success: boolean; error?: string; user?: { id: string } }>;
+
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
 
@@ -203,7 +206,7 @@ interface AuthStore {
 export const useStore = create<AuthStore>((set, get) => ({
   user: null,
   isAuthenticated: false,
-  isLoading: false,
+  isLoading: true, // ✅ better default (prevents redirect flicker before checkSession)
   error: null,
 
   deposits: [],
@@ -214,10 +217,12 @@ export const useStore = create<AuthStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
+      const cleanEmail = (email || '').trim().toLowerCase();
+
       if (!isSupabaseConfigured()) {
         const users = JSON.parse(storage?.getItem('novatrade_users') || '[]');
         const found = users.find(
-          (u: any) => u.email === email.toLowerCase() && u.password === password
+          (u: any) => u.email === cleanEmail && u.password === password
         );
         if (!found) return { success: false, error: 'Invalid email or password' };
 
@@ -225,12 +230,14 @@ export const useStore = create<AuthStore>((set, get) => ({
         storage?.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: userWithoutPw, isAuthenticated: true });
-        return { success: true, redirect: '/dashboard' };
+        const status =
+          (userWithoutPw.registrationStatus as RegistrationStatus) || 'complete';
+        return { success: true, redirect: getRegistrationRedirect(status) };
       }
 
       const authRes = await withTimeout(
-        supabase.auth.signInWithPassword({ email, password }),
-        8000
+        supabase.auth.signInWithPassword({ email: cleanEmail, password }),
+        12000
       );
 
       const authError = (authRes as any).error;
@@ -252,7 +259,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       const profileRes = await withTimeout(
         supabase.from('users').select('*').eq('id', authData.user.id).maybeSingle(),
-        8000
+        12000
       );
 
       const profileError = (profileRes as any).error;
@@ -270,7 +277,7 @@ export const useStore = create<AuthStore>((set, get) => ({
             .from('users')
             .insert({
               id: authData.user.id,
-              email: (authData.user.email || email).toLowerCase(),
+              email: (authData.user.email || cleanEmail).toLowerCase(),
               first_name: authData.user.user_metadata?.first_name || '',
               last_name: authData.user.user_metadata?.last_name || '',
               role: 'user',
@@ -284,7 +291,7 @@ export const useStore = create<AuthStore>((set, get) => ({
             })
             .select()
             .single(),
-          8000
+          12000
         );
 
         const insertError = (insertRes as any).error;
@@ -317,20 +324,24 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  signup: async (email, password, firstName, lastName) => {
+  // ✅ FIXED: accepts referralCode + returns userId + stores referral in user_metadata
+  signup: async (email, password, firstName, lastName, referralCode) => {
     set({ isLoading: true, error: null });
 
     try {
+      const cleanEmail = (email || '').trim().toLowerCase();
+      const ref = (referralCode || '').trim().toUpperCase();
+
       if (!isSupabaseConfigured()) {
         const users = JSON.parse(storage?.getItem('novatrade_users') || '[]');
-        if (users.find((u: any) => u.email === email.toLowerCase())) {
+        if (users.find((u: any) => u.email === cleanEmail)) {
           set({ error: 'Email already registered' });
           return { success: false, error: 'Email already registered' };
         }
 
         const newUser: User = {
           id: `demo_${Date.now()}`,
-          email: email.toLowerCase(),
+          email: cleanEmail,
           firstName: firstName || '',
           lastName: lastName || '',
           role: 'user',
@@ -339,7 +350,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'complete',
+          registrationStatus: 'pending_kyc',
           isActive: true,
           createdAt: new Date().toISOString(),
         };
@@ -349,32 +360,116 @@ export const useStore = create<AuthStore>((set, get) => ({
         storage?.setItem('novatrade_session', JSON.stringify(newUser));
 
         set({ user: newUser, isAuthenticated: true });
-        return { success: true };
+        return { success: true, user: { id: newUser.id } };
       }
 
-      const res = await withTimeout(
+      // 1) create auth user (ref saved in raw_user_meta_data for DB trigger)
+      const signUpRes = await withTimeout(
         supabase.auth.signUp({
-          email,
+          email: cleanEmail,
           password,
-          options: { data: { first_name: firstName || '', last_name: lastName || '' } },
+          options: {
+            data: {
+              first_name: firstName || '',
+              last_name: lastName || '',
+              ref: ref || null,
+              referral: ref || null,
+              referral_code: ref || null,
+            },
+          },
         }),
-        8000
+        15000
       );
 
-      const authError = (res as any).error;
-      const authData = (res as any).data;
+      const signUpError = (signUpRes as any).error;
+      const signUpData = (signUpRes as any).data;
 
-      if (authError) {
-        set({ error: authError.message });
-        return { success: false, error: authError.message };
+      if (signUpError) {
+        set({ error: signUpError.message });
+        return { success: false, error: signUpError.message };
       }
 
-      if (!authData?.user) {
-        set({ error: 'Signup failed' });
+      const createdUser = signUpData?.user;
+      if (!createdUser?.id) {
+        set({ error: 'Signup failed (no user returned)' });
         return { success: false, error: 'Signup failed' };
       }
 
-      return { success: true };
+      // 2) sign in right away so app has a session
+      const signInRes = await withTimeout(
+        supabase.auth.signInWithPassword({ email: cleanEmail, password }),
+        15000
+      );
+
+      const signInError = (signInRes as any).error;
+      const signInData = (signInRes as any).data;
+
+      if (signInError) {
+        const msg =
+          String(signInError.message || '')
+            .toLowerCase()
+            .includes('confirm') && String(signInError.message || '').toLowerCase().includes('email')
+            ? 'Supabase email confirmation is enabled. Turn OFF "Confirm email" in Supabase Auth settings for this custom OTP flow.'
+            : signInError.message || 'Unable to sign in after signup';
+        set({ error: msg });
+        // still return user id so verify page can continue server-side if needed
+        return { success: false, error: msg, user: { id: createdUser.id } };
+      }
+
+      const authUser = signInData?.user || createdUser;
+
+      // 3) load profile (trigger may have created it; if not, create it)
+      const profileRes = await withTimeout(
+        supabase.from('users').select('*').eq('id', authUser.id).maybeSingle(),
+        15000
+      );
+
+      const profileError = (profileRes as any).error;
+      let profile = (profileRes as any).data;
+
+      if (!profile && profileError) {
+        const msg = profileError.message || 'Failed to load profile (check RLS policies).';
+        set({ error: msg });
+        return { success: false, error: msg, user: { id: authUser.id } };
+      }
+
+      if (!profile) {
+        const insertRes = await withTimeout(
+          supabase
+            .from('users')
+            .insert({
+              id: authUser.id,
+              email: (authUser.email || cleanEmail).toLowerCase(),
+              first_name: firstName || '',
+              last_name: lastName || '',
+              role: 'user',
+              tier: 'basic',
+              balance_available: 0,
+              balance_bonus: 0,
+              total_deposited: 0,
+              kyc_status: 'none',
+              registration_status: 'pending_kyc',
+              is_active: true,
+            })
+            .select()
+            .single(),
+          15000
+        );
+
+        const insertError = (insertRes as any).error;
+        const newProfile = (insertRes as any).data;
+
+        if (insertError || !newProfile) {
+          const msg = insertError?.message || 'Failed to create profile (check RLS policies).';
+          set({ error: msg });
+          return { success: false, error: msg, user: { id: authUser.id } };
+        }
+
+        profile = newProfile;
+      }
+
+      set({ user: dbRowToUser(profile), isAuthenticated: true });
+      return { success: true, user: { id: authUser.id } };
     } catch (err: any) {
       const msg = err?.message || 'Signup failed';
       set({ error: msg });
@@ -412,7 +507,7 @@ export const useStore = create<AuthStore>((set, get) => ({
         return;
       }
 
-      const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+      const sessRes = await withTimeout(supabase.auth.getSession(), 12000);
       const session = (sessRes as any).data?.session;
 
       if (!session?.user) {
@@ -422,7 +517,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       const profileRes = await withTimeout(
         supabase.from('users').select('*').eq('id', session.user.id).maybeSingle(),
-        8000
+        12000
       );
 
       const error = (profileRes as any).error;
@@ -463,7 +558,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       const res = await withTimeout(
         supabase.from('users').update(dbUpdates).eq('id', user.id).select().maybeSingle(),
-        8000
+        12000
       );
 
       const error = (res as any).error;
@@ -498,7 +593,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           .eq('id', user.id)
           .select()
           .maybeSingle(),
-        8000
+        12000
       );
 
       const error = (res as any).error;
@@ -550,7 +645,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           .eq('id', user.id)
           .select()
           .maybeSingle(),
-        8000
+        12000
       );
 
       const error = (res as any).error;
@@ -578,7 +673,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       const res = await withTimeout(
         supabase.from('users').select('*').eq('id', user.id).maybeSingle(),
-        8000
+        12000
       );
       const data = (res as any).data;
       if (data) set({ user: dbRowToUser(data) });
@@ -595,7 +690,7 @@ export const useStore = create<AuthStore>((set, get) => ({
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false }),
-      8000
+      12000
     );
 
     const data = (res as any).data;
@@ -626,7 +721,7 @@ export const useStore = create<AuthStore>((set, get) => ({
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false }),
-      8000
+      12000
     );
 
     const data = (res as any).data;
@@ -658,7 +753,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     const res = await withTimeout(
       supabase.from('payment_methods').select('*').eq('enabled', true).order('display_order'),
-      8000
+      12000
     );
 
     const data = (res as any).data;
@@ -695,7 +790,7 @@ export const useStore = create<AuthStore>((set, get) => ({
           proof_url: deposit.proofUrl,
           status: 'pending',
         }),
-        8000
+        12000
       );
 
       const error = (res as any).error;
@@ -743,13 +838,13 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
   checkAdminAccess: async () => {
     if (!isSupabaseConfigured()) return false;
 
-    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const sessRes = await withTimeout(supabase.auth.getSession(), 12000);
     const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
     const res = await withTimeout(
       supabase.from('users').select('role').eq('id', session.user.id).maybeSingle(),
-      8000
+      12000
     );
 
     const data = (res as any).data;
@@ -767,7 +862,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
         .select('*, users(email, first_name, last_name)')
         .eq('status', 'pending')
         .order('created_at', { ascending: false }),
-      8000
+      12000
     );
 
     set({ pendingDeposits: (res as any).data || [] });
@@ -778,7 +873,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 
     const res = await withTimeout(
       supabase.from('users').select('*').order('created_at', { ascending: false }),
-      8000
+      12000
     );
 
     set({ allUsers: (res as any).data || [] });
@@ -787,13 +882,13 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
   confirmDeposit: async (depositId, note) => {
     if (!isSupabaseConfigured()) return false;
 
-    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const sessRes = await withTimeout(supabase.auth.getSession(), 12000);
     const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
     const depRes = await withTimeout(
       supabase.from('deposits').select('*').eq('id', depositId).maybeSingle(),
-      8000
+      12000
     );
 
     const deposit = (depRes as any).data;
@@ -809,7 +904,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
           note,
         })
         .eq('id', depositId),
-      8000
+      12000
     );
 
     const userRes = await withTimeout(
@@ -818,7 +913,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
         .select('balance_available, total_deposited')
         .eq('id', deposit.user_id)
         .maybeSingle(),
-      8000
+      12000
     );
 
     const u = (userRes as any).data;
@@ -835,7 +930,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
             total_deposited: currentDep + amt,
           })
           .eq('id', deposit.user_id),
-        8000
+        12000
       );
     }
 
@@ -846,7 +941,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
   rejectDeposit: async (depositId, note) => {
     if (!isSupabaseConfigured()) return false;
 
-    const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
+    const sessRes = await withTimeout(supabase.auth.getSession(), 12000);
     const session = (sessRes as any).data?.session;
     if (!session?.user) return false;
 
@@ -860,7 +955,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
           note,
         })
         .eq('id', depositId),
-      8000
+      12000
     );
 
     await get().loadPendingDeposits();
@@ -872,7 +967,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 
     const res = await withTimeout(
       supabase.from('users').select('balance_available').eq('id', userId).maybeSingle(),
-      8000
+      12000
     );
 
     const u = (res as any).data;
@@ -883,7 +978,7 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 
     await withTimeout(
       supabase.from('users').update({ balance_available: next }).eq('id', userId),
-      8000
+      12000
     );
 
     await get().loadAllUsers();

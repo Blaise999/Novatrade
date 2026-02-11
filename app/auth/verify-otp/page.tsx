@@ -1,13 +1,16 @@
-"use client";
+'use client';
 
-import { useEffect, useRef, useState, useMemo } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
-import { motion } from "framer-motion";
-import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from "lucide-react";
-import { useAuthStore } from "@/lib/store";
-import { useStore } from "@/lib/supabase/store-supabase";
-import { useEmail } from "@/hooks/useEmail";
+import { useEffect, useRef, useState, useMemo } from 'react';
+import type { KeyboardEvent } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import Link from 'next/link';
+import { motion } from 'framer-motion';
+import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from 'lucide-react';
+import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/supabase/store-supabase';
+import { useEmail } from '@/hooks/useEmail';
+
+const REF_KEY = 'novatrade_signup_ref';
 
 function safeStringify(v: any) {
   try {
@@ -35,20 +38,35 @@ export default function VerifyOTPPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // ✅ referral code from URL (?ref=WEST123)
+  /**
+   * ✅ Referral is OPTIONAL:
+   * - Always a string ('' if not present)
+   * - Stored for continuity, but never required
+   */
   const referralCode = useMemo(() => {
+    const fromUrl = (searchParams.get('ref') || '').trim().toUpperCase();
+    if (fromUrl) return fromUrl;
+
     try {
-      return (searchParams.get("ref") || "").trim().toUpperCase();
+      return (sessionStorage.getItem(REF_KEY) || '').trim().toUpperCase();
     } catch {
-      return "";
+      return '';
     }
   }, [searchParams]);
 
+  // persist if URL has it (optional)
+  useEffect(() => {
+    try {
+      const fromUrl = (searchParams.get('ref') || '').trim().toUpperCase();
+      if (fromUrl) sessionStorage.setItem(REF_KEY, fromUrl);
+    } catch {}
+  }, [searchParams]);
+
   const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useAuthStore();
-  const { signup } = useStore();
+  const { signup } = useStore(); // ✅ store signup accepts 2-4 args (no referral arg)
   const { sendOTP, verifyOTP, sendWelcome } = useEmail();
 
-  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
   const [isResending, setIsResending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +77,7 @@ export default function VerifyOTPPage() {
   // ✅ prevents multiple concurrent submits
   const inFlightRef = useRef(false);
 
-  // ✅ auto-submit guard (prevents “verify → signup fail → verify again” loop)
+  // ✅ auto-submit guard (prevents loops)
   const lastAutoSubmittedCodeRef = useRef<string | null>(null);
 
   // debug toggle + log
@@ -71,7 +89,7 @@ export default function VerifyOTPPage() {
       if (!debug) return;
       const line =
         `[OTP ${new Date().toISOString()}] ` +
-        args.map((a) => (typeof a === "string" ? a : safeStringify(a))).join(" ");
+        args.map((a) => (typeof a === 'string' ? a : safeStringify(a))).join(' ');
       console.log(line);
       setDebugLog((prev) => [...prev, line].slice(-120));
     };
@@ -80,7 +98,7 @@ export default function VerifyOTPPage() {
   useEffect(() => {
     try {
       const sp = new URLSearchParams(window.location.search);
-      const enabled = sp.get("debug") === "1" || localStorage.getItem("novatrade_debug") === "1";
+      const enabled = sp.get('debug') === '1' || localStorage.getItem('novatrade_debug') === '1';
       setDebug(enabled);
     } catch {
       setDebug(false);
@@ -95,7 +113,7 @@ export default function VerifyOTPPage() {
   }, [countdown]);
 
   useEffect(() => {
-    pushLog("mount state", {
+    pushLog('mount state', {
       otpEmail,
       otpName,
       hasPassword: !!otpPassword,
@@ -104,8 +122,8 @@ export default function VerifyOTPPage() {
     });
 
     if (!otpEmail || !otpPassword) {
-      pushLog("missing otpEmail/otpPassword -> redirect /auth/signup");
-      router.push("/auth/signup");
+      pushLog('missing otpEmail/otpPassword -> redirect /auth/signup');
+      router.push('/auth/signup');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [otpEmail, otpPassword]);
@@ -119,11 +137,11 @@ export default function VerifyOTPPage() {
   };
 
   const handleChange = (index: number, value: string) => {
-    resetAutoGuard(); // ✅ any edit allows auto-submit again
+    resetAutoGuard();
     setError(null);
 
     if (value.length > 1) {
-      const pastedValues = value.replace(/\s/g, "").slice(0, 6).split("");
+      const pastedValues = value.replace(/\s/g, '').slice(0, 6).split('');
       const newOtp = [...otp];
 
       pastedValues.forEach((char, i) => {
@@ -137,7 +155,7 @@ export default function VerifyOTPPage() {
       const nextIndex = Math.min(index + pastedValues.length, 5);
       inputRefs.current[nextIndex]?.focus();
 
-      pushLog("paste handled", { index, value, newOtp: newOtp.join("") });
+      pushLog('paste handled', { index, value, newOtp: newOtp.join('') });
       return;
     }
 
@@ -152,60 +170,55 @@ export default function VerifyOTPPage() {
     }
   };
 
-  const handleKeyDown = (index: number, e: React.KeyboardEvent) => {
-    if (e.key === "Backspace" && !otp[index] && index > 0) {
+  const handleKeyDown = (index: number, e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !otp[index] && index > 0) {
       inputRefs.current[index - 1]?.focus();
     }
   };
 
-  // ✅ attach referral + generate user referral_code + mark email_verified (server-side)
+  // ✅ optional server-side idempotent helper (safe if endpoint missing)
   const completeReferral = async (userId: string) => {
-    // No referral? still call to ensure referral_code/email_verified are set.
+    if (!referralCode) return; // ✅ referral not compulsory
     try {
-      pushLog("referral complete start", { userId, referralCode });
+      pushLog('referral complete start', { userId, referralCode });
 
       const res = await withTimeout(
-        fetch("/api/referrals/complete", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ userId, ref: referralCode || "" }),
+        fetch('/api/referrals/complete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ userId, ref: referralCode }),
         }),
         20000,
-        "referrals.complete"
+        'referrals.complete'
       );
 
       const json = await res.json().catch(() => ({}));
-      pushLog("referral complete result", { ok: res.ok, status: res.status, json });
-
-      // Don’t block user if this fails
-      return;
+      pushLog('referral complete result', { ok: res.ok, status: res.status, json });
     } catch (e: any) {
-      pushLog("referral complete failed (ignored)", e?.message || e);
-      return;
+      pushLog('referral complete failed (ignored)', e?.message || e);
     }
   };
 
-  const handleVerify = async (source: "auto" | "manual" = "manual") => {
-    const code = otp.join("");
+  const handleVerify = async (source: 'auto' | 'manual' = 'manual') => {
+    const code = otp.join('');
 
     if (!otpEmail) {
-      setError("Missing email. Please sign up again.");
+      setError('Missing email. Please sign up again.');
       return;
     }
 
     if (code.length !== 6) {
-      setError("Please enter the complete 6-digit code");
+      setError('Please enter the complete 6-digit code');
       return;
     }
 
-    // ✅ auto-submit only once per code
-    if (source === "auto" && lastAutoSubmittedCodeRef.current === code) {
-      pushLog("auto-submit blocked (same code)", code);
+    if (source === 'auto' && lastAutoSubmittedCodeRef.current === code) {
+      pushLog('auto-submit blocked (same code)', code);
       return;
     }
 
     if (inFlightRef.current) {
-      pushLog("blocked: inFlight");
+      pushLog('blocked: inFlight');
       return;
     }
 
@@ -213,99 +226,89 @@ export default function VerifyOTPPage() {
     setIsLoading(true);
     setError(null);
 
-    const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-    pushLog("verify start", { source, otpEmail, code, referralCode });
+    const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    pushLog('verify start', { source, otpEmail, code, referralCode });
 
     try {
-      if (source === "auto") lastAutoSubmittedCodeRef.current = code;
+      if (source === 'auto') lastAutoSubmittedCodeRef.current = code;
 
       // 1) Verify OTP
       const result = await withTimeout(
-        verifyOTP(otpEmail, code, "email_verification"),
+        verifyOTP(otpEmail, code, 'email_verification'),
         25000,
-        "verifyOTP"
+        'verifyOTP'
       );
-      const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
-      pushLog("verifyOTP result", result, `elapsed_ms=${Math.round(t1 - t0)}`);
+      const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      pushLog('verifyOTP result', result, `elapsed_ms=${Math.round(t1 - t0)}`);
 
       if (!result.success) {
-        setError(result.error || "Invalid verification code");
-        pushLog("verifyOTP failed", result);
+        setError(result.error || 'Invalid verification code');
+        pushLog('verifyOTP failed', result);
         return;
       }
 
-      // 2) Signup
+      // 2) Create account
       if (!otpPassword) {
-        setError("Missing registration data. Please sign up again.");
-        pushLog("otpPassword missing -> redirect signup");
-        setTimeout(() => router.push("/auth/signup"), 1200);
+        setError('Missing registration data. Please sign up again.');
+        pushLog('otpPassword missing -> redirect signup');
+        setTimeout(() => router.push('/auth/signup'), 1200);
         return;
       }
 
-      const nameParts = (otpName || "User").split(" ");
-      const firstName = nameParts[0];
-      const lastName = nameParts.slice(1).join(" ") || undefined;
+      const nameParts = (otpName || 'User').split(' ');
+      const firstName = nameParts[0] || 'User';
+      const lastName = nameParts.slice(1).join(' ') || '';
 
-      pushLog("signup start", { email: otpEmail, firstName, lastName });
+      pushLog('signup start', { email: otpEmail, firstName, lastName });
 
+      // ✅ FIX: DO NOT pass referral as 5th arg (store signup is 2-4 args)
       const signupResult = await withTimeout(
         signup(otpEmail, otpPassword, firstName, lastName),
         25000,
-        "supabase.signup"
+        'supabase.signup'
       );
 
-      pushLog("signup result", { signupResult });
+      pushLog('signup result', { signupResult });
 
       if (!signupResult || !signupResult.success) {
         setError(
           signupResult?.error ||
-            "Account creation failed. If this email already exists, go to Login."
+            'Account creation failed. If this email already exists, go to Login.'
         );
-        pushLog("signup failed -> redirect login in 2s");
-        setTimeout(() => router.push("/auth/login"), 2000);
+        pushLog('signup failed -> redirect login in 2s');
+        setTimeout(() => router.push('/auth/login'), 2000);
         return;
       }
 
-      // ✅ Try to extract the new userId (handles different return shapes)
-      const userId =
-        (signupResult as any)?.user?.id ||
-        (signupResult as any)?.data?.user?.id ||
-        (signupResult as any)?.data?.id ||
-        (signupResult as any)?.id ||
-        "";
-
-      if (userId) {
-        await completeReferral(userId);
-      } else {
-        pushLog("no userId from signupResult (referral attach skipped)");
-      }
+      const userId = (signupResult as any)?.user?.id || '';
+      if (userId) await completeReferral(userId);
 
       setIsVerified(true);
 
       // Welcome email (ignore failure)
       try {
-        pushLog("sendWelcome start");
-        await withTimeout(sendWelcome(otpEmail, otpName || "User"), 15000, "sendWelcome");
-        pushLog("sendWelcome ok");
+        pushLog('sendWelcome start');
+        await withTimeout(sendWelcome(otpEmail, otpName || 'User'), 15000, 'sendWelcome');
+        pushLog('sendWelcome ok');
       } catch (e: any) {
-        pushLog("sendWelcome failed (ignored)", e?.message || e);
+        pushLog('sendWelcome failed (ignored)', e?.message || e);
       }
 
       setOtpPassword(null);
 
       setTimeout(() => {
-        const destination = redirectUrl || "/kyc";
-        pushLog("redirect after verify", destination);
+        const destination = redirectUrl || '/kyc';
+        pushLog('redirect after verify', destination);
         router.push(destination);
       }, 1200);
     } catch (err: any) {
-      const msg = err?.message || "Verification failed. Please try again.";
+      const msg = err?.message || 'Verification failed. Please try again.';
       setError(msg);
-      pushLog("handleVerify threw", err);
+      pushLog('handleVerify threw', err);
     } finally {
       setIsLoading(false);
       inFlightRef.current = false;
-      pushLog("verify end (loading=false)");
+      pushLog('verify end (loading=false)');
     }
   };
 
@@ -315,38 +318,37 @@ export default function VerifyOTPPage() {
     setIsResending(true);
     setError(null);
     resetAutoGuard();
-    pushLog("resend start", { otpEmail });
+    pushLog('resend start', { otpEmail });
 
     try {
       const result = await withTimeout(
-        sendOTP(otpEmail, otpName || "User", "email_verification"),
+        sendOTP(otpEmail, otpName || 'User', 'email_verification'),
         20000,
-        "sendOTP"
+        'sendOTP'
       );
-      pushLog("sendOTP result", result);
+      pushLog('sendOTP result', result);
 
       if (result.success) {
         setCountdown(60);
-        setOtp(["", "", "", "", "", ""]);
+        setOtp(['', '', '', '', '', '']);
         inputRefs.current[0]?.focus();
       } else {
-        setError(result.error || "Failed to resend code");
+        setError(result.error || 'Failed to resend code');
       }
     } catch (err: any) {
-      setError(err?.message || "Failed to resend code. Please try again.");
-      pushLog("resend threw", err);
+      setError(err?.message || 'Failed to resend code. Please try again.');
+      pushLog('resend threw', err);
     } finally {
       setIsResending(false);
-      pushLog("resend end");
+      pushLog('resend end');
     }
   };
 
-  // ✅ SAFE auto-submit: only once per code
   useEffect(() => {
-    const code = otp.join("");
-    if (otp.every((digit) => digit !== "") && !isLoading && !isVerified && !error) {
-      pushLog("auto-submit triggered", code);
-      handleVerify("auto");
+    const code = otp.join('');
+    if (otp.every((digit) => digit !== '') && !isLoading && !isVerified && !error) {
+      pushLog('auto-submit triggered', code);
+      handleVerify('auto');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [otp, isLoading, isVerified, error]);
@@ -361,7 +363,7 @@ export default function VerifyOTPPage() {
         <motion.div
           initial={{ scale: 0 }}
           animate={{ scale: 1 }}
-          transition={{ type: "spring", duration: 0.5 }}
+          transition={{ type: 'spring', duration: 0.5 }}
           className="w-20 h-20 bg-profit/20 rounded-full flex items-center justify-center mx-auto"
         >
           <CheckCircle className="w-10 h-10 text-profit" />
@@ -381,7 +383,7 @@ export default function VerifyOTPPage() {
           <div className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4 text-left">
             <p className="text-xs uppercase tracking-wide text-slate-400">OTP Debug</p>
             <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
-              {debugLog.join("\n")}
+              {debugLog.join('\n')}
             </pre>
           </div>
         )}
@@ -412,7 +414,7 @@ export default function VerifyOTPPage() {
               type="button"
               onClick={() => {
                 try {
-                  navigator.clipboard.writeText(debugLog.join("\n"));
+                  navigator.clipboard.writeText(debugLog.join('\n'));
                 } catch {}
               }}
               className="text-xs text-gold hover:text-gold/80"
@@ -421,7 +423,7 @@ export default function VerifyOTPPage() {
             </button>
           </div>
           <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
-            {debugLog.join("\n")}
+            {debugLog.join('\n')}
           </pre>
         </div>
       )}
@@ -452,7 +454,7 @@ export default function VerifyOTPPage() {
               value={digit}
               onPaste={(e) => {
                 e.preventDefault();
-                const text = e.clipboardData.getData("text");
+                const text = e.clipboardData.getData('text');
                 handleChange(index, text);
               }}
               onChange={(e) => handleChange(index, e.target.value)}
@@ -462,10 +464,10 @@ export default function VerifyOTPPage() {
               transition={{ delay: index * 0.05 }}
               className={`w-12 h-14 sm:w-14 sm:h-16 text-center text-2xl font-mono font-bold rounded-xl border bg-white/5 text-cream focus:outline-none focus:ring-2 transition-all ${
                 error
-                  ? "border-loss focus:ring-loss/20"
+                  ? 'border-loss focus:ring-loss/20'
                   : digit
-                  ? "border-gold focus:ring-gold/20"
-                  : "border-white/10 focus:border-gold focus:ring-gold/20"
+                  ? 'border-gold focus:ring-gold/20'
+                  : 'border-white/10 focus:border-gold focus:ring-gold/20'
               }`}
             />
           ))}
@@ -483,7 +485,7 @@ export default function VerifyOTPPage() {
       </div>
 
       <button
-        onClick={() => handleVerify("manual")}
+        onClick={() => handleVerify('manual')}
         disabled={otp.some((d) => !d) || isLoading}
         className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
       >
@@ -493,13 +495,13 @@ export default function VerifyOTPPage() {
             Verifying...
           </>
         ) : (
-          "Verify Email"
+          'Verify Email'
         )}
       </button>
 
       <div className="text-center">
         <p className="text-slate-400 text-sm">
-          Didn&apos;t receive the code?{" "}
+          Didn&apos;t receive the code?{' '}
           {countdown > 0 ? (
             <span className="text-slate-500">Resend in {countdown}s</span>
           ) : (
@@ -527,13 +529,6 @@ export default function VerifyOTPPage() {
       <div className="bg-white/5 rounded-xl p-4 border border-white/5">
         <p className="text-xs text-slate-500 text-center">
           💡 <strong className="text-slate-400">Tip:</strong> Check your spam folder. Code expires in 10 minutes.
-        </p>
-      </div>
-
-      {/* Demo mode hint */}
-      <div className="bg-gold/5 rounded-xl p-3 border border-gold/10">
-        <p className="text-xs text-gold/80 text-center">
-          🧪 <strong>OTP :</strong> Enter 6-digit code otp to continue.
         </p>
       </div>
     </motion.div>

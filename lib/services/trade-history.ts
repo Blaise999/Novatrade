@@ -1,18 +1,29 @@
 // lib/services/trade-history.ts
 import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
 
-type MarketType = "crypto" | "fx" | "stocks" | "forex"; // accept forex input, store as fx
-type TradeStatus = "open" | "pending" | "closed" | "cancelled" | "liquidated" | "active"; // accept active input, store as open
+type MarketTypeInput = "crypto" | "fx" | "stocks" | "forex"; // accept forex input, store as fx
+type TradeStatusInput =
+  | "open"
+  | "pending"
+  | "closed"
+  | "cancelled"
+  | "liquidated"
+  | "active"; // accept active input, store as open
 
-const normalizeMarketType = (m: MarketType): "crypto" | "fx" | "stocks" => {
-  if (m === "forex") return "fx";
-  if (m === "crypto" || m === "fx" || m === "stocks") return m;
+const normalizeMarketType = (m: MarketTypeInput): "crypto" | "fx" | "stocks" => {
+  const x = String(m ?? "").toLowerCase();
+  if (x === "forex") return "fx";
+  if (x === "crypto" || x === "fx" || x === "stocks") return x;
   return "crypto";
 };
 
-const normalizeStatus = (s: TradeStatus): "open" | "pending" | "closed" | "cancelled" | "liquidated" => {
-  if (s === "active") return "open";
-  if (s === "open" || s === "pending" || s === "closed" || s === "cancelled" || s === "liquidated") return s;
+const normalizeStatus = (
+  s: TradeStatusInput
+): "open" | "pending" | "closed" | "cancelled" | "liquidated" => {
+  const x = String(s ?? "").toLowerCase();
+  if (x === "active") return "open";
+  if (x === "open" || x === "pending" || x === "closed" || x === "cancelled" || x === "liquidated")
+    return x;
   return "open";
 };
 
@@ -24,30 +35,49 @@ const normalizeDirection = (v?: string) => {
   return x || "long";
 };
 
+const isUuid = (v?: string | null) => {
+  if (!v) return false;
+  const s = String(v).trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+};
+
 async function resolveAssetId(symbol: string, marketType: "crypto" | "fx" | "stocks") {
-  // Best effort: if you have assets seeded, use it. If not, just return null.
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("assets")
       .select("id")
       .eq("symbol", symbol)
       .limit(1)
       .maybeSingle();
+
+    if (error) return null;
     return data?.id ?? null;
   } catch {
     return null;
   }
 }
 
+async function getTradeIdByIdempotencyKey(userId: string, idempotencyKey: string) {
+  const { data, error } = await supabase
+    .from("trades")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("idempotency_key", idempotencyKey)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return null;
+  return data?.id ? String(data.id) : null;
+}
+
 export async function saveTradeToHistory(input: {
   userId: string;
   symbol: string;
 
-  // new/correct
-  marketType: MarketType;
-  assetType?: string;       // optional
-  tradeType?: string;       // spot/margin/etc
-  direction?: string;       // buy/sell or long/short
+  marketType: MarketTypeInput;
+  assetType?: string; // optional
+  tradeType?: string; // spot/margin/etc
+  direction?: string; // buy/sell or long/short
   amount: number;
   quantity: number;
   leverage: number;
@@ -60,17 +90,17 @@ export async function saveTradeToHistory(input: {
   durationSeconds?: number;
   expiresAt?: string | null;
 
-  fee?: number;             // use this for FX fees
-  fees?: number;            // accept old callers
-  commission?: number;      // use for stocks commission
+  fee?: number; // use this for FX fees
+  fees?: number; // accept old callers
+  commission?: number; // use for stocks commission
   swap?: number;
 
-  sessionId?: string;
+  sessionId?: string; // NOTE: trades.session_id is uuid in your DB
   signalId?: string;
   isCopyTrade?: boolean;
   idempotencyKey?: string;
 
-  status?: TradeStatus;
+  status?: TradeStatusInput;
 
   // old callers (stocks page)
   type?: string; // buy/sell
@@ -80,22 +110,24 @@ export async function saveTradeToHistory(input: {
 
   const market_type = normalizeMarketType(input.marketType);
   const status = normalizeStatus(input.status ?? "open");
-
-  const direction =
-    normalizeDirection(input.direction ?? input.side ?? input.type);
+  const direction = normalizeDirection(input.direction ?? input.side ?? input.type);
 
   const asset_id = await resolveAssetId(input.symbol, market_type);
 
+  // ✅ Use text idempotency key for dedupe (safe)
   const idempotency_key =
-    input.idempotencyKey ??
-    input.sessionId ??
+    (input.idempotencyKey && String(input.idempotencyKey).trim()) ||
+    (input.sessionId && String(input.sessionId).trim()) ||
     `${input.userId}:${market_type}:${input.symbol}:${Date.now()}`;
+
+  // ✅ session_id is uuid in DB → ONLY set if valid uuid
+  const session_id = isUuid(input.sessionId) ? String(input.sessionId).trim() : null;
 
   const payload: any = {
     user_id: input.userId,
     asset_id, // may be null if assets not seeded
     symbol: input.symbol,
-    asset_type: input.assetType ?? market_type,
+    asset_type: input.assetType ?? market_type, // ok even if you later standardize
     trade_type: input.tradeType ?? "spot",
     direction,
     amount: input.amount,
@@ -114,7 +146,7 @@ export async function saveTradeToHistory(input: {
     fee: input.fee ?? input.fees ?? null,
     commission: input.commission ?? null,
     swap: input.swap ?? null,
-    session_id: input.sessionId ?? null,
+    session_id, // uuid|null
     signal_id: input.signalId ?? null,
     is_copy_trade: input.isCopyTrade ?? false,
     idempotency_key,
@@ -122,14 +154,22 @@ export async function saveTradeToHistory(input: {
     market_type,
   };
 
+  // ✅ Non-destructive / idempotent:
+  // - onConflict uses idempotency_key
+  // - ignoreDuplicates prevents overwriting existing rows
   const { data, error } = await supabase
     .from("trades")
-    .insert(payload)
+    .upsert(payload, { onConflict: "idempotency_key", ignoreDuplicates: true })
     .select("id")
-    .single();
+    .maybeSingle();
 
   if (error) return { success: false, error: error.message };
-  return { success: true, tradeId: data?.id as string };
+
+  // If ignoreDuplicates hit, PostgREST may return null/empty — fetch id by key
+  const tradeId = data?.id ? String(data.id) : await getTradeIdByIdempotencyKey(input.userId, idempotency_key);
+
+  if (!tradeId) return { success: true, tradeId: undefined };
+  return { success: true, tradeId };
 }
 
 export async function closeTradeInHistory(input: {
@@ -139,7 +179,7 @@ export async function closeTradeInHistory(input: {
   pnl: number;
   status?: "closed" | "liquidated" | "cancelled";
   tradeId?: string;
-  sessionId?: string;
+  sessionId?: string; // uuid OR non-uuid string
 }) {
   if (!isSupabaseConfigured()) return { success: false, error: "Supabase not configured" };
 
@@ -162,8 +202,8 @@ export async function closeTradeInHistory(input: {
     return { success: true };
   }
 
-  // 2) If we know session_id, close by session_id
-  if (input.sessionId) {
+  // 2) If sessionId is a UUID, close by session_id
+  if (isUuid(input.sessionId)) {
     const { error } = await supabase
       .from("trades")
       .update({
@@ -172,21 +212,38 @@ export async function closeTradeInHistory(input: {
         profit_loss: input.pnl,
         closed_at: new Date().toISOString(),
       })
-      .eq("session_id", input.sessionId)
+      .eq("session_id", String(input.sessionId).trim())
       .eq("user_id", input.userId);
 
     if (error) return { success: false, error: error.message };
     return { success: true };
   }
 
-  // 3) fallback: find latest open trade for this symbol, then close it
+  // 3) If sessionId is NOT uuid, treat it as idempotency_key
+  if (input.sessionId && String(input.sessionId).trim()) {
+    const { error } = await supabase
+      .from("trades")
+      .update({
+        status: finalStatus,
+        exit_price: input.exitPrice,
+        profit_loss: input.pnl,
+        closed_at: new Date().toISOString(),
+      })
+      .eq("idempotency_key", String(input.sessionId).trim())
+      .eq("user_id", input.userId);
+
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  }
+
+  // 4) fallback: find latest open/pending trade for this symbol, then close it
   const { data: openTrade, error: findErr } = await supabase
     .from("trades")
     .select("id")
     .eq("user_id", input.userId)
     .eq("symbol", input.symbol)
-    .in("status", ["open", "pending"])
-    .order("created_at", { ascending: false })
+    .in("status", ["open", "pending", "active"])
+    .order("opened_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 

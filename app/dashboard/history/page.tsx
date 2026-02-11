@@ -22,9 +22,9 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 type FilterType = 'all' | 'won' | 'lost' | 'open' | 'cancelled';
-type AssetFilter = 'all' | 'crypto' | 'forex' | 'stocks' | 'commodity' | 'index';
+type MarketFilter = 'all' | 'crypto' | 'fx' | 'stocks';
 
-type TradeType = 'crypto' | 'forex' | 'stock' | 'commodity' | 'index' | 'other';
+type TradeType = 'crypto' | 'forex' | 'stock' | 'other';
 type TradeStatus = 'won' | 'lost' | 'pending' | 'cancelled';
 
 interface Trade {
@@ -64,10 +64,6 @@ function marketLabel(t: TradeType) {
       return 'FX';
     case 'stock':
       return 'Stocks';
-    case 'commodity':
-      return 'Commod.';
-    case 'index':
-      return 'Index';
     default:
       return 'Other';
   }
@@ -81,10 +77,6 @@ function marketPillClass(t: TradeType) {
       return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
     case 'stock':
       return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
-    case 'commodity':
-      return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
-    case 'index':
-      return 'bg-purple-500/10 text-purple-400 border-purple-500/20';
     default:
       return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
   }
@@ -108,6 +100,45 @@ function formatPrice(v: number) {
   return v.toFixed(v < 10 ? 4 : 2);
 }
 
+function normalizeDirection(raw: any): 'up' | 'down' {
+  const v = String(raw ?? '').toLowerCase().trim();
+  // supports: up/down, buy/sell, long/short
+  if (['down', 'sell', 'short'].includes(v)) return 'down';
+  return 'up';
+}
+
+function normalizeMarketTypeRow(t: any): TradeType {
+  // Prefer market_type (your canonical)
+  const mt = String(t.market_type ?? '').toLowerCase(); // crypto | fx | stocks
+  if (mt === 'crypto') return 'crypto';
+  if (mt === 'fx') return 'forex';
+  if (mt === 'stocks') return 'stock';
+
+  // Legacy fallback: asset_type
+  const at = String(t.asset_type ?? '').toLowerCase(); // crypto | forex | stock | ...
+  if (at === 'crypto') return 'crypto';
+  if (at === 'forex' || at === 'fx') return 'forex';
+  if (at === 'stock' || at === 'stocks') return 'stock';
+
+  return 'other';
+}
+
+function computeDisplayStatus(dbStatusRaw: string, profit: number): TradeStatus {
+  const s = dbStatusRaw.toLowerCase();
+
+  // Legacy statuses
+  if (s === 'won') return 'won';
+  if (s === 'lost') return 'lost';
+  if (s === 'cancelled' || s === 'expired') return 'cancelled';
+  if (s === 'active' || s === 'open' || s === 'pending') return 'pending';
+  if (s === 'liquidated') return 'lost';
+
+  // Canonical: closed -> determine by profit sign
+  if (s === 'closed') return profit >= 0 ? 'won' : 'lost';
+
+  return 'pending';
+}
+
 export default function HistoryPage() {
   const { user } = useStore();
 
@@ -116,7 +147,7 @@ export default function HistoryPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [statusFilter, setStatusFilter] = useState<FilterType>('all');
-  const [assetFilter, setAssetFilter] = useState<AssetFilter>('all');
+  const [marketFilter, setMarketFilter] = useState<MarketFilter>('all');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -126,7 +157,6 @@ export default function HistoryPage() {
 
   const pageSize = 20;
 
-  // debounce search to avoid refetching every keystroke
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 250);
     return () => clearTimeout(t);
@@ -146,29 +176,27 @@ export default function HistoryPage() {
         .from('trades')
         .select('*', { count: 'exact' })
         .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+        // prefer opened_at if you have it, else created_at works
+        .order('opened_at', { ascending: false });
 
-      // Status filter (schema: pending/active/won/lost/closed/cancelled/expired)
-      if (statusFilter !== 'all') {
-        if (statusFilter === 'open') {
-          query = query.in('status', ['pending', 'active']);
-        } else if (statusFilter === 'cancelled') {
-          query = query.in('status', ['cancelled', 'expired']);
-        } else {
-          query = query.eq('status', statusFilter);
-        }
+      // Market filter — canonical
+      if (marketFilter !== 'all') {
+        query = query.eq('market_type', marketFilter); // crypto | fx | stocks
       }
 
-      // Asset filter (schema: crypto/forex/stock/commodity/index)
-      if (assetFilter !== 'all') {
-        const dbAssetType = assetFilter === 'stocks' ? 'stock' : assetFilter;
-        query = query.eq('asset_type', dbAssetType);
-      }
-
-      // Search (schema: symbol)
+      // Search
       if (debouncedQuery) {
         query = query.ilike('symbol', `%${debouncedQuery}%`);
       }
+
+      // Status filter (DB-side only where reliable)
+      if (statusFilter === 'open') {
+        // support legacy "active"
+        query = query.in('status', ['open', 'pending', 'active']);
+      } else if (statusFilter === 'cancelled') {
+        query = query.in('status', ['cancelled', 'expired']);
+      }
+      // won/lost handled after mapping because some trades use closed + profit_loss
 
       // Pagination
       const from = (page - 1) * pageSize;
@@ -178,77 +206,62 @@ export default function HistoryPage() {
       const { data, error: fetchError, count } = await query;
       if (fetchError) throw fetchError;
 
-      const trades: Trade[] = (data || []).map((t: any) => {
-        // ----- type -----
-        let type: TradeType = 'other';
-        const at = String(t.asset_type ?? '').toLowerCase();
-        if (['crypto', 'forex', 'stock', 'commodity', 'index'].includes(at)) type = at as TradeType;
+      const mapped: Trade[] = (data || []).map((t: any) => {
+        const type = normalizeMarketTypeRow(t);
+        const direction = normalizeDirection(t.direction);
 
-        // fallback for older rows / mixed usage
-        const mt = String(t.market_type ?? '').toLowerCase(); // crypto | fx | stocks
-        if (type === 'other') {
-          if (mt === 'crypto') type = 'crypto';
-          else if (mt === 'fx') type = 'forex';
-          else if (mt === 'stocks') type = 'stock';
-        }
+        const amount = toNum(t.amount, 0);
+        const entry = toNum(t.entry_price, 0);
+        const exit = t.exit_price == null ? null : toNum(t.exit_price, 0);
 
-        // ----- direction normalize (schema allows up/down/buy/sell/long/short) -----
-        const dirRaw = String(t.direction ?? '').toLowerCase();
-        const direction: 'up' | 'down' = ['down', 'sell', 'short'].includes(dirRaw) ? 'down' : 'up';
-
-        // ----- profit -----
+        // Profit base
         let profit = toNum(t.profit_loss, 0);
 
-        // fallback for binary options if profit_loss wasn't written
-        const tradeType = String(t.trade_type ?? '').toLowerCase(); // binary/spot/margin/cfd
+        // Legacy binary fallback
+        const tradeTypeRaw = String(t.trade_type ?? '').toLowerCase(); // binary/spot/margin/...
         const statusRaw = String(t.status ?? '').toLowerCase();
-        const amount = toNum(t.amount, 0);
         const payoutPct = toNum(t.payout_percent, 85);
 
-        if ((profit === 0 || !Number.isFinite(profit)) && tradeType === 'binary') {
+        if ((profit === 0 || !Number.isFinite(profit)) && tradeTypeRaw === 'binary') {
           if (statusRaw === 'won') profit = amount * (payoutPct / 100);
           else if (statusRaw === 'lost') profit = -amount;
         }
 
-        // fallback for spot/margin/cfd if closed + we have prices
-        const entry = toNum(t.entry_price, 0);
-        const exit = t.exit_price == null ? null : toNum(t.exit_price, 0);
+        // Closed price-based fallback (if profit_loss missing)
         const qty = t.quantity == null ? null : toNum(t.quantity, 0);
         const lev = Math.max(1, toNum(t.leverage, 1));
-
-        if ((profit === 0 || !Number.isFinite(profit)) && statusRaw === 'closed' && exit != null && entry > 0) {
+        if (
+          (profit === 0 || !Number.isFinite(profit)) &&
+          statusRaw === 'closed' &&
+          exit != null &&
+          entry > 0
+        ) {
           const effectiveQty = qty ?? (entry > 0 ? amount / entry : 0);
           const diff = exit - entry;
           const signed = direction === 'down' ? -diff : diff;
           profit = signed * effectiveQty * lev;
         }
 
-        // ----- status normalize for UI -----
-        let displayStatus: TradeStatus = 'pending';
-        if (statusRaw === 'won') displayStatus = 'won';
-        else if (statusRaw === 'lost') displayStatus = 'lost';
-        else if (statusRaw === 'closed') displayStatus = profit >= 0 ? 'won' : 'lost';
-        else if (statusRaw === 'cancelled' || statusRaw === 'expired') displayStatus = 'cancelled';
-        else displayStatus = 'pending'; // pending/active
+        const displayStatus = computeDisplayStatus(statusRaw, profit);
 
-        // ----- duration -----
+        // Duration
         const durationSeconds = toNum(t.duration_seconds, 0);
         let duration = '-';
 
-        if (statusRaw === 'active') duration = 'Open';
+        if (['open', 'pending', 'active'].includes(statusRaw)) duration = 'Open';
         else if (durationSeconds > 0) {
           if (durationSeconds < 60) duration = `${durationSeconds}s`;
           else if (durationSeconds < 3600) duration = `${Math.floor(durationSeconds / 60)}m`;
           else duration = `${Math.floor(durationSeconds / 3600)}h`;
         } else if (t.opened_at && t.closed_at) {
           const diffMs = new Date(t.closed_at).getTime() - new Date(t.opened_at).getTime();
-          const diffMins = Math.floor(diffMs / 60000);
+          const diffMins = Math.max(0, Math.floor(diffMs / 60000));
           if (diffMins < 60) duration = `${diffMins}m`;
           else if (diffMins < 1440) duration = `${Math.floor(diffMins / 60)}h`;
           else duration = `${Math.floor(diffMins / 1440)}d`;
         }
 
-        const createdIso = t.created_at || t.opened_at || null;
+        const createdIso = t.opened_at || t.created_at || null;
 
         return {
           id: String(t.id),
@@ -267,7 +280,16 @@ export default function HistoryPage() {
         };
       });
 
-      setTradeHistory(trades);
+      // Apply won/lost filter after mapping (reliable across schemas)
+      const filtered =
+        statusFilter === 'won'
+          ? mapped.filter((t) => t.status === 'won')
+          : statusFilter === 'lost'
+          ? mapped.filter((t) => t.status === 'lost')
+          : mapped;
+
+      setTradeHistory(filtered);
+      // count is “DB filtered count” (market/search/open/cancelled), not post-mapped won/lost
       setTotalTrades(count || 0);
     } catch (err: any) {
       console.error('Error fetching trade history:', err);
@@ -275,7 +297,7 @@ export default function HistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [user?.id, statusFilter, assetFilter, debouncedQuery, page]);
+  }, [user?.id, statusFilter, marketFilter, debouncedQuery, page]);
 
   useEffect(() => {
     fetchTradeHistory();
@@ -317,7 +339,7 @@ export default function HistoryPage() {
     const winRate = completed.length > 0 ? ((won / completed.length) * 100).toFixed(1) : '0.0';
 
     return {
-      totalTrades,
+      totalTrades, // DB count for current DB filters
       wonTrades: won,
       lostTrades: lost,
       totalProfit,
@@ -366,13 +388,11 @@ export default function HistoryPage() {
     { id: 'cancelled', label: 'Cancelled' },
   ];
 
-  const marketTabs: { id: AssetFilter; label: string }[] = [
+  const marketTabs: { id: MarketFilter; label: string }[] = [
     { id: 'all', label: 'All' },
     { id: 'crypto', label: 'Crypto' },
-    { id: 'forex', label: 'FX' },
+    { id: 'fx', label: 'FX' },
     { id: 'stocks', label: 'Stocks' },
-    { id: 'commodity', label: 'Commodity' },
-    { id: 'index', label: 'Index' },
   ];
 
   if (!isSupabaseConfigured()) {
@@ -392,9 +412,9 @@ export default function HistoryPage() {
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-display font-bold text-cream">Trade History</h1>
-          <p className="text-slate-400 mt-1">All markets — Crypto, FX, Stocks, Commodities & Indices</p>
+          <p className="text-slate-400 mt-1">All markets — Crypto, FX, Stocks</p>
           <p className="text-xs text-slate-500 mt-2">
-            Stats shown for the current page (use Export for full history).
+            Stats shown for the current page (use Export for what you see).
           </p>
         </div>
 
@@ -467,12 +487,10 @@ export default function HistoryPage() {
         </motion.div>
 
         <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
-          <div className="flex items-center gap-3 mb-2">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'}`}>
-              {stats.totalProfit >= 0 ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
-            </div>
+          <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'}`}>
+            {stats.totalProfit >= 0 ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
           </div>
-          <p className="text-xs text-slate-500">P&L (page)</p>
+          <p className="text-xs text-slate-500 mt-2">P&L (page)</p>
           <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-profit' : 'text-loss'}`}>
             {loading ? '-' : `${stats.totalProfit >= 0 ? '+' : ''}$${stats.totalProfit.toLocaleString()}`}
           </p>
@@ -481,7 +499,6 @@ export default function HistoryPage() {
 
       {/* Filters */}
       <div className="space-y-3">
-        {/* Search */}
         <div className="relative">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
           <input
@@ -496,9 +513,7 @@ export default function HistoryPage() {
           />
         </div>
 
-        {/* Tabs row */}
         <div className="flex flex-col lg:flex-row gap-3">
-          {/* Status tabs */}
           <div className="flex flex-wrap gap-2">
             {statusTabs.map((t) => (
               <button
@@ -516,17 +531,16 @@ export default function HistoryPage() {
             ))}
           </div>
 
-          {/* Market tabs (works on mobile too) */}
           <div className="flex flex-wrap gap-2 lg:ml-auto">
             {marketTabs.map((t) => (
               <button
                 key={t.id}
                 onClick={() => {
-                  setAssetFilter(t.id);
+                  setMarketFilter(t.id);
                   setPage(1);
                 }}
                 className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${
-                  assetFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
+                  marketFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
                 }`}
               >
                 {t.label}
@@ -538,7 +552,6 @@ export default function HistoryPage() {
 
       {/* Trade List */}
       <div className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
-        {/* Table Header */}
         <div className="hidden lg:grid grid-cols-9 gap-4 p-4 border-b border-white/5 text-xs text-slate-500 uppercase">
           <div>Symbol</div>
           <div>Market</div>
@@ -551,7 +564,6 @@ export default function HistoryPage() {
           <div>Time</div>
         </div>
 
-        {/* Loading */}
         {loading && (
           <div className="p-12 text-center">
             <RefreshCw className="w-8 h-8 text-gold mx-auto mb-4 animate-spin" />
@@ -559,7 +571,6 @@ export default function HistoryPage() {
           </div>
         )}
 
-        {/* Rows */}
         {!loading && (
           <div className="divide-y divide-white/5">
             {tradeHistory.map((trade, index) => {
@@ -628,7 +639,6 @@ export default function HistoryPage() {
 
                   {/* Desktop */}
                   <div className="hidden lg:grid grid-cols-9 gap-4 items-center">
-                    {/* Symbol */}
                     <div className="flex items-center gap-3">
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
                         {trade.direction === 'up' ? (
@@ -643,32 +653,22 @@ export default function HistoryPage() {
                       </div>
                     </div>
 
-                    {/* Market */}
                     <div>
                       <span className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(trade.type)}`}>
                         {marketLabel(trade.type)}
                       </span>
                     </div>
 
-                    {/* Side */}
                     <div className="text-sm text-cream">{sideLabel}</div>
-
-                    {/* Amount */}
                     <div className="text-sm text-cream">${trade.amount.toLocaleString()}</div>
-
-                    {/* Entry */}
                     <div className="text-sm font-mono text-cream">{formatPrice(trade.entryPrice)}</div>
-
-                    {/* Exit */}
                     <div className="text-sm font-mono text-cream">{trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}</div>
 
-                    {/* Duration */}
                     <div className="flex items-center gap-1 text-sm text-slate-400">
                       <Clock className="w-3 h-3" />
                       {trade.duration}
                     </div>
 
-                    {/* Result */}
                     <div className="flex items-center gap-2">
                       {trade.status === 'won' ? (
                         <CheckCircle className="w-4 h-4 text-profit" />
@@ -680,15 +680,17 @@ export default function HistoryPage() {
                         <Clock className="w-4 h-4 text-yellow-500" />
                       )}
 
-                      <span className={`text-sm font-semibold ${
-                        trade.status === 'pending'
-                          ? 'text-yellow-500'
-                          : trade.status === 'cancelled'
-                          ? 'text-slate-500'
-                          : trade.profit >= 0
-                          ? 'text-profit'
-                          : 'text-loss'
-                      }`}>
+                      <span
+                        className={`text-sm font-semibold ${
+                          trade.status === 'pending'
+                            ? 'text-yellow-500'
+                            : trade.status === 'cancelled'
+                            ? 'text-slate-500'
+                            : trade.profit >= 0
+                            ? 'text-profit'
+                            : 'text-loss'
+                        }`}
+                      >
                         {pnlLabel}
                       </span>
 
@@ -697,7 +699,6 @@ export default function HistoryPage() {
                       </span>
                     </div>
 
-                    {/* Time */}
                     <div className="text-xs text-slate-500">{trade.date}</div>
                   </div>
                 </motion.div>
@@ -706,7 +707,6 @@ export default function HistoryPage() {
           </div>
         )}
 
-        {/* Empty */}
         {!loading && tradeHistory.length === 0 && (
           <div className="p-12 text-center">
             <History className="w-12 h-12 text-slate-500 mx-auto mb-4" />
@@ -716,7 +716,6 @@ export default function HistoryPage() {
         )}
       </div>
 
-      {/* Pagination */}
       {!loading && totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
@@ -731,26 +730,6 @@ export default function HistoryPage() {
             >
               Previous
             </button>
-
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              let pageNum: number;
-              if (totalPages <= 5) pageNum = i + 1;
-              else if (page <= 3) pageNum = i + 1;
-              else if (page >= totalPages - 2) pageNum = totalPages - 4 + i;
-              else pageNum = page - 2 + i;
-
-              return (
-                <button
-                  key={pageNum}
-                  onClick={() => setPage(pageNum)}
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                    page === pageNum ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
-                  }`}
-                >
-                  {pageNum}
-                </button>
-              );
-            })}
 
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
