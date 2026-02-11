@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   History,
@@ -17,11 +17,12 @@ import {
   RefreshCw,
   AlertCircle,
 } from 'lucide-react';
+
 import { useStore } from '@/lib/supabase/store-supabase';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
-type FilterType = 'all' | 'won' | 'lost' | 'pending';
-type AssetFilter = 'all' | 'crypto' | 'forex' | 'stocks';
+type FilterType = 'all' | 'won' | 'lost' | 'open' | 'cancelled';
+type AssetFilter = 'all' | 'crypto' | 'forex' | 'stocks' | 'commodity' | 'index';
 
 type TradeType = 'crypto' | 'forex' | 'stock' | 'commodity' | 'index' | 'other';
 type TradeStatus = 'won' | 'lost' | 'pending' | 'cancelled';
@@ -55,18 +56,81 @@ function csvEscape(value: any) {
   return s;
 }
 
+function marketLabel(t: TradeType) {
+  switch (t) {
+    case 'crypto':
+      return 'Crypto';
+    case 'forex':
+      return 'FX';
+    case 'stock':
+      return 'Stocks';
+    case 'commodity':
+      return 'Commod.';
+    case 'index':
+      return 'Index';
+    default:
+      return 'Other';
+  }
+}
+
+function marketPillClass(t: TradeType) {
+  switch (t) {
+    case 'crypto':
+      return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+    case 'forex':
+      return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
+    case 'stock':
+      return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+    case 'commodity':
+      return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
+    case 'index':
+      return 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+    default:
+      return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
+  }
+}
+
+function statusPillClass(s: TradeStatus) {
+  switch (s) {
+    case 'won':
+      return 'bg-profit/10 text-profit border-profit/20';
+    case 'lost':
+      return 'bg-loss/10 text-loss border-loss/20';
+    case 'cancelled':
+      return 'bg-slate-500/10 text-slate-400 border-slate-500/20';
+    default:
+      return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
+  }
+}
+
+function formatPrice(v: number) {
+  if (!Number.isFinite(v)) return '-';
+  return v.toFixed(v < 10 ? 4 : 2);
+}
+
 export default function HistoryPage() {
   const { user } = useStore();
+
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const [statusFilter, setStatusFilter] = useState<FilterType>('all');
   const [assetFilter, setAssetFilter] = useState<AssetFilter>('all');
+
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+
   const [page, setPage] = useState(1);
   const [totalTrades, setTotalTrades] = useState(0);
 
   const pageSize = 20;
+
+  // debounce search to avoid refetching every keystroke
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 250);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   const fetchTradeHistory = useCallback(async () => {
     if (!user?.id || !isSupabaseConfigured()) {
@@ -84,24 +148,26 @@ export default function HistoryPage() {
         .eq('user_id', user.id)
         .order('created_at', { ascending: false });
 
-      // ✅ Status filter (schema: pending/active/won/lost/closed/cancelled/expired)
+      // Status filter (schema: pending/active/won/lost/closed/cancelled/expired)
       if (statusFilter !== 'all') {
-        if (statusFilter === 'pending') {
+        if (statusFilter === 'open') {
           query = query.in('status', ['pending', 'active']);
+        } else if (statusFilter === 'cancelled') {
+          query = query.in('status', ['cancelled', 'expired']);
         } else {
           query = query.eq('status', statusFilter);
         }
       }
 
-      // ✅ Asset filter: use asset_type (schema: crypto/forex/stock/commodity/index)
+      // Asset filter (schema: crypto/forex/stock/commodity/index)
       if (assetFilter !== 'all') {
         const dbAssetType = assetFilter === 'stocks' ? 'stock' : assetFilter;
         query = query.eq('asset_type', dbAssetType);
       }
 
-      // ✅ Search: only `symbol` exists (no `pair`)
-      if (searchQuery.trim()) {
-        query = query.ilike('symbol', `%${searchQuery.trim()}%`);
+      // Search (schema: symbol)
+      if (debouncedQuery) {
+        query = query.ilike('symbol', `%${debouncedQuery}%`);
       }
 
       // Pagination
@@ -131,7 +197,6 @@ export default function HistoryPage() {
         const direction: 'up' | 'down' = ['down', 'sell', 'short'].includes(dirRaw) ? 'down' : 'up';
 
         // ----- profit -----
-        // schema has profit_loss (numeric)
         let profit = toNum(t.profit_loss, 0);
 
         // fallback for binary options if profit_loss wasn't written
@@ -210,7 +275,7 @@ export default function HistoryPage() {
     } finally {
       setLoading(false);
     }
-  }, [user?.id, statusFilter, assetFilter, searchQuery, page]);
+  }, [user?.id, statusFilter, assetFilter, debouncedQuery, page]);
 
   useEffect(() => {
     fetchTradeHistory();
@@ -241,92 +306,34 @@ export default function HistoryPage() {
     };
   }, [user?.id, fetchTradeHistory]);
 
-  // Stats
-  const completedTrades = tradeHistory.filter((t) => t.status === 'won' || t.status === 'lost');
-  const stats = {
-    totalTrades,
-    wonTrades: tradeHistory.filter((t) => t.status === 'won').length,
-    lostTrades: tradeHistory.filter((t) => t.status === 'lost').length,
-    totalProfit: tradeHistory.reduce((acc, t) => acc + toNum(t.profit, 0), 0),
-    totalInvested: tradeHistory.reduce((acc, t) => acc + toNum(t.amount, 0), 0),
-    winRate:
-      completedTrades.length > 0
-        ? ((completedTrades.filter((t) => t.status === 'won').length / completedTrades.length) * 100).toFixed(1)
-        : '0.0',
-  };
+  const stats = useMemo(() => {
+    const completed = tradeHistory.filter((t) => t.status === 'won' || t.status === 'lost');
+    const won = completed.filter((t) => t.status === 'won').length;
+    const lost = completed.filter((t) => t.status === 'lost').length;
 
-  // Optional client-side filter (DB already filters; this is just extra safety)
-  const filteredTrades = tradeHistory.filter((trade) => {
-    const q = searchQuery.trim().toLowerCase();
-    const matchesSearch = !q || trade.asset.toLowerCase().includes(q);
+    const totalProfit = tradeHistory.reduce((acc, t) => acc + toNum(t.profit, 0), 0);
+    const totalInvested = tradeHistory.reduce((acc, t) => acc + toNum(t.amount, 0), 0);
 
-    const matchesAsset =
-      assetFilter === 'all'
-        ? true
-        : trade.type === (assetFilter === 'stocks' ? 'stock' : assetFilter);
+    const winRate = completed.length > 0 ? ((won / completed.length) * 100).toFixed(1) : '0.0';
 
-    return matchesSearch && matchesAsset;
-  });
+    return {
+      totalTrades,
+      wonTrades: won,
+      lostTrades: lost,
+      totalProfit,
+      totalInvested,
+      winRate,
+    };
+  }, [tradeHistory, totalTrades]);
 
-  const getAssetIcon = (type: TradeType) => {
-    switch (type) {
-      case 'crypto':
-        return '₿';
-      case 'forex':
-        return '$';
-      case 'stock':
-        return '📈';
-      case 'commodity':
-        return '⛏️';
-      case 'index':
-        return '📊';
-      default:
-        return '•';
-    }
-  };
-
-  const getAssetColor = (type: TradeType) => {
-    switch (type) {
-      case 'crypto':
-        return 'bg-orange-500/10 text-orange-400';
-      case 'forex':
-        return 'bg-green-500/10 text-green-400';
-      case 'stock':
-        return 'bg-blue-500/10 text-blue-400';
-      case 'commodity':
-        return 'bg-yellow-500/10 text-yellow-400';
-      case 'index':
-        return 'bg-purple-500/10 text-purple-400';
-      default:
-        return 'bg-gray-500/10 text-gray-400';
-    }
-  };
-
-  const formatPrice = (v: number) => {
-    if (!Number.isFinite(v)) return '-';
-    return v.toFixed(v < 10 ? 4 : 2);
-  };
-
-  // Export to CSV
   const exportToCSV = () => {
-    const headers = [
-      'Date',
-      'Asset',
-      'Type',
-      'Direction',
-      'Amount',
-      'Entry Price',
-      'Exit Price',
-      'Duration',
-      'Status',
-      'P&L',
-    ];
+    const headers = ['Date', 'Symbol', 'Market', 'Side', 'Amount', 'Entry', 'Exit', 'Duration', 'Status', 'P&L'];
 
     const rows = tradeHistory.map((t) => [
       t.date,
       t.asset,
-      t.type,
-      t.direction,
+      marketLabel(t.type),
+      t.direction === 'up' ? 'Buy/Long' : 'Sell/Short',
       t.amount,
       t.entryPrice,
       t.exitPrice ?? '',
@@ -351,14 +358,46 @@ export default function HistoryPage() {
 
   const totalPages = Math.ceil(totalTrades / pageSize);
 
+  const statusTabs: { id: FilterType; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'won', label: 'Won' },
+    { id: 'lost', label: 'Lost' },
+    { id: 'open', label: 'Open' },
+    { id: 'cancelled', label: 'Cancelled' },
+  ];
+
+  const marketTabs: { id: AssetFilter; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'crypto', label: 'Crypto' },
+    { id: 'forex', label: 'FX' },
+    { id: 'stocks', label: 'Stocks' },
+    { id: 'commodity', label: 'Commodity' },
+    { id: 'index', label: 'Index' },
+  ];
+
+  if (!isSupabaseConfigured()) {
+    return (
+      <div className="max-w-7xl mx-auto">
+        <div className="p-6 bg-white/5 border border-white/10 rounded-2xl">
+          <p className="text-cream font-medium">Supabase not configured</p>
+          <p className="text-sm text-slate-400 mt-1">Add your Supabase env keys to load trade history.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-display font-bold text-cream">Trade History</h1>
-          <p className="text-slate-400 mt-1">View all your past trades and performance</p>
+          <p className="text-slate-400 mt-1">All markets — Crypto, FX, Stocks, Commodities & Indices</p>
+          <p className="text-xs text-slate-500 mt-2">
+            Stats shown for the current page (use Export for full history).
+          </p>
         </div>
+
         <div className="flex gap-2">
           <button
             onClick={fetchTradeHistory}
@@ -397,72 +436,43 @@ export default function HistoryPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-4 bg-white/5 rounded-2xl border border-white/5"
-        >
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-gold/10 rounded-xl flex items-center justify-center">
               <BarChart3 className="w-5 h-5 text-gold" />
             </div>
           </div>
-          <p className="text-xs text-slate-500">Total Trades</p>
+          <p className="text-xs text-slate-500">Trades (filtered)</p>
           <p className="text-2xl font-bold text-cream">{loading ? '-' : stats.totalTrades}</p>
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="p-4 bg-white/5 rounded-2xl border border-white/5"
-        >
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-profit/10 rounded-xl flex items-center justify-center">
               <Target className="w-5 h-5 text-profit" />
             </div>
           </div>
-          <p className="text-xs text-slate-500">Win Rate</p>
+          <p className="text-xs text-slate-500">Win Rate (page)</p>
           <p className="text-2xl font-bold text-profit">{loading ? '-' : `${stats.winRate}%`}</p>
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="p-4 bg-white/5 rounded-2xl border border-white/5"
-        >
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.16 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center">
               <DollarSign className="w-5 h-5 text-electric" />
             </div>
           </div>
-          <p className="text-xs text-slate-500">Total Invested</p>
-          <p className="text-2xl font-bold text-cream">
-            {loading ? '-' : `$${stats.totalInvested.toLocaleString()}`}
-          </p>
+          <p className="text-xs text-slate-500">Invested (page)</p>
+          <p className="text-2xl font-bold text-cream">{loading ? '-' : `$${stats.totalInvested.toLocaleString()}`}</p>
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="p-4 bg-white/5 rounded-2xl border border-white/5"
-        >
+        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
           <div className="flex items-center gap-3 mb-2">
-            <div
-              className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'
-              }`}
-            >
-              {stats.totalProfit >= 0 ? (
-                <TrendingUp className="w-5 h-5 text-profit" />
-              ) : (
-                <TrendingDown className="w-5 h-5 text-loss" />
-              )}
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'}`}>
+              {stats.totalProfit >= 0 ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
             </div>
           </div>
-          <p className="text-xs text-slate-500">Total P&L</p>
+          <p className="text-xs text-slate-500">P&L (page)</p>
           <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-profit' : 'text-loss'}`}>
             {loading ? '-' : `${stats.totalProfit >= 0 ? '+' : ''}$${stats.totalProfit.toLocaleString()}`}
           </p>
@@ -470,9 +480,9 @@ export default function HistoryPage() {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3">
+      <div className="space-y-3">
         {/* Search */}
-        <div className="flex-1 relative">
+        <div className="relative">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
           <input
             type="text"
@@ -481,73 +491,67 @@ export default function HistoryPage() {
               setSearchQuery(e.target.value);
               setPage(1);
             }}
-            placeholder="Search symbols..."
+            placeholder="Search symbols across all markets…"
             className="w-full pl-12 pr-4 py-3 bg-white/5 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-gold/50"
           />
         </div>
 
-        {/* Status Filter */}
-        <div className="flex gap-2">
-          {[
-            { id: 'all', label: 'All' },
-            { id: 'won', label: 'Won' },
-            { id: 'lost', label: 'Lost' },
-            { id: 'pending', label: 'Pending' },
-          ].map((filter) => (
-            <button
-              key={filter.id}
-              onClick={() => {
-                setStatusFilter(filter.id as FilterType);
-                setPage(1);
-              }}
-              className={`px-4 py-3 text-sm font-medium rounded-xl transition-all ${
-                statusFilter === filter.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
-              }`}
-            >
-              {filter.label}
-            </button>
-          ))}
-        </div>
+        {/* Tabs row */}
+        <div className="flex flex-col lg:flex-row gap-3">
+          {/* Status tabs */}
+          <div className="flex flex-wrap gap-2">
+            {statusTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => {
+                  setStatusFilter(t.id);
+                  setPage(1);
+                }}
+                className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${
+                  statusFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
 
-        {/* Asset Filter */}
-        <div className="flex gap-2">
-          {[
-            { id: 'all', label: 'All Assets' },
-            { id: 'crypto', label: 'Crypto' },
-            { id: 'forex', label: 'Forex' },
-            { id: 'stocks', label: 'Stocks' },
-          ].map((filter) => (
-            <button
-              key={filter.id}
-              onClick={() => {
-                setAssetFilter(filter.id as AssetFilter);
-                setPage(1);
-              }}
-              className={`px-4 py-3 text-sm font-medium rounded-xl transition-all hidden sm:block ${
-                assetFilter === filter.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
-              }`}
-            >
-              {filter.label}
-            </button>
-          ))}
+          {/* Market tabs (works on mobile too) */}
+          <div className="flex flex-wrap gap-2 lg:ml-auto">
+            {marketTabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => {
+                  setAssetFilter(t.id);
+                  setPage(1);
+                }}
+                className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${
+                  assetFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Trade List */}
       <div className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
         {/* Table Header */}
-        <div className="hidden lg:grid grid-cols-8 gap-4 p-4 border-b border-white/5 text-xs text-slate-500 uppercase">
-          <div>Asset</div>
-          <div>Direction</div>
+        <div className="hidden lg:grid grid-cols-9 gap-4 p-4 border-b border-white/5 text-xs text-slate-500 uppercase">
+          <div>Symbol</div>
+          <div>Market</div>
+          <div>Side</div>
           <div>Amount</div>
-          <div>Entry Price</div>
-          <div>Exit Price</div>
+          <div>Entry</div>
+          <div>Exit</div>
           <div>Duration</div>
-          <div>P&L</div>
-          <div>Date</div>
+          <div>Result</div>
+          <div>Time</div>
         </div>
 
-        {/* Loading State */}
+        {/* Loading */}
         {loading && (
           <div className="p-12 text-center">
             <RefreshCw className="w-8 h-8 text-gold mx-auto mb-4 animate-spin" />
@@ -555,113 +559,128 @@ export default function HistoryPage() {
           </div>
         )}
 
-        {/* Trade Rows */}
+        {/* Rows */}
         {!loading && (
           <div className="divide-y divide-white/5">
-            {filteredTrades.map((trade, index) => (
-              <motion.div
-                key={trade.id}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: index * 0.02 }}
-                className="p-4 hover:bg-white/5 transition-all"
-              >
-                {/* Mobile View */}
-                <div className="lg:hidden space-y-3">
-                  <div className="flex items-center justify-between">
+            {tradeHistory.map((trade, index) => {
+              const sideLabel = trade.direction === 'up' ? 'Buy/Long' : 'Sell/Short';
+              const pnlLabel =
+                trade.status === 'pending'
+                  ? 'Open'
+                  : trade.status === 'cancelled'
+                  ? 'Cancelled'
+                  : `${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`;
+
+              return (
+                <motion.div
+                  key={trade.id}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: Math.min(0.2, index * 0.015) }}
+                  className="p-4 hover:bg-white/5 transition-all"
+                >
+                  {/* Mobile */}
+                  <div className="lg:hidden space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
+                          {trade.direction === 'up' ? (
+                            <TrendingUp className="w-5 h-5 text-profit" />
+                          ) : (
+                            <TrendingDown className="w-5 h-5 text-loss" />
+                          )}
+                        </div>
+
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-cream truncate">{trade.asset}</span>
+
+                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${marketPillClass(trade.type)}`}>
+                              {marketLabel(trade.type)}
+                            </span>
+
+                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${statusPillClass(trade.status)}`}>
+                              {trade.status === 'pending' ? 'Open' : trade.status}
+                            </span>
+                          </div>
+
+                          <div className="text-xs text-slate-500 mt-1 flex items-center gap-2">
+                            <span>{sideLabel}</span>
+                            <span className="text-slate-600">•</span>
+                            <span>${trade.amount.toLocaleString()}</span>
+                            <span className="text-slate-600">•</span>
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {trade.duration}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <p className={`font-semibold ${trade.status === 'pending' ? 'text-yellow-400' : trade.profit >= 0 ? 'text-profit' : 'text-loss'}`}>
+                          {pnlLabel}
+                        </p>
+                        <p className="text-xs text-slate-500">{trade.date}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Desktop */}
+                  <div className="hidden lg:grid grid-cols-9 gap-4 items-center">
+                    {/* Symbol */}
                     <div className="flex items-center gap-3">
-                      <div
-                        className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                          trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
-                        }`}
-                      >
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
                         {trade.direction === 'up' ? (
-                          <TrendingUp className="w-5 h-5 text-profit" />
+                          <TrendingUp className="w-4 h-4 text-profit" />
                         ) : (
-                          <TrendingDown className="w-5 h-5 text-loss" />
+                          <TrendingDown className="w-4 h-4 text-loss" />
                         )}
                       </div>
                       <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-cream">{trade.asset}</span>
-                          <span className={`text-xs px-2 py-0.5 rounded ${getAssetColor(trade.type)}`}>
-                            {trade.type}
-                          </span>
-                        </div>
-                        <span className="text-xs text-slate-500">{trade.date}</span>
+                        <p className="text-sm font-semibold text-cream">{trade.asset}</p>
+                        <p className="text-xs text-slate-500">{trade.entryPrice ? `Entry: ${formatPrice(trade.entryPrice)}` : ''}</p>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <p className={`font-semibold ${trade.profit >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {trade.status === 'pending'
-                          ? 'Pending'
-                          : trade.status === 'cancelled'
-                          ? 'Cancelled'
-                          : `${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`}
-                      </p>
-                      <p className="text-xs text-slate-500">${trade.amount}</p>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Desktop View */}
-                <div className="hidden lg:grid grid-cols-8 gap-4 items-center">
-                  {/* Asset */}
-                  <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm ${getAssetColor(trade.type)}`}>
-                      {getAssetIcon(trade.type)}
-                    </div>
+                    {/* Market */}
                     <div>
-                      <p className="text-sm font-medium text-cream">{trade.asset}</p>
-                      <span className={`text-xs px-1.5 py-0.5 rounded ${getAssetColor(trade.type)}`}>
-                        {trade.type}
+                      <span className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(trade.type)}`}>
+                        {marketLabel(trade.type)}
                       </span>
                     </div>
-                  </div>
 
-                  {/* Direction */}
-                  <div className="flex items-center gap-2">
-                    <div className={`w-6 h-6 rounded flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
-                      {trade.direction === 'up' ? (
-                        <TrendingUp className="w-4 h-4 text-profit" />
-                      ) : (
-                        <TrendingDown className="w-4 h-4 text-loss" />
-                      )}
+                    {/* Side */}
+                    <div className="text-sm text-cream">{sideLabel}</div>
+
+                    {/* Amount */}
+                    <div className="text-sm text-cream">${trade.amount.toLocaleString()}</div>
+
+                    {/* Entry */}
+                    <div className="text-sm font-mono text-cream">{formatPrice(trade.entryPrice)}</div>
+
+                    {/* Exit */}
+                    <div className="text-sm font-mono text-cream">{trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}</div>
+
+                    {/* Duration */}
+                    <div className="flex items-center gap-1 text-sm text-slate-400">
+                      <Clock className="w-3 h-3" />
+                      {trade.duration}
                     </div>
-                    <span className="text-sm text-cream capitalize">{trade.direction}</span>
-                  </div>
 
-                  {/* Amount */}
-                  <div className="text-sm text-cream">${trade.amount}</div>
+                    {/* Result */}
+                    <div className="flex items-center gap-2">
+                      {trade.status === 'won' ? (
+                        <CheckCircle className="w-4 h-4 text-profit" />
+                      ) : trade.status === 'lost' ? (
+                        <XCircle className="w-4 h-4 text-loss" />
+                      ) : trade.status === 'cancelled' ? (
+                        <XCircle className="w-4 h-4 text-slate-500" />
+                      ) : (
+                        <Clock className="w-4 h-4 text-yellow-500" />
+                      )}
 
-                  {/* Entry Price */}
-                  <div className="text-sm font-mono text-cream">{formatPrice(trade.entryPrice)}</div>
-
-                  {/* Exit Price */}
-                  <div className="text-sm font-mono text-cream">
-                    {trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}
-                  </div>
-
-                  {/* Duration */}
-                  <div className="flex items-center gap-1 text-sm text-slate-400">
-                    <Clock className="w-3 h-3" />
-                    {trade.duration}
-                  </div>
-
-                  {/* P&L */}
-                  <div className="flex items-center gap-2">
-                    {trade.status === 'won' ? (
-                      <CheckCircle className="w-4 h-4 text-profit" />
-                    ) : trade.status === 'lost' ? (
-                      <XCircle className="w-4 h-4 text-loss" />
-                    ) : trade.status === 'cancelled' ? (
-                      <XCircle className="w-4 h-4 text-slate-500" />
-                    ) : (
-                      <Clock className="w-4 h-4 text-yellow-500" />
-                    )}
-
-                    <span
-                      className={`font-semibold ${
+                      <span className={`text-sm font-semibold ${
                         trade.status === 'pending'
                           ? 'text-yellow-500'
                           : trade.status === 'cancelled'
@@ -669,32 +688,30 @@ export default function HistoryPage() {
                           : trade.profit >= 0
                           ? 'text-profit'
                           : 'text-loss'
-                      }`}
-                    >
-                      {trade.status === 'pending'
-                        ? 'Pending'
-                        : trade.status === 'cancelled'
-                        ? 'Cancelled'
-                        : `${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`}
-                    </span>
-                  </div>
+                      }`}>
+                        {pnlLabel}
+                      </span>
 
-                  {/* Date */}
-                  <div className="text-xs text-slate-500">{trade.date}</div>
-                </div>
-              </motion.div>
-            ))}
+                      <span className={`ml-2 inline-flex items-center text-xs px-2 py-1 rounded-lg border ${statusPillClass(trade.status)}`}>
+                        {trade.status === 'pending' ? 'Open' : trade.status}
+                      </span>
+                    </div>
+
+                    {/* Time */}
+                    <div className="text-xs text-slate-500">{trade.date}</div>
+                  </div>
+                </motion.div>
+              );
+            })}
           </div>
         )}
 
-        {/* Empty State */}
-        {!loading && filteredTrades.length === 0 && (
+        {/* Empty */}
+        {!loading && tradeHistory.length === 0 && (
           <div className="p-12 text-center">
             <History className="w-12 h-12 text-slate-500 mx-auto mb-4" />
             <p className="text-cream font-medium">No trades found</p>
-            <p className="text-sm text-slate-500 mt-1">
-              {tradeHistory.length === 0 ? 'Start trading to see your history here' : 'Try adjusting your filters'}
-            </p>
+            <p className="text-sm text-slate-500 mt-1">Try changing filters or search a different symbol.</p>
           </div>
         )}
       </div>
@@ -703,8 +720,9 @@ export default function HistoryPage() {
       {!loading && totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
-            Showing {filteredTrades.length} of {totalTrades} trades
+            Page {page} of {totalPages} • Showing {tradeHistory.length} of {totalTrades} trades
           </p>
+
           <div className="flex gap-2">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}

@@ -86,6 +86,13 @@ const currencyFlags: Record<string, string> = {
   MXN: '🇲🇽',
   PLN: '🇵🇱',
   ISK: '🇮🇸',
+  EUR: '🇪🇺',
+  GBP: '🇬🇧',
+  JPY: '🇯🇵',
+  CHF: '🇨🇭',
+  CAD: '🇨🇦',
+  AUD: '🇦🇺',
+  NZD: '🇳🇿',
 };
 
 // Chart timeframes
@@ -117,7 +124,6 @@ const toFiniteNumber = (v: unknown): number | null => {
 
 const toMs = (input: unknown): number => {
   if (typeof input === 'number' && Number.isFinite(input)) {
-    // seconds vs ms heuristic
     return input > 0 && input < 1e12 ? Math.round(input * 1000) : Math.round(input);
   }
   if (input instanceof Date) {
@@ -144,7 +150,7 @@ const normalizePriceMap = (raw: unknown): Record<string, number> => {
   const out: Record<string, number> = {};
   for (const k of Object.keys(obj)) {
     const n = toFiniteNumber(obj[k]);
-    if (n !== null) out[String(k)] = n; // keep original key shape (EUR/USD etc.)
+    if (n !== null) out[String(k)] = n;
   }
   return out;
 };
@@ -186,6 +192,8 @@ const TF_STEP_MS: Record<Timeframe, number> = {
   '4h': 4 * 60 * 60_000,
   '1D': 24 * 60 * 60_000,
 };
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 export default function FXTradingPage() {
   const {
@@ -281,6 +289,7 @@ export default function FXTradingPage() {
   const adminPricesRef = useRef(adminPrices);
   const pausedRef = useRef<boolean>(!!isPausedMap[selectedAsset.symbol]);
   const livePricesRef = useRef<Record<string, number>>({});
+  const autoClosingIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     selectedSymbolRef.current = selectedAsset.symbol;
@@ -304,7 +313,7 @@ export default function FXTradingPage() {
     livePricesRef.current = livePrices;
   }, [livePrices]);
 
-  // User balance
+  // User balance (account currency)
   const userBalance = Number((user as any)?.balance ?? 0) + Number((user as any)?.bonusBalance ?? 0);
 
   // Tier gating: tier-based OR if admin has set a balance
@@ -320,6 +329,27 @@ export default function FXTradingPage() {
       return t === 'forex';
     });
   }, [marginPositions]);
+
+  // ======================
+  // FORMATTERS (NO "$")
+  // ======================
+  const formatPrice = useCallback((price: number) => {
+    if (!Number.isFinite(price)) return '—';
+    if (price >= 100) return price.toFixed(2);
+    if (price >= 1) return price.toFixed(4);
+    return price.toFixed(5);
+  }, []);
+
+  const formatMoney = useCallback((n: number, currency = 'USD') => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return `— ${currency}`;
+    const sign = v < 0 ? '-' : '';
+    const abs = Math.abs(v);
+    return `${sign}${abs.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${currency}`;
+  }, []);
+
+  // pip sizing (simple)
+  const pipSize = useMemo(() => (selectedAsset.symbol.includes('JPY') ? 0.01 : 0.0001), [selectedAsset.symbol]);
 
   // ======================
   // RESIZE (FAST)
@@ -379,7 +409,6 @@ export default function FXTradingPage() {
 
     (async () => {
       try {
-        // ✅ FIX: getMarketData expects 1 arg in your project
         const result = await getMarketData(selectedAsset.symbol);
         if (ac.signal.aborted) return;
 
@@ -534,32 +563,124 @@ export default function FXTradingPage() {
   }, [dbg]);
 
   // ======================
-  // POSITION MARK-TO-MARKET
+  // FX PIPS + APPROX PNL (DISPLAY)
   // ======================
+  const calcPips = useCallback((symbol: string, entry: number, current: number, side: 'long' | 'short') => {
+    const ps = symbol.includes('JPY') ? 0.01 : 0.0001;
+    const raw = (current - entry) / ps;
+    return side === 'long' ? raw : -raw;
+  }, []);
+
+  const approxPnlInUsd = useCallback(
+    (symbol: string, pips: number, lots: number, currentPx: number) => {
+      // For most USD-quote majors: 1 lot ~ 10 USD per pip
+      if (!symbol.includes('JPY')) return pips * lots * 10;
+
+      // JPY quote pairs: 1 lot pip value ~ 1000 JPY; convert JPY->USD using USD/JPY if available
+      const usdJpy = livePricesRef.current['USD/JPY'] ?? (symbol === 'USD/JPY' ? currentPx : null);
+      if (typeof usdJpy === 'number' && usdJpy > 0) {
+        const pipValueUsdPerLot = 1000 / usdJpy; // USD per pip per 1 lot
+        return pips * lots * pipValueUsdPerLot;
+      }
+
+      // If we can't convert, return NaN so UI can hide USD estimate
+      return NaN;
+    },
+    []
+  );
+
+  // ======================
+  // POSITION MARK-TO-MARKET + SL/TP AUTO-CLOSE
+  // ======================
+  const handleAutoClose = useCallback(
+    async (trigger: { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }) => {
+      const id = trigger.id;
+      if (autoClosingIdsRef.current.has(id)) return;
+      autoClosingIdsRef.current.add(id);
+
+      try {
+        const stateNow = useTradingAccountStore.getState();
+        const pos = stateNow.marginPositions.find((p: any) => String(p.id) === String(id));
+        if (!pos) return;
+
+        const side = (pos as any).side as 'long' | 'short';
+        const px = Number(trigger.triggerPrice);
+        if (!Number.isFinite(px)) return;
+
+        const qty = Number((pos as any).qty ?? 0);
+        const fee = qty * px * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
+
+        const result = (closeMarginPosition as any)((pos as any).id, px, fee);
+        if (!(result as any)?.success) {
+          dbg('auto-close failed', { id, result });
+          return;
+        }
+
+        const pnl = Number((result as any).realizedPnL ?? trigger.pnl ?? 0);
+
+        await refreshUser?.();
+
+        const userId = (user as any)?.id;
+        if (userId) {
+          const closed = await closeTradeInHistory({
+            userId,
+            symbol: (pos as any).symbol,
+            exitPrice: px,
+            pnl,
+            status: 'closed',
+            sessionId: (pos as any).id,
+          });
+          if (!(closed as any)?.success) dbg('history close failed (auto)', (closed as any)?.error);
+        }
+
+        setNotification({
+          type: 'success',
+          message: `${trigger.reason === 'sl' ? 'Stop Loss' : 'Take Profit'} hit • ${(pos as any).symbol} • ${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}`,
+        });
+        setTimeout(() => setNotification(null), 3500);
+      } finally {
+        // allow future triggers if position remains for any reason
+        setTimeout(() => autoClosingIdsRef.current.delete(id), 2000);
+      }
+    },
+    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, user, dbg, formatMoney]
+  );
+
   useEffect(() => {
     let alive = true;
 
     const id = setInterval(() => {
       if (!alive) return;
 
-      const symbol = selectedSymbolRef.current;
+      const symbolSelected = selectedSymbolRef.current;
       const currentBid = bidRef.current;
       const currentAsk = askRef.current;
 
       const all = positionsRef.current || [];
-      for (const pos of all) {
-        const t = (pos as any).assetType ?? (pos as any).marketType ?? (pos as any).type ?? (pos as any).market;
+      const triggersToHandle: any[] = [];
+
+      for (const pos of all as any[]) {
+        const t = pos.assetType ?? pos.marketType ?? pos.type ?? pos.market;
         if (t !== 'forex') continue;
 
-        const sym = (pos as any).symbol;
-        const side = (pos as any).side;
+        const sym = String(pos.symbol);
+        const side = String(pos.side);
+
+        // Use best available mid for other pairs (simple)
         const midOther = livePricesRef.current?.[sym];
+        const basePx = sym === symbolSelected ? (side === 'long' ? currentBid : currentAsk) : typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
 
-        const bid = sym === symbol ? currentBid : typeof midOther === 'number' ? midOther : Number((pos as any).currentPrice ?? 0);
-        const ask = sym === symbol ? currentAsk : typeof midOther === 'number' ? midOther : Number((pos as any).currentPrice ?? 0);
+        const px = Number(basePx);
+        if (!Number.isFinite(px)) continue;
 
-        const px = side === 'long' ? bid : ask;
-        if (Number.isFinite(px)) updateMarginPositionPrice((pos as any).symbol, px);
+        // ✅ FIX: store expects (symbol, price), not (id, price)
+        const hit = updateMarginPositionPrice(sym, px);
+        if (Array.isArray(hit) && hit.length) triggersToHandle.push(...hit);
+      }
+
+      if (triggersToHandle.length) {
+        // fire & forget auto-close
+        for (const tr of triggersToHandle) handleAutoClose(tr);
       }
     }, 850);
 
@@ -567,59 +688,67 @@ export default function FXTradingPage() {
       alive = false;
       clearInterval(id);
     };
-  }, [updateMarginPositionPrice]);
+  }, [updateMarginPositionPrice, handleAutoClose]);
 
   // ======================
   // HELPERS
   // ======================
-  const formatPrice = useCallback((price: number) => {
-    if (!Number.isFinite(price)) return '—';
-    if (price >= 100) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(5);
-  }, []);
-
-  // pip sizing (simple)
-  const pipSize = useMemo(() => (selectedAsset.symbol.includes('JPY') ? 0.01 : 0.0001), [selectedAsset.symbol]);
-
-  const positionValue = useMemo(
-    () => lotSize * 100000 * (tradeDirection === 'buy' ? askPrice : bidPrice),
-    [lotSize, askPrice, bidPrice, tradeDirection]
-  );
-  const requiredMargin = useMemo(() => positionValue / leverage, [positionValue, leverage]);
-  const pipValue = useMemo(() => lotSize * 10, [lotSize]);
-  const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
-
-  const metrics = useMemo(
-    () => ({
-      spread: spreadPips,
-      pipValue,
-      margin: requiredMargin,
-      positionSize: positionValue,
-    }),
-    [spreadPips, pipValue, requiredMargin, positionValue]
-  );
-
   const toggleFavorite = useCallback((symbol: string) => {
     setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
   }, []);
 
+  const findJustOpenedPositionId = useCallback(
+    (symbol: string, qty: number, entry: number) => {
+      const st = useTradingAccountStore.getState();
+      const matches = (st.marginPositions as any[]).filter((p) => {
+        const t = p.assetType ?? p.marketType ?? p.type ?? p.market;
+        if (t !== 'forex') return false;
+        if (String(p.symbol) !== String(symbol)) return false;
+        const q = Number(p.qty ?? 0);
+        const a = Number(p.avgEntry ?? 0);
+        return Math.abs(q - qty) < 1e-6 && Math.abs(a - entry) <= Math.max(entry * 0.0002, 0.00001);
+      });
+      if (!matches.length) return undefined;
+      matches.sort((a, b) => {
+        const ta = new Date(a.openedAt ?? a.createdAt ?? 0).getTime();
+        const tb = new Date(b.openedAt ?? b.createdAt ?? 0).getTime();
+        return tb - ta;
+      });
+      return matches[0]?.id as string | undefined;
+    },
+    []
+  );
+
   const handleTrade = useCallback(async () => {
     if (!canTrade) {
-      setNotification({ type: 'error', message: 'Upgrade to Starter tier ($500 deposit) to trade' });
+      setNotification({ type: 'error', message: 'Upgrade tier (or deposit) to trade' });
       setTimeout(() => setNotification(null), 3000);
       return;
     }
 
-    if (leverage > Number(tierConfig.maxLeverage ?? 0) && Number(tierConfig.maxLeverage ?? 0) > 0) {
-      setNotification({ type: 'error', message: `Max leverage for ${tierName} tier is 1:${tierConfig.maxLeverage}` });
+    const maxLev = Number(tierConfig.maxLeverage ?? 0);
+    if (maxLev > 0 && leverage > maxLev) {
+      setNotification({ type: 'error', message: `Max leverage for ${tierName} is 1:${maxLev}` });
+      setTimeout(() => setNotification(null), 3000);
+      return;
+    }
+
+    if (!Number.isFinite(lotSize) || lotSize <= 0) {
+      setNotification({ type: 'error', message: 'Invalid lot size' });
       setTimeout(() => setNotification(null), 3000);
       return;
     }
 
     const entryPrice = tradeDirection === 'buy' ? askPrice : bidPrice;
+
+    // FX qty in units: 1.0 lot = 100,000 units
     const qty = lotSize * 100000;
-    const fee = positionValue * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
+
+    // Notional (quote currency)
+    const notional = qty * entryPrice;
+
+    // Fee is a simple model (you can refine later)
+    const fee = notional * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
 
     const result = (openMarginPosition as any)(
       selectedAsset.symbol,
@@ -637,11 +766,16 @@ export default function FXTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      if ((user as any)?.id) {
-        const sessionId = (result as any)?.positionId ?? (result as any)?.id ?? undefined;
+      // sessionId for history linking (best case: store returns positionId; fallback: infer)
+      const positionId =
+        (result as any)?.positionId ??
+        (result as any)?.id ??
+        findJustOpenedPositionId(selectedAsset.symbol, qty, entryPrice);
 
+      const userId = (user as any)?.id;
+      if (userId) {
         const saved = await saveTradeToHistory({
-          userId: (user as any).id,
+          userId,
           symbol: selectedAsset.symbol,
 
           marketType: 'forex',
@@ -649,8 +783,8 @@ export default function FXTradingPage() {
           tradeType: 'margin',
           direction: tradeDirection,
 
-          amount: positionValue,
-          quantity: qty,
+          amount: notional, // notional
+          quantity: qty, // units
           entryPrice,
           leverage,
 
@@ -659,7 +793,7 @@ export default function FXTradingPage() {
           takeProfit: takeProfit || undefined,
 
           status: 'active',
-          sessionId,
+          sessionId: positionId, // ✅ now links correctly
         });
 
         if (!(saved as any)?.success) dbg('history insert failed', (saved as any)?.error);
@@ -667,7 +801,7 @@ export default function FXTradingPage() {
 
       setNotification({
         type: 'success',
-        message: `${tradeDirection.toUpperCase()} ${lotSize} lots ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
+        message: `${tradeDirection.toUpperCase()} ${lotSize.toFixed(2)} lots • ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
       });
     } else {
       setNotification({ type: 'error', message: (result as any)?.error || 'Trade failed' });
@@ -684,7 +818,6 @@ export default function FXTradingPage() {
     askPrice,
     bidPrice,
     lotSize,
-    positionValue,
     selectedAsset.symbol,
     selectedAsset.name,
     openMarginPosition,
@@ -693,14 +826,17 @@ export default function FXTradingPage() {
     refreshUser,
     user,
     formatPrice,
+    findJustOpenedPositionId,
     dbg,
   ]);
 
   const handleClosePosition = useCallback(
     async (position: MarginPosition) => {
-      const side = (position as any).side;
+      const side = (position as any).side as 'long' | 'short';
       const exitPrice = side === 'long' ? bidPrice : askPrice;
-      const fee = Number((position as any).qty ?? 0) * exitPrice * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
+
+      const qty = Number((position as any).qty ?? 0);
+      const fee = qty * exitPrice * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
 
       const result = (closeMarginPosition as any)((position as any).id, exitPrice, fee);
 
@@ -708,9 +844,10 @@ export default function FXTradingPage() {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        if ((user as any)?.id) {
+        const userId = (user as any)?.id;
+        if (userId) {
           const closed = await closeTradeInHistory({
-            userId: (user as any).id,
+            userId,
             symbol: (position as any).symbol,
             exitPrice,
             pnl,
@@ -723,7 +860,7 @@ export default function FXTradingPage() {
 
         setNotification({
           type: 'success',
-          message: `Closed ${(position as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
+          message: `Closed ${(position as any).symbol} • ${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}`,
         });
       } else {
         setNotification({ type: 'error', message: (result as any)?.error || 'Close failed' });
@@ -733,11 +870,12 @@ export default function FXTradingPage() {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg, formatMoney]
   );
 
   const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;
 
+  // Used margin / equity from store values
   const usedMargin = useMemo(
     () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0),
     [forexPositions]
@@ -752,6 +890,16 @@ export default function FXTradingPage() {
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
 
   const isSignalActive = activeSignal?.asset === selectedAsset.symbol && !!activeSignal?.isActive;
+
+  // ======================
+  // POSITION / TRADE METRICS (LOTS-BASED)
+  // ======================
+  const entryPx = tradeDirection === 'buy' ? askPrice : bidPrice;
+  const units = lotSize * 100000;
+  const positionNotional = units * entryPx;
+  const requiredMargin = leverage > 0 ? positionNotional / leverage : positionNotional;
+
+  const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
 
   // ======================
   // ASSET LIST FILTERS
@@ -796,14 +944,15 @@ export default function FXTradingPage() {
     const stepMs = TF_STEP_MS[chartTimeframe] ?? 60_000;
     const count = chartCandles.length > 0 ? chartCandles.length : isMobile ? 30 : 50;
 
+    const baseMid = (livePrices[selectedAsset.symbol] ?? selectedAsset.price) || 1;
+
     const candlesRaw: ChartCandle[] =
       chartCandles.length > 0
         ? chartCandles
         : Array.from({ length: count }, (_, i) => {
-            const base = (livePrices[selectedAsset.symbol] ?? selectedAsset.price) || 1;
             const swing = Math.sin(i * 0.2) * 0.02;
-            const open = base * (1 + swing);
-            const close = base * (1 + Math.sin((i + 1) * 0.2) * 0.02);
+            const open = baseMid * (1 + swing);
+            const close = baseMid * (1 + Math.sin((i + 1) * 0.2) * 0.02);
             const high = Math.max(open, close) * (1 + Math.random() * 0.002);
             const low = Math.min(open, close) * (1 - Math.random() * 0.002);
 
@@ -862,9 +1011,13 @@ export default function FXTradingPage() {
               className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
             >
               <div className="flex items-center gap-1 sm:gap-2">
-                <span className="text-lg sm:text-xl">{currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}</span>
+                <span className="text-lg sm:text-xl">
+                  {currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}
+                </span>
                 <div className="text-left">
-                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedAsset.symbol}</p>
+                  <p className="text-sm sm:text-base font-semibold text-cream truncate">
+                    {selectedAsset.symbol}
+                  </p>
                   <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
                 </div>
               </div>
@@ -883,7 +1036,7 @@ export default function FXTradingPage() {
               </div>
               <div className="text-center hidden sm:block">
                 <p className="text-xs text-cream/50">Spread</p>
-                <p className="text-sm font-mono text-cream">{metrics.spread.toFixed(1)} pips</p>
+                <p className="text-sm font-mono text-cream">{spreadPips.toFixed(1)} pips</p>
               </div>
             </div>
 
@@ -1078,7 +1231,7 @@ export default function FXTradingPage() {
                   <span className="font-semibold text-cream">Trading Locked</span>
                 </div>
                 <p className="text-sm text-cream/70 mb-3">
-                  Deposit $500 or more to unlock live trading. Current deposit: ${totalDeposited.toLocaleString()}
+                  Deposit to unlock trading. Current deposit: {totalDeposited.toLocaleString()} USD
                 </p>
                 <Link
                   href="/dashboard/wallet"
@@ -1104,17 +1257,17 @@ export default function FXTradingPage() {
               <div className="grid grid-cols-2 gap-2">
                 <div className="p-2 bg-white/5 rounded-lg">
                   <p className="text-xs text-cream/50">Balance</p>
-                  <p className="text-sm font-semibold text-cream">${accountBalance.toLocaleString()}</p>
+                  <p className="text-sm font-semibold text-cream">{formatMoney(accountBalance)}</p>
                 </div>
                 <div className="p-2 bg-white/5 rounded-lg">
                   <p className="text-xs text-cream/50">Equity</p>
                   <p className={`text-sm font-semibold ${equity >= accountBalance ? 'text-profit' : 'text-loss'}`}>
-                    ${equity.toLocaleString()}
+                    {formatMoney(equity)}
                   </p>
                 </div>
                 <div className="p-2 bg-white/5 rounded-lg">
                   <p className="text-xs text-cream/50">Free Margin</p>
-                  <p className="text-sm font-semibold text-cream">${freeMargin.toLocaleString()}</p>
+                  <p className="text-sm font-semibold text-cream">{formatMoney(freeMargin)}</p>
                 </div>
                 <div className="p-2 bg-white/5 rounded-lg">
                   <p className="text-xs text-cream/50">Margin Level</p>
@@ -1123,12 +1276,6 @@ export default function FXTradingPage() {
                   </p>
                 </div>
               </div>
-
-              {accountBalance === 0 && userBalance === 0 && (
-                <div className="mt-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
-                  <p className="text-xs text-yellow-500">💡 Your balance is $0. Make a deposit to start trading.</p>
-                </div>
-              )}
             </div>
 
             <div className="p-3 border-b border-white/10">
@@ -1160,7 +1307,7 @@ export default function FXTradingPage() {
               <label className="block text-xs text-cream/50 mb-2">Lot Size</label>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setLotSize(Math.max(0.01, lotSize - 0.1))}
+                  onClick={() => setLotSize((v) => clamp(Number(v) - 0.1, 0.01, 100))}
                   disabled={!canTrade}
                   className="p-2 bg-white/5 hover:bg-white/10 rounded-lg disabled:opacity-50"
                 >
@@ -1169,14 +1316,14 @@ export default function FXTradingPage() {
                 <input
                   type="number"
                   value={lotSize}
-                  onChange={(e) => setLotSize(Math.max(0.01, parseFloat(e.target.value) || 0.01))}
+                  onChange={(e) => setLotSize(clamp(parseFloat(e.target.value) || 0.01, 0.01, 100))}
                   disabled={!canTrade}
                   step="0.01"
                   min="0.01"
                   className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-cream text-center font-mono disabled:opacity-50"
                 />
                 <button
-                  onClick={() => setLotSize(lotSize + 0.1)}
+                  onClick={() => setLotSize((v) => clamp(Number(v) + 0.1, 0.01, 100))}
                   disabled={!canTrade}
                   className="p-2 bg-white/5 hover:bg-white/10 rounded-lg disabled:opacity-50"
                 >
@@ -1223,19 +1370,23 @@ export default function FXTradingPage() {
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-cream/50">Entry Price</span>
-                  <span className="text-cream font-mono">{formatPrice(tradeDirection === 'buy' ? askPrice : bidPrice)}</span>
+                  <span className="text-cream font-mono">{formatPrice(entryPx)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-cream/50">Position Value</span>
-                  <span className="text-cream font-mono">${positionValue.toLocaleString()}</span>
+                  <span className="text-cream/50">Units</span>
+                  <span className="text-cream font-mono">{Math.round(units).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Notional</span>
+                  <span className="text-cream font-mono">{formatMoney(positionNotional)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-cream/50">Required Margin</span>
-                  <span className="text-gold font-mono">${requiredMargin.toFixed(2)}</span>
+                  <span className="text-gold font-mono">{formatMoney(requiredMargin)}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-cream/50">Pip Value</span>
-                  <span className="text-cream font-mono">${pipValue.toFixed(2)}</span>
+                  <span className="text-cream/50">Spread</span>
+                  <span className="text-cream font-mono">{spreadPips.toFixed(1)} pips</span>
                 </div>
                 {Number(tierConfig.spreadDiscount ?? 0) > 0 && (
                   <div className="flex justify-between text-profit">
@@ -1271,7 +1422,7 @@ export default function FXTradingPage() {
                   </>
                 ) : (
                   <>
-                    {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {lotSize} Lots
+                    {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {lotSize.toFixed(2)} Lots
                   </>
                 )}
               </button>
@@ -1293,40 +1444,59 @@ export default function FXTradingPage() {
               </div>
             ) : (
               <div className="divide-y divide-white/5">
-                {forexPositions.map((position) => (
-                  <div key={(position as any).id} className="p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`px-2 py-0.5 text-xs font-medium rounded ${
-                            (position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                          }`}
-                        >
-                          {(position as any).side?.toUpperCase?.() ?? '—'}
-                        </span>
-                        <span className="text-sm font-medium text-cream">{(position as any).symbol}</span>
+                {forexPositions.map((position) => {
+                  const sym = String((position as any).symbol);
+                  const side = ((position as any).side as 'long' | 'short') ?? 'long';
+                  const entry = Number((position as any).avgEntry ?? 0);
+                  const cur = Number((position as any).currentPrice ?? entry);
+                  const lots = Number((position as any).qty ?? 0) / 100000;
+
+                  const pips = calcPips(sym, entry, cur, side);
+                  const approxUsd = approxPnlInUsd(sym, pips, lots, cur);
+
+                  return (
+                    <div key={(position as any).id} className="p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 text-xs font-medium rounded ${
+                              side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                            }`}
+                          >
+                            {side.toUpperCase()}
+                          </span>
+                          <span className="text-sm font-medium text-cream">{sym}</span>
+                        </div>
+
+                        <div className="text-right">
+                          <div className={`text-sm font-bold ${pips >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pips >= 0 ? '+' : ''}{pips.toFixed(1)} pips
+                          </div>
+                          {Number.isFinite(approxUsd) && (
+                            <div className="text-xs text-cream/50">
+                              ~ {approxUsd >= 0 ? '+' : ''}{formatMoney(approxUsd)}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <span className={`text-sm font-bold ${(position as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {(position as any).unrealizedPnL >= 0 ? '+' : ''}$
-                        {Number((position as any).unrealizedPnL ?? 0).toFixed(2)}
-                      </span>
+
+                      <div className="flex items-center justify-between text-xs text-cream/50">
+                        <span>
+                          {lots.toFixed(2)} lots @ {formatPrice(entry)}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setPositionToClose(position as any);
+                            setShowCloseModal(true);
+                          }}
+                          className="px-3 py-1 bg-loss/20 text-loss rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Close
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between text-xs text-cream/50">
-                      <span>
-                        {(Number((position as any).qty ?? 0) / 100000).toFixed(2)} lots @ {formatPrice(Number((position as any).avgEntry ?? 0))}
-                      </span>
-                      <button
-                        onClick={() => {
-                          setPositionToClose(position as any);
-                          setShowCloseModal(true);
-                        }}
-                        className="px-3 py-1 bg-loss/20 text-loss rounded-lg hover:bg-loss/30 transition-colors"
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1338,7 +1508,7 @@ export default function FXTradingPage() {
             <h3 className="text-sm font-semibold text-cream">Open Positions ({forexPositions.length})</h3>
             {forexPositions.length > 0 && (
               <span className={`text-sm font-bold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                Total P&amp;L: {unrealizedPnL >= 0 ? '+' : ''}${unrealizedPnL.toFixed(2)}
+                Total P&amp;L: {unrealizedPnL >= 0 ? '+' : ''}{formatMoney(unrealizedPnL)}
               </span>
             )}
           </div>
@@ -1352,46 +1522,61 @@ export default function FXTradingPage() {
               <thead>
                 <tr className="text-cream/50 text-xs">
                   <th className="text-left p-2">Symbol</th>
-                  <th className="text-left p-2">Type</th>
-                  <th className="text-right p-2">Size</th>
+                  <th className="text-left p-2">Side</th>
+                  <th className="text-right p-2">Lots</th>
                   <th className="text-right p-2">Entry</th>
                   <th className="text-right p-2">Current</th>
+                  <th className="text-right p-2">Pips</th>
                   <th className="text-right p-2">P&amp;L</th>
                   <th className="text-right p-2"></th>
                 </tr>
               </thead>
               <tbody>
-                {forexPositions.map((position) => (
-                  <tr key={(position as any).id} className="border-t border-white/5 hover:bg-white/5">
-                    <td className="p-2 text-cream font-medium">{(position as any).symbol}</td>
-                    <td className="p-2">
-                      <span
-                        className={`px-2 py-0.5 text-xs font-medium rounded ${
-                          (position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                        }`}
-                      >
-                        {(position as any).side?.toUpperCase?.() ?? '—'}
-                      </span>
-                    </td>
-                    <td className="p-2 text-right text-cream">{(Number((position as any).qty ?? 0) / 100000).toFixed(2)}</td>
-                    <td className="p-2 text-right text-cream font-mono">{formatPrice(Number((position as any).avgEntry ?? 0))}</td>
-                    <td className="p-2 text-right text-cream font-mono">{formatPrice(Number((position as any).currentPrice ?? 0))}</td>
-                    <td className={`p-2 text-right font-bold ${(position as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {(position as any).unrealizedPnL >= 0 ? '+' : ''}${Number((position as any).unrealizedPnL ?? 0).toFixed(2)}
-                    </td>
-                    <td className="p-2 text-right">
-                      <button
-                        onClick={() => {
-                          setPositionToClose(position as any);
-                          setShowCloseModal(true);
-                        }}
-                        className="px-3 py-1 bg-loss/20 text-loss text-xs rounded-lg hover:bg-loss/30 transition-colors"
-                      >
-                        Close
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {forexPositions.map((position) => {
+                  const sym = String((position as any).symbol);
+                  const side = ((position as any).side as 'long' | 'short') ?? 'long';
+                  const entry = Number((position as any).avgEntry ?? 0);
+                  const cur = Number((position as any).currentPrice ?? entry);
+                  const lots = Number((position as any).qty ?? 0) / 100000;
+
+                  const pips = calcPips(sym, entry, cur, side);
+                  const approxUsd = approxPnlInUsd(sym, pips, lots, cur);
+
+                  return (
+                    <tr key={(position as any).id} className="border-t border-white/5 hover:bg-white/5">
+                      <td className="p-2 text-cream font-medium">{sym}</td>
+                      <td className="p-2">
+                        <span
+                          className={`px-2 py-0.5 text-xs font-medium rounded ${
+                            side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                          }`}
+                        >
+                          {side.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="p-2 text-right text-cream">{lots.toFixed(2)}</td>
+                      <td className="p-2 text-right text-cream font-mono">{formatPrice(entry)}</td>
+                      <td className="p-2 text-right text-cream font-mono">{formatPrice(cur)}</td>
+                      <td className={`p-2 text-right font-bold ${pips >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        {pips >= 0 ? '+' : ''}{pips.toFixed(1)}
+                      </td>
+                      <td className="p-2 text-right text-cream font-mono">
+                        {Number.isFinite(approxUsd) ? `${approxUsd >= 0 ? '+' : ''}${formatMoney(approxUsd)}` : '—'}
+                      </td>
+                      <td className="p-2 text-right">
+                        <button
+                          onClick={() => {
+                            setPositionToClose(position as any);
+                            setShowCloseModal(true);
+                          }}
+                          className="px-3 py-1 bg-loss/20 text-loss text-xs rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Close
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -1596,14 +1781,16 @@ export default function FXTradingPage() {
                     <span className="text-cream font-medium">{(positionToClose as any).symbol}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Type</span>
+                    <span className="text-cream/50">Side</span>
                     <span className={(positionToClose as any).side === 'long' ? 'text-profit' : 'text-loss'}>
                       {(positionToClose as any).side?.toUpperCase?.() ?? '—'}
                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Size</span>
-                    <span className="text-cream">{(Number((positionToClose as any).qty ?? 0) / 100000).toFixed(2)} lots</span>
+                    <span className="text-cream/50">Lots</span>
+                    <span className="text-cream">
+                      {(Number((positionToClose as any).qty ?? 0) / 100000).toFixed(2)}
+                    </span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-cream/50">Entry Price</span>
@@ -1618,7 +1805,8 @@ export default function FXTradingPage() {
                   <div className="border-t border-white/10 pt-3 flex justify-between">
                     <span className="text-cream font-medium">Estimated P&amp;L</span>
                     <span className={`font-bold ${(positionToClose as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {(positionToClose as any).unrealizedPnL >= 0 ? '+' : ''}${Number((positionToClose as any).unrealizedPnL ?? 0).toFixed(2)}
+                      {(positionToClose as any).unrealizedPnL >= 0 ? '+' : ''}
+                      {formatMoney(Number((positionToClose as any).unrealizedPnL ?? 0))}
                     </span>
                   </div>
                 </div>
