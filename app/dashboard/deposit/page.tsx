@@ -11,7 +11,7 @@ function DepositRedirect() {
   useEffect(() => {
     // Preserve all query parameters
     const params = searchParams.toString();
-    router.replace(`/dashboard/wallet${params ? `?${params}` : ''}`);
+    router.replace(`/dashboard/tier${params ? `?${params}` : ''}`);
   }, [router, searchParams]);
 
   return (

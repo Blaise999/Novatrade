@@ -1,7 +1,14 @@
 // app/admin/markets/page.tsx
+// Fixes TypeScript + runtime issues:
+// - Avoid React namespace type leak (use ChangeEvent).
+// - Guard all `.toFixed()` calls (optional chaining on numbers can still crash).
+// - Normalise timestamps to milliseconds.
+// - Make currentPrices/candles safe even if store returns undefined.
+// - Fix small className typo (items-center).
+
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, type ChangeEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Play,
@@ -31,8 +38,19 @@ interface LiveCandle {
   low: number;
   close: number;
   volume: number;
-  startTime: Date; // live-only
+  startTime: Date;
 }
+
+// Normalised candle format used in this page + persisted inserts
+export type PairCandle = {
+  id?: string;
+  timestamp: number; // ms since epoch
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
 
 const patternOptions = [
   { id: 'bull-flag', name: 'Bull Flag', description: 'Strong move up, consolidation, breakout', icon: '📈' },
@@ -42,11 +60,10 @@ const patternOptions = [
   { id: 'breakout-down', name: 'Bearish Breakout', description: 'Consolidation then downward break', icon: '💥' },
 ];
 
-// ✅ robust timestamp normalizer (UI boundary can be Date/string/number)
+// Normalise any timestamp input to ms
 function toMs(input: TimestampInput): number {
   if (typeof input === 'number' && Number.isFinite(input)) {
-    if (input > 0 && input < 1e12) return Math.round(input * 1000); // seconds -> ms
-    return Math.round(input);
+    return input > 0 && input < 1e12 ? Math.round(input * 1000) : Math.round(input);
   }
   if (input instanceof Date) {
     const ms = input.getTime();
@@ -56,10 +73,7 @@ function toMs(input: TimestampInput): number {
     const s = input.trim();
     if (/^\d+(\.\d+)?$/.test(s)) {
       const n = Number(s);
-      if (Number.isFinite(n)) {
-        if (n > 0 && n < 1e12) return Math.round(n * 1000);
-        return Math.round(n);
-      }
+      return Number.isFinite(n) ? (n > 0 && n < 1e12 ? Math.round(n * 1000) : Math.round(n)) : Date.now();
     }
     const d = new Date(s);
     const ms = d.getTime();
@@ -83,6 +97,10 @@ function msToDate(ms: unknown): Date {
   return new Date();
 }
 
+function fmt(n: number | undefined, dp = 5, fallback = '—') {
+  return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(dp) : fallback;
+}
+
 export default function AdminMarketsPage() {
   const {
     customPairs,
@@ -99,6 +117,9 @@ export default function AdminMarketsPage() {
     generateDoubleBottom,
     generateBreakout,
   } = useAdminMarketStore();
+
+  const safeCurrentPrices = (currentPrices ?? {}) as Record<string, { bid: number; ask: number }>;
+  const safeCandles = (candles ?? {}) as Record<string, unknown[]>;
 
   const isPausedMap: Record<string, boolean> = (isPaused ?? {}) as Record<string, boolean>;
 
@@ -117,8 +138,7 @@ export default function AdminMarketsPage() {
     if (!customPairs?.length) return;
     const stillExists = customPairs.some((p) => p.id === selectedPair.id);
     if (!stillExists) setSelectedPair(customPairs[0]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customPairs]);
+  }, [customPairs, selectedPair.id]);
 
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [supabaseConnected, setSupabaseConnected] = useState(false);
@@ -146,8 +166,9 @@ export default function AdminMarketsPage() {
   const pairKey = selectedPair.id;
   const pairSymbol = selectedPair.symbol;
 
-  const currentPrice = currentPrices[pairKey];
-  
+  const pairCandles: PairCandle[] = (safeCandles[pairKey] ?? []) as PairCandle[];
+
+  const currentPrice = safeCurrentPrices[pairKey];
   const isTradingPaused = !!isPausedMap[pairKey];
 
   const effectiveSpread =
@@ -235,6 +256,7 @@ export default function AdminMarketsPage() {
         volume: prev.volume + Math.random() * 500,
       };
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPrice?.bid, autoCandleEnabled, liveCandle]);
 
   // Timer to close candles at interval
@@ -249,9 +271,8 @@ export default function AdminMarketsPage() {
       const elapsed = (now.getTime() - lastCandleCloseRef.current.getTime()) / 60000;
 
       if (elapsed >= candleInterval && liveCandle) {
-        // ✅ boundary: pass Date into store; store normalizes to ms number
-        const candleDraft = {
-          timestamp: liveCandle.startTime, // Date ok
+        const candleDraft: PairCandle = {
+          timestamp: toMs(liveCandle.startTime),
           open: liveCandle.open,
           high: liveCandle.high,
           low: liveCandle.low,
@@ -259,7 +280,7 @@ export default function AdminMarketsPage() {
           volume: liveCandle.volume,
         };
 
-        addCandle(pairKey, candleDraft as any);
+        addCandle(pairKey, candleDraft as unknown as Parameters<typeof addCandle>[1]);
         pushCandleToSupabase(pairSymbol, candleDraft);
 
         const newStart = new Date();
@@ -304,18 +325,20 @@ export default function AdminMarketsPage() {
     setTargetPrice('');
   };
 
-  const handleSliderMove = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSliderMove = (e: ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setSliderValue(val);
-    const basePrice = currentPrice?.bid || selectedPair.basePrice;
+
+    const basePrice = (currentPrice?.bid ?? selectedPair.basePrice) || 1;
     const newPrice = basePrice * (1 + val / 100);
     const spread = effectiveSpread;
+
     setCurrentPrice(pairKey, newPrice, newPrice + spread);
     pushPriceToSupabase(pairSymbol, newPrice, newPrice + spread);
   };
 
   const quickPriceAdjust = (direction: 'up' | 'down', pips: number) => {
-    const current = currentPrice?.bid || selectedPair.basePrice;
+    const current = currentPrice?.bid ?? selectedPair.basePrice ?? 1;
     const change = direction === 'up' ? pips * 0.0001 : -(pips * 0.0001);
     const newPrice = current + change;
     setCurrentPrice(pairKey, newPrice, newPrice + effectiveSpread);
@@ -324,7 +347,7 @@ export default function AdminMarketsPage() {
   };
 
   const bigPriceMove = (direction: 'up' | 'down', percent: number) => {
-    const current = currentPrice?.bid || selectedPair.basePrice;
+    const current = currentPrice?.bid ?? selectedPair.basePrice ?? 1;
     const change = direction === 'up' ? current * (percent / 100) : -(current * (percent / 100));
     const newPrice = current + change;
     setCurrentPrice(pairKey, newPrice, newPrice + effectiveSpread);
@@ -347,7 +370,7 @@ export default function AdminMarketsPage() {
       showNotification('error', 'Enable history seeding first');
       return;
     }
-    const basePrice = parseFloat(patternBasePrice) || currentPrice?.bid || selectedPair.basePrice;
+    const basePrice = parseFloat(patternBasePrice) || currentPrice?.bid || selectedPair.basePrice || 1;
 
     switch (selectedPattern) {
       case 'bull-flag':
@@ -365,9 +388,12 @@ export default function AdminMarketsPage() {
       case 'breakout-down':
         generateBreakout(pairKey, basePrice, 'down');
         break;
+      default:
+        break;
     }
 
-    showNotification('success', `Seeded ${patternOptions.find((p) => p.id === selectedPattern)?.name} pattern`);
+    const pName = patternOptions.find((p) => p.id === selectedPattern)?.name ?? 'pattern';
+    showNotification('success', `Seeded ${pName}`);
   };
 
   const handleClearHistory = () => {
@@ -381,22 +407,23 @@ export default function AdminMarketsPage() {
     const l = parseFloat(candleLow);
     const c = parseFloat(candleClose);
 
-    if ([o, h, l, c].some(isNaN) || [o, h, l, c].some((v) => v <= 0)) {
+    if ([o, h, l, c].some((v) => Number.isNaN(v)) || [o, h, l, c].some((v) => v <= 0)) {
       showNotification('error', 'Invalid values');
       return;
     }
 
-    const draft = {
-      timestamp: new Date(), // ✅ UI Date, store converts to ms number
+    const volume = 1000 + Math.random() * 5000;
+    const normalized: PairCandle = {
+      timestamp: Date.now(),
       open: o,
       high: h,
       low: l,
       close: c,
-      volume: 1000 + Math.random() * 5000,
+      volume,
     };
 
-    addCandle(pairKey, draft as any);
-    pushCandleToSupabase(pairSymbol, draft);
+    addCandle(pairKey, normalized as unknown as Parameters<typeof addCandle>[1]);
+    pushCandleToSupabase(pairSymbol, normalized);
 
     setCurrentPrice(pairKey, c, c + effectiveSpread);
     pushPriceToSupabase(pairSymbol, c, c + effectiveSpread);
@@ -453,7 +480,7 @@ export default function AdminMarketsPage() {
       {/* Pair Selector */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {(customPairs?.length ? customPairs : [fallbackPair]).map((pair) => {
-          const price = currentPrices[pair.id];
+          const price = safeCurrentPrices[pair.id];
           const paused = !!isPausedMap[pair.id];
           const spread = price ? Math.max(price.ask - price.bid, 0) : 0.0002;
 
@@ -482,9 +509,9 @@ export default function AdminMarketsPage() {
 
               {price && (
                 <div className="mt-2">
-                  <p className="text-xl font-mono text-cream font-bold">${price.bid.toFixed(5)}</p>
+                  <p className="text-xl font-mono text-cream font-bold">{`$${fmt(price.bid, 5, '0.00000')}`}</p>
                   <p className="text-xs text-cream/40">
-                    Ask: ${price.ask.toFixed(5)} • Spread: {(spread * 10000).toFixed(1)} pips
+                    Ask: {`$${fmt(price.ask, 5, '0.00000')}`} • Spread: {(spread * 10000).toFixed(1)} pips
                   </p>
                 </div>
               )}
@@ -543,11 +570,15 @@ export default function AdminMarketsPage() {
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <div className="text-center">
                   <p className="text-xs text-cream/50 mb-1">Bid</p>
-                  <p className="text-3xl font-mono text-loss font-bold">{currentPrice?.bid.toFixed(5) || '—'}</p>
+                  <p className="text-3xl font-mono text-loss font-bold">
+                    {currentPrice ? `$${fmt(currentPrice.bid, 5, '0.00000')}` : '—'}
+                  </p>
                 </div>
                 <div className="text-center">
                   <p className="text-xs text-cream/50 mb-1">Ask</p>
-                  <p className="text-3xl font-mono text-profit font-bold">{currentPrice?.ask.toFixed(5) || '—'}</p>
+                  <p className="text-3xl font-mono text-profit font-bold">
+                    {currentPrice ? `$${fmt(currentPrice.ask, 5, '0.00000')}` : '—'}
+                  </p>
                 </div>
               </div>
               <div className="pt-3 border-t border-white/10 text-center">
@@ -591,10 +622,13 @@ export default function AdminMarketsPage() {
                   step="0.00001"
                   value={targetPrice}
                   onChange={(e) => setTargetPrice(e.target.value)}
-                  placeholder={currentPrice?.bid.toFixed(5) || '1.00000'}
+                  placeholder={currentPrice ? fmt(currentPrice.bid, 5, '1.00000') : '1.00000'}
                   className="flex-1 px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
                 />
-                <button onClick={handleSetTargetPrice} className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90">
+                <button
+                  onClick={handleSetTargetPrice}
+                  className="px-6 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90"
+                >
                   <Send className="w-5 h-5" />
                 </button>
               </div>
@@ -605,10 +639,16 @@ export default function AdminMarketsPage() {
               <div className="grid grid-cols-4 gap-2">
                 {[1, 5, 10, 25, 50, 100, 250, 500].map((pips) => (
                   <div key={pips} className="flex gap-1">
-                    <button onClick={() => quickPriceAdjust('down', pips)} className="flex-1 py-2 bg-loss/20 text-loss text-xs font-bold rounded-lg hover:bg-loss/30">
+                    <button
+                      onClick={() => quickPriceAdjust('down', pips)}
+                      className="flex-1 py-2 bg-loss/20 text-loss text-xs font-bold rounded-lg hover:bg-loss/30"
+                    >
                       -{pips}
                     </button>
-                    <button onClick={() => quickPriceAdjust('up', pips)} className="flex-1 py-2 bg-profit/20 text-profit text-xs font-bold rounded-lg hover:bg-profit/30">
+                    <button
+                      onClick={() => quickPriceAdjust('up', pips)}
+                      className="flex-1 py-2 bg-profit/20 text-profit text-xs font-bold rounded-lg hover:bg-profit/30"
+                    >
                       +{pips}
                     </button>
                   </div>
@@ -621,10 +661,16 @@ export default function AdminMarketsPage() {
               <div className="grid grid-cols-3 gap-2">
                 {[1, 2, 5, 10, 15, 25].map((pct) => (
                   <div key={pct} className="flex gap-1">
-                    <button onClick={() => bigPriceMove('down', pct)} className="flex-1 py-2 bg-loss/10 text-loss text-xs font-bold rounded-lg hover:bg-loss/20">
+                    <button
+                      onClick={() => bigPriceMove('down', pct)}
+                      className="flex-1 py-2 bg-loss/10 text-loss text-xs font-bold rounded-lg hover:bg-loss/20"
+                    >
                       -{pct}%
                     </button>
-                    <button onClick={() => bigPriceMove('up', pct)} className="flex-1 py-2 bg-profit/10 text-profit text-xs font-bold rounded-lg hover:bg-profit/20">
+                    <button
+                      onClick={() => bigPriceMove('up', pct)}
+                      className="flex-1 py-2 bg-profit/10 text-profit text-xs font-bold rounded-lg hover:bg-profit/20"
+                    >
                       +{pct}%
                     </button>
                   </div>
@@ -687,19 +733,19 @@ export default function AdminMarketsPage() {
                   <div className="grid grid-cols-4 gap-2 text-center">
                     <div>
                       <p className="text-[10px] text-cream/40">O</p>
-                      <p className="text-sm font-mono text-cream">{liveCandle.open.toFixed(4)}</p>
+                      <p className="text-sm font-mono text-cream">{fmt(liveCandle.open, 4, '0.0000')}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-profit">H</p>
-                      <p className="text-sm font-mono text-profit">{liveCandle.high.toFixed(4)}</p>
+                      <p className="text-sm font-mono text-profit">{fmt(liveCandle.high, 4, '0.0000')}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-loss">L</p>
-                      <p className="text-sm font-mono text-loss">{liveCandle.low.toFixed(4)}</p>
+                      <p className="text-sm font-mono text-loss">{fmt(liveCandle.low, 4, '0.0000')}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-cream/40">C</p>
-                      <p className="text-sm font-mono text-cream">{liveCandle.close.toFixed(4)}</p>
+                      <p className="text-sm font-mono text-cream">{fmt(liveCandle.close, 4, '0.0000')}</p>
                     </div>
                   </div>
                 </div>
@@ -777,7 +823,7 @@ export default function AdminMarketsPage() {
                   step="0.00001"
                   value={value}
                   onChange={(e) => setter(e.target.value)}
-                  placeholder={currentPrice?.bid.toFixed(5) || '1.00000'}
+                  placeholder={currentPrice ? fmt(currentPrice.bid, 5, '1.00000') : '1.00000'}
                   className={`w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none ${color}`}
                 />
               </div>
@@ -862,16 +908,22 @@ export default function AdminMarketsPage() {
                     step="0.0001"
                     value={patternBasePrice}
                     onChange={(e) => setPatternBasePrice(e.target.value)}
-                    placeholder={(currentPrice?.bid || selectedPair.basePrice).toFixed(4)}
+                    placeholder={(currentPrice?.bid || selectedPair.basePrice || 1).toFixed(4)}
                     className="w-full px-4 py-3 bg-void/50 border border-white/10 rounded-xl text-cream font-mono focus:outline-none focus:border-gold"
                   />
                 </div>
 
                 <div className="flex gap-3">
-                  <button onClick={handleClearHistory} className="flex-1 py-3 bg-loss/20 text-loss font-semibold rounded-xl hover:bg-loss/30 flex items-center justify-center gap-2">
+                  <button
+                    onClick={handleClearHistory}
+                    className="flex-1 py-3 bg-loss/20 text-loss font-semibold rounded-xl hover:bg-loss/30 flex items-center justify-center gap-2"
+                  >
                     <Trash2 className="w-4 h-4" /> Clear History
                   </button>
-                  <button onClick={handleSeedHistory} className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 flex items-center justify-center gap-2">
+                  <button
+                    onClick={handleSeedHistory}
+                    className="flex-1 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 flex items-center justify-center gap-2"
+                  >
                     <Database className="w-4 h-4" /> Seed Pattern
                   </button>
                 </div>

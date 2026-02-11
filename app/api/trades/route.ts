@@ -118,6 +118,35 @@ export async function POST(request: NextRequest) {
     if (!user) {
       return NextResponse.json({ success: false, error }, { status: 401 });
     }
+
+    // === TIER GATING: Trading requires Tier >= 1 ===
+    try {
+      const { createClient } = await import('@supabase/supabase-js');
+      const sbAdmin = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { autoRefreshToken: false, persistSession: false } }
+      );
+      const { data: tierData } = await sbAdmin
+        .from('users')
+        .select('tier_level, tier_active')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      const tierLevel = Number(tierData?.tier_level ?? 0);
+      const tierActive = Boolean(tierData?.tier_active);
+
+      if (tierLevel < 1 || !tierActive) {
+        return NextResponse.json({
+          success: false,
+          error: 'Upgrade required: You need at least Starter tier (Tier 1) to trade. Visit Tiers & Plans to upgrade.',
+          requiresTier: 1,
+        }, { status: 403 });
+      }
+    } catch (tierErr) {
+      // If Supabase not configured, allow trading (graceful fallback)
+      console.warn('[Trades API] Tier check skipped:', tierErr);
+    }
     
     const body = await request.json();
     const {

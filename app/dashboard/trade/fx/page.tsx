@@ -1,4 +1,4 @@
-// app/dashboard/fx/page.tsx
+// app/dashboard/trade/fx/page.tsx
 'use client';
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
@@ -29,7 +29,7 @@ import { useAdminSessionStore } from '@/lib/admin-store';
 import { useStore } from '@/lib/supabase/store-supabase';
 import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
-import { useAdminMarketStore, isAdminControlledPair, getMarketData, Candle } from '@/lib/admin-markets';
+import { useAdminMarketStore, isAdminControlledPair, getMarketData } from '@/lib/admin-markets';
 import { useMembershipStore, TIER_CONFIG, canPerformAction } from '@/lib/membership-tiers';
 import { marketAssets } from '@/lib/data';
 import { MarginPosition } from '@/lib/trading-types';
@@ -44,8 +44,14 @@ type FXAsset = {
   type: 'forex';
 };
 
+const uid = () =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? // @ts-ignore
+      crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
+
 const toFxAsset = (a: any): FXAsset => ({
-  id: a?.id ?? a?.symbol ?? crypto.randomUUID(),
+  id: a?.id ?? a?.symbol ?? uid(),
   symbol: String(a?.symbol ?? 'EUR/USD'),
   name: String(a?.name ?? a?.symbol ?? 'FX Pair'),
   price: Number(a?.price ?? 1),
@@ -58,7 +64,7 @@ const standardForexAssets: FXAsset[] = (marketAssets as any[])
   .filter((a) => a?.type === 'forex')
   .map(toFxAsset);
 
-// ✅ Rare/exotic pairs (admin-controlled UI), replaces NOVA/DEMO/TRD
+// ✅ Rare/exotic pairs (admin-controlled UI)
 const rarePairs: FXAsset[] = [
   { id: 'usd-try', symbol: 'USD/TRY', name: 'US Dollar / Turkish Lira', price: 32.15, change24h: 0.7, type: 'forex' },
   { id: 'usd-zar', symbol: 'USD/ZAR', name: 'US Dollar / South African Rand', price: 19.05, change24h: -0.3, type: 'forex' },
@@ -67,7 +73,6 @@ const rarePairs: FXAsset[] = [
   { id: 'usd-pln', symbol: 'USD/PLN', name: 'US Dollar / Polish Zloty', price: 4.01, change24h: 0.2, type: 'forex' },
   { id: 'usd-isk', symbol: 'USD/ISK', name: 'US Dollar / Icelandic Krona', price: 138.2, change24h: -0.1, type: 'forex' },
 ];
-
 
 // Leverage options for forex
 const leverageOptions = [10, 20, 50, 100, 200, 500];
@@ -83,9 +88,9 @@ const currencyFlags: Record<string, string> = {
   ISK: '🇮🇸',
 };
 
-
 // Chart timeframes
 const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
+type Timeframe = (typeof timeframes)[number];
 
 // Mobile tabs
 type MobileTab = 'chart' | 'trade' | 'positions';
@@ -93,9 +98,44 @@ type MobileTab = 'chart' | 'trade' | 'positions';
 // ==============================
 // FAST + TOLERANT MARKET PARSING
 // ==============================
+type ChartCandle = {
+  id: string;
+  pairId: string;
+  timestamp: number; // ms since epoch
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  isSimulated?: boolean;
+};
+
 const toFiniteNumber = (v: unknown): number | null => {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
   return Number.isFinite(n) ? n : null;
+};
+
+const toMs = (input: unknown): number => {
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    // seconds vs ms heuristic
+    return input > 0 && input < 1e12 ? Math.round(input * 1000) : Math.round(input);
+  }
+  if (input instanceof Date) {
+    const ms = input.getTime();
+    return Number.isFinite(ms) ? ms : Date.now();
+  }
+  if (typeof input === 'string') {
+    const s = input.trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      if (!Number.isFinite(n)) return Date.now();
+      return n > 0 && n < 1e12 ? Math.round(n * 1000) : Math.round(n);
+    }
+    const d = new Date(s);
+    const ms = d.getTime();
+    return Number.isFinite(ms) ? ms : Date.now();
+  }
+  return Date.now();
 };
 
 const normalizePriceMap = (raw: unknown): Record<string, number> => {
@@ -109,34 +149,43 @@ const normalizePriceMap = (raw: unknown): Record<string, number> => {
   return out;
 };
 
-const normalizeCandles = (raw: unknown): Candle[] => {
+const normalizeCandles = (raw: unknown, pairId: string): ChartCandle[] => {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((c: any) => {
-      const open = toFiniteNumber(c?.open);
-      const high = toFiniteNumber(c?.high);
-      const low = toFiniteNumber(c?.low);
-      const close = toFiniteNumber(c?.close);
+      const open = toFiniteNumber(c?.open ?? c?.open_price);
+      const high = toFiniteNumber(c?.high ?? c?.high_price);
+      const low = toFiniteNumber(c?.low ?? c?.low_price);
+      const close = toFiniteNumber(c?.close ?? c?.close_price);
       if (open === null || high === null || low === null || close === null) return null;
 
       return {
-        id: String(c?.id ?? crypto.randomUUID()),
-        pairId: String(c?.pairId ?? c?.symbol ?? ''),
-        timestamp: c?.timestamp ? new Date(c.timestamp) : new Date(),
+        id: String(c?.id ?? uid()),
+        pairId: String(c?.pairId ?? c?.pair_symbol ?? c?.symbol ?? pairId),
+        timestamp: toMs(c?.timestamp ?? c?.time ?? c?.t),
         open,
         high,
         low,
         close,
         volume: toFiniteNumber(c?.volume) ?? 0,
         isSimulated: !!c?.isSimulated,
-      } as Candle;
+      } satisfies ChartCandle;
     })
-    .filter(Boolean) as Candle[];
+    .filter(Boolean) as ChartCandle[];
 };
 
-// ✅ Treat our rarePairs as admin-controlled (even if isAdminControlledPair() is still legacy)
+// ✅ Treat our rarePairs as admin-controlled
 const RARE_PAIR_SYMBOLS = new Set(rarePairs.map((p) => p.symbol));
 const isAdminPairSymbol = (sym: string) => RARE_PAIR_SYMBOLS.has(sym) || isAdminControlledPair(sym);
+
+const TF_STEP_MS: Record<Timeframe, number> = {
+  '1m': 60_000,
+  '5m': 5 * 60_000,
+  '15m': 15 * 60_000,
+  '1h': 60 * 60_000,
+  '4h': 4 * 60 * 60_000,
+  '1D': 24 * 60 * 60_000,
+};
 
 export default function FXTradingPage() {
   const {
@@ -184,10 +233,10 @@ export default function FXTradingPage() {
     };
   const tierName = tierConfig.displayName ?? tierConfig.name ?? String(currentTier);
 
-  // Admin market store for admin-controlled pairs
+  // Admin market store (admin-controlled pairs)
   const adminMarket = useAdminMarketStore() as any;
   const adminPrices = (adminMarket?.currentPrices ?? {}) as Record<string, { bid: number; ask: number }>;
-  const isPaused = !!adminMarket?.isPaused;
+  const isPausedMap = (adminMarket?.isPaused ?? {}) as Record<string, boolean>;
 
   // ======================
   // STATE
@@ -199,12 +248,12 @@ export default function FXTradingPage() {
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [favorites, setFavorites] = useState<string[]>(['EUR/USD', 'GBP/USD', 'USD/JPY']);
   const [searchQuery, setSearchQuery] = useState('');
-  const [chartTimeframe, setChartTimeframe] = useState<(typeof timeframes)[number]>('15m');
+  const [chartTimeframe, setChartTimeframe] = useState<Timeframe>('15m');
   const [chartType, setChartType] = useState<'candle' | 'line'>('candle');
 
   // candles + cache
-  const [chartCandles, setChartCandles] = useState<Candle[]>([]);
-  const candleCacheRef = useRef<Map<string, Candle[]>>(new Map());
+  const [chartCandles, setChartCandles] = useState<ChartCandle[]>([]);
+  const candleCacheRef = useRef<Map<string, ChartCandle[]>>(new Map());
 
   // Live prices (for header + list)
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
@@ -230,24 +279,39 @@ export default function FXTradingPage() {
   const askRef = useRef<number>(askPrice);
   const positionsRef = useRef<MarginPosition[]>(marginPositions);
   const adminPricesRef = useRef(adminPrices);
-  const pausedRef = useRef<boolean>(isPaused);
+  const pausedRef = useRef<boolean>(!!isPausedMap[selectedAsset.symbol]);
   const livePricesRef = useRef<Record<string, number>>({});
 
-  useEffect(() => { selectedSymbolRef.current = selectedAsset.symbol; }, [selectedAsset.symbol]);
-  useEffect(() => { bidRef.current = bidPrice; }, [bidPrice]);
-  useEffect(() => { askRef.current = askPrice; }, [askPrice]);
-  useEffect(() => { positionsRef.current = marginPositions; }, [marginPositions]);
-  useEffect(() => { adminPricesRef.current = adminPrices; }, [adminPrices]);
-  useEffect(() => { pausedRef.current = isPaused; }, [isPaused]);
-  useEffect(() => { livePricesRef.current = livePrices; }, [livePrices]);
+  useEffect(() => {
+    selectedSymbolRef.current = selectedAsset.symbol;
+  }, [selectedAsset.symbol]);
+  useEffect(() => {
+    bidRef.current = bidPrice;
+  }, [bidPrice]);
+  useEffect(() => {
+    askRef.current = askPrice;
+  }, [askPrice]);
+  useEffect(() => {
+    positionsRef.current = marginPositions;
+  }, [marginPositions]);
+  useEffect(() => {
+    adminPricesRef.current = adminPrices;
+  }, [adminPrices]);
+  useEffect(() => {
+    pausedRef.current = !!isPausedMap[selectedAsset.symbol];
+  }, [isPausedMap, selectedAsset.symbol]);
+  useEffect(() => {
+    livePricesRef.current = livePrices;
+  }, [livePrices]);
 
   // User balance
-  const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
+  const userBalance = Number((user as any)?.balance ?? 0) + Number((user as any)?.bonusBalance ?? 0);
 
   // Tier gating: tier-based OR if admin has set a balance
   const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
 
   const isAdminPair = useMemo(() => isAdminPairSymbol(selectedAsset.symbol), [selectedAsset.symbol]);
+  const isPaused = !!isPausedMap[selectedAsset.symbol];
 
   // Filter positions for this market
   const forexPositions = useMemo(() => {
@@ -315,9 +379,13 @@ export default function FXTradingPage() {
 
     (async () => {
       try {
-        const result = await getMarketData(selectedAsset.symbol, chartTimeframe, 50);
+        // ✅ FIX: getMarketData expects 1 arg in your project
+        const result = await getMarketData(selectedAsset.symbol);
         if (ac.signal.aborted) return;
-        const candles = normalizeCandles((result as any)?.candles ?? result);
+
+        const raw = (result as any)?.candles ?? (result as any)?.data?.candles ?? result;
+        const candles = normalizeCandles(raw, selectedAsset.symbol).slice(-50);
+
         candleCacheRef.current.set(key, candles);
         setChartCandles(candles);
         dbg('candles loaded', { symbol: selectedAsset.symbol, tf: chartTimeframe, n: candles.length });
@@ -514,7 +582,10 @@ export default function FXTradingPage() {
   // pip sizing (simple)
   const pipSize = useMemo(() => (selectedAsset.symbol.includes('JPY') ? 0.01 : 0.0001), [selectedAsset.symbol]);
 
-  const positionValue = useMemo(() => lotSize * 100000 * (tradeDirection === 'buy' ? askPrice : bidPrice), [lotSize, askPrice, bidPrice, tradeDirection]);
+  const positionValue = useMemo(
+    () => lotSize * 100000 * (tradeDirection === 'buy' ? askPrice : bidPrice),
+    [lotSize, askPrice, bidPrice, tradeDirection]
+  );
   const requiredMargin = useMemo(() => positionValue / leverage, [positionValue, leverage]);
   const pipValue = useMemo(() => lotSize * 10, [lotSize]);
   const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
@@ -550,11 +621,11 @@ export default function FXTradingPage() {
     const qty = lotSize * 100000;
     const fee = positionValue * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
 
-    const result = openMarginPosition(
+    const result = (openMarginPosition as any)(
       selectedAsset.symbol,
       selectedAsset.name,
-      'forex' as any,
-      tradeDirection === 'buy' ? ('long' as any) : ('short' as any),
+      'forex',
+      tradeDirection === 'buy' ? 'long' : 'short',
       qty,
       entryPrice,
       leverage,
@@ -566,14 +637,13 @@ export default function FXTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      if (user?.id) {
+      if ((user as any)?.id) {
         const sessionId = (result as any)?.positionId ?? (result as any)?.id ?? undefined;
 
         const saved = await saveTradeToHistory({
-          userId: user.id,
+          userId: (user as any).id,
           symbol: selectedAsset.symbol,
 
-          // ✅ MUST match your TradeMarketType union
           marketType: 'forex',
           assetType: 'forex',
           tradeType: 'margin',
@@ -621,7 +691,7 @@ export default function FXTradingPage() {
     stopLoss,
     takeProfit,
     refreshUser,
-    user?.id,
+    user,
     formatPrice,
     dbg,
   ]);
@@ -630,17 +700,17 @@ export default function FXTradingPage() {
     async (position: MarginPosition) => {
       const side = (position as any).side;
       const exitPrice = side === 'long' ? bidPrice : askPrice;
-      const fee = ((position as any).qty * exitPrice) * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
+      const fee = Number((position as any).qty ?? 0) * exitPrice * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
 
-      const result = closeMarginPosition((position as any).id, exitPrice, fee);
+      const result = (closeMarginPosition as any)((position as any).id, exitPrice, fee);
 
       if ((result as any)?.success) {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        if (user?.id) {
+        if ((user as any)?.id) {
           const closed = await closeTradeInHistory({
-            userId: user.id,
+            userId: (user as any).id,
             symbol: (position as any).symbol,
             exitPrice,
             pnl,
@@ -663,10 +733,10 @@ export default function FXTradingPage() {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user?.id, dbg]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg]
   );
 
-  const accountBalance = Number(marginAccount?.balance ?? 0) || userBalance;
+  const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;
 
   const usedMargin = useMemo(
     () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0),
@@ -723,10 +793,13 @@ export default function FXTradingPage() {
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
 
-    const candlesRaw: any[] =
+    const stepMs = TF_STEP_MS[chartTimeframe] ?? 60_000;
+    const count = chartCandles.length > 0 ? chartCandles.length : isMobile ? 30 : 50;
+
+    const candlesRaw: ChartCandle[] =
       chartCandles.length > 0
-        ? (chartCandles as any[])
-        : Array.from({ length: isMobile ? 30 : 50 }, (_, i) => {
+        ? chartCandles
+        : Array.from({ length: count }, (_, i) => {
             const base = (livePrices[selectedAsset.symbol] ?? selectedAsset.price) || 1;
             const swing = Math.sin(i * 0.2) * 0.02;
             const open = base * (1 + swing);
@@ -737,12 +810,12 @@ export default function FXTradingPage() {
             return {
               id: `placeholder_${i}`,
               pairId: selectedAsset.symbol,
-              timestamp: new Date(Date.now() - (50 - i) * 60000),
+              timestamp: Date.now() - (count - i) * stepMs,
               open,
               high,
               low,
               close,
-              volume: Math.random() * 1000000,
+              volume: Math.random() * 1_000_000,
               isSimulated: true,
             };
           });
@@ -775,7 +848,7 @@ export default function FXTradingPage() {
       padding,
       chartHeight,
     };
-  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices]);
+  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
 
   return (
     <KYCGate action="trade forex">
@@ -789,9 +862,7 @@ export default function FXTradingPage() {
               className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
             >
               <div className="flex items-center gap-1 sm:gap-2">
-                <span className="text-lg sm:text-xl">
-                  {currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}
-                </span>
+                <span className="text-lg sm:text-xl">{currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}</span>
                 <div className="text-left">
                   <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedAsset.symbol}</p>
                   <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
@@ -887,7 +958,11 @@ export default function FXTradingPage() {
             </div>
 
             {/* Chart Area */}
-            <div ref={chartRef} className="flex-1 relative bg-charcoal/30 w-full overflow-hidden" style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}>
+            <div
+              ref={chartRef}
+              className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
+              style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
+            >
               {isAdminPair && (
                 <div className="absolute top-2 left-2 z-10 px-2 py-1 bg-white/5 border border-white/10 rounded-lg lg:hidden">
                   <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
@@ -902,7 +977,12 @@ export default function FXTradingPage() {
                 </div>
               )}
 
-              <svg className="w-full h-full block" viewBox={`0 0 ${chartDimensions.width} ${chartDimensions.height}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
+              <svg
+                className="w-full h-full block"
+                viewBox={`0 0 ${chartDimensions.width} ${chartDimensions.height}`}
+                preserveAspectRatio="xMidYMid meet"
+                style={{ display: 'block' }}
+              >
                 <defs>
                   <linearGradient id="chartGradientFx" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="rgb(0, 217, 165)" stopOpacity="0.3" />
@@ -911,17 +991,38 @@ export default function FXTradingPage() {
                 </defs>
 
                 {[...Array(10)].map((_, i) => (
-                  <line key={`h-${i}`} x1="0" y1={i * (chartDimensions.height / 10)} x2={chartDimensions.width} y2={i * (chartDimensions.height / 10)} stroke="rgba(255,255,255,0.05)" />
+                  <line
+                    key={`h-${i}`}
+                    x1="0"
+                    y1={i * (chartDimensions.height / 10)}
+                    x2={chartDimensions.width}
+                    y2={i * (chartDimensions.height / 10)}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
                 ))}
                 {[...Array(20)].map((_, i) => (
-                  <line key={`v-${i}`} x1={i * (chartDimensions.width / 20)} y1="0" x2={i * (chartDimensions.width / 20)} y2={chartDimensions.height} stroke="rgba(255,255,255,0.05)" />
+                  <line
+                    key={`v-${i}`}
+                    x1={i * (chartDimensions.width / 20)}
+                    y1="0"
+                    x2={i * (chartDimensions.width / 20)}
+                    y2={chartDimensions.height}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
                 ))}
 
                 {chartType === 'candle' &&
                   chartData.candles.map((c, i) => (
                     <g key={i}>
                       <line x1={c.x} y1={c.highY} x2={c.x} y2={c.lowY} stroke={c.isGreen ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
-                      <rect x={c.x - c.width / 2} y={Math.min(c.openY, c.closeY)} width={c.width} height={Math.abs(c.closeY - c.openY) || 1} fill={c.isGreen ? '#00d9a5' : '#ef4444'} rx="1" />
+                      <rect
+                        x={c.x - c.width / 2}
+                        y={Math.min(c.openY, c.closeY)}
+                        width={c.width}
+                        height={Math.abs(c.closeY - c.openY) || 1}
+                        fill={c.isGreen ? '#00d9a5' : '#ef4444'}
+                        rx="1"
+                      />
                     </g>
                   ))}
 
@@ -940,7 +1041,9 @@ export default function FXTradingPage() {
                       d={`M ${chartData.candles[0]?.x || 0} ${chartData.candles[0]?.closeY || 0} ${chartData.candles
                         .slice(1)
                         .map((c) => `L ${c.x} ${c.closeY}`)
-                        .join(' ')} L ${chartData.candles[chartData.candles.length - 1]?.x || 0} ${chartDimensions.height} L ${chartData.candles[0]?.x || 0} ${chartDimensions.height} Z`}
+                        .join(' ')} L ${chartData.candles[chartData.candles.length - 1]?.x || 0} ${chartDimensions.height} L ${
+                        chartData.candles[0]?.x || 0
+                      } ${chartDimensions.height} Z`}
                       fill="url(#chartGradientFx)"
                     />
                   </>
@@ -1148,9 +1251,7 @@ export default function FXTradingPage() {
                 onClick={handleTrade}
                 disabled={!canTrade || accountBalance === 0 || requiredMargin > freeMargin}
                 className={`w-full py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${
-                  tradeDirection === 'buy'
-                    ? 'bg-profit hover:bg-profit/90 text-void'
-                    : 'bg-loss hover:bg-loss/90 text-white'
+                  tradeDirection === 'buy' ? 'bg-profit hover:bg-profit/90 text-void' : 'bg-loss hover:bg-loss/90 text-white'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
                 {!canTrade ? (
@@ -1206,7 +1307,8 @@ export default function FXTradingPage() {
                         <span className="text-sm font-medium text-cream">{(position as any).symbol}</span>
                       </div>
                       <span className={`text-sm font-bold ${(position as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                        {(position as any).unrealizedPnL >= 0 ? '+' : ''}${Number((position as any).unrealizedPnL ?? 0).toFixed(2)}
+                        {(position as any).unrealizedPnL >= 0 ? '+' : ''}$
+                        {Number((position as any).unrealizedPnL ?? 0).toFixed(2)}
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-xs text-cream/50">
@@ -1263,7 +1365,11 @@ export default function FXTradingPage() {
                   <tr key={(position as any).id} className="border-t border-white/5 hover:bg-white/5">
                     <td className="p-2 text-cream font-medium">{(position as any).symbol}</td>
                     <td className="p-2">
-                      <span className={`px-2 py-0.5 text-xs font-medium rounded ${(position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
+                      <span
+                        className={`px-2 py-0.5 text-xs font-medium rounded ${
+                          (position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                        }`}
+                      >
                         {(position as any).side?.toUpperCase?.() ?? '—'}
                       </span>
                     </td>
@@ -1512,8 +1618,7 @@ export default function FXTradingPage() {
                   <div className="border-t border-white/10 pt-3 flex justify-between">
                     <span className="text-cream font-medium">Estimated P&amp;L</span>
                     <span className={`font-bold ${(positionToClose as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {(positionToClose as any).unrealizedPnL >= 0 ? '+' : ''}
-                      ${Number((positionToClose as any).unrealizedPnL ?? 0).toFixed(2)}
+                      {(positionToClose as any).unrealizedPnL >= 0 ? '+' : ''}${Number((positionToClose as any).unrealizedPnL ?? 0).toFixed(2)}
                     </span>
                   </div>
                 </div>

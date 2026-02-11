@@ -44,6 +44,9 @@ interface UserData {
 
   role: string;
   tier: string;
+  tier_level: number;
+  tier_active: boolean;
+  tier_code: string;
 
   is_active: boolean;
   kyc_status: string;
@@ -64,6 +67,9 @@ const mockUsers: UserData[] = [
     total_withdrawn: 1000,
     role: 'user',
     tier: 'basic',
+    tier_level: 0,
+    tier_active: false,
+    tier_code: 'basic',
     is_active: true,
     kyc_status: 'pending',
     created_at: '2024-01-15',
@@ -740,7 +746,7 @@ export default function AdminUsersPage() {
 
                 <div className="p-3 bg-white/5 rounded-xl text-sm text-slate-300 space-y-1">
                   <p><span className="text-slate-400">Role:</span> {selectedUser.role}</p>
-                  <p><span className="text-slate-400">Tier:</span> {selectedUser.tier}</p>
+                  <p><span className="text-slate-400">Tier:</span> {selectedUser.tier_code || selectedUser.tier || 'basic'} (Level {selectedUser.tier_level ?? 0}) {selectedUser.tier_active ? <span className="text-profit">● Active</span> : <span className="text-slate-500">● Inactive</span>}</p>
                   <p>
                     <span className="text-slate-400">KYC:</span>{' '}
                     <span

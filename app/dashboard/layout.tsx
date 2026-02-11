@@ -39,6 +39,11 @@ const navigation = [
     icon: LayoutDashboard 
   },
   { 
+    name: 'Tiers & Plans', 
+    href: '/dashboard/tier', 
+    icon: Shield 
+  },
+  { 
     name: 'Trade', 
     icon: LineChart,
     children: [
@@ -66,6 +71,16 @@ const navigation = [
     name: 'History', 
     href: '/dashboard/history', 
     icon: History 
+  },
+  { 
+    name: 'Referrals', 
+    href: '/dashboard/referrals', 
+    icon: Users 
+  },
+  { 
+    name: 'Airdrop', 
+    href: '/dashboard/airdrop', 
+    icon: CreditCard 
   },
   { 
     name: 'Connect Wallet', 
@@ -415,7 +430,7 @@ export default function DashboardLayout({
 
             {/* Deposit Button */}
             <Link
-              href="/dashboard/wallet"
+              href="/dashboard/tier"
               className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
             >
               <CreditCard className="w-4 h-4" />

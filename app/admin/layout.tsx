@@ -31,6 +31,7 @@ const navigation = [
   { name: 'Dashboard', href: '/admin', icon: LayoutDashboard },
   { name: 'Users', href: '/admin/users', icon: Users },
   { name: 'KYC Review', href: '/admin/kyc', icon: UserCheck },
+  { name: 'Tier Purchases', href: '/admin/tier-purchases', icon: Shield },
   { name: 'Balances', href: '/admin/balances', icon: Wallet },
   { name: 'Trades', href: '/admin/trades', icon: TrendingUp },
   { name: 'Deposits', href: '/admin/deposits', icon: CreditCard },

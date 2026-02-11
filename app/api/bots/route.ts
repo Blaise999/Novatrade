@@ -104,6 +104,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'userId and botType required' }, { status: 400 });
     }
 
+    // === TIER GATING ===
+    // DCA bots require Tier >= 2, Grid bots require Tier >= 3
+    const requiredTier = botType === 'dca' ? 2 : botType === 'grid' ? 3 : 2;
+    const tierNames: Record<number, string> = { 2: 'Trader', 3: 'Professional' };
+    const { data: userTier } = await supabaseAdmin
+      .from('users')
+      .select('tier_level, tier_active')
+      .eq('id', userId)
+      .maybeSingle();
+
+    const userLevel = Number(userTier?.tier_level ?? 0);
+    const tierActive = Boolean(userTier?.tier_active);
+
+    if (!tierActive || userLevel < requiredTier) {
+      return NextResponse.json({
+        success: false,
+        error: `Upgrade required: You need ${tierNames[requiredTier] || 'Tier ' + requiredTier} to use ${botType === 'dca' ? 'DCA' : 'GridWarrior'} Bots. Your current tier: ${userLevel === 0 ? 'Basic' : 'Tier ' + userLevel}.`,
+        requiresTier: requiredTier,
+      }, { status: 403 });
+    }
+
     if (botType === 'dca') {
       const { name, pair, orderAmount, frequency, takeProfitPct, stopLossPct,
         trailingTpEnabled, trailingTpDeviation,
@@ -190,8 +211,27 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'userId, botId, action required' }, { status: 400 });
     }
 
-    const { data: bot } = await supabaseAdmin.from('trading_bots').select('id, user_id, status').eq('id', botId).eq('user_id', userId).single();
+    const { data: bot } = await supabaseAdmin.from('trading_bots').select('id, user_id, status, bot_type').eq('id', botId).eq('user_id', userId).single();
     if (!bot) return NextResponse.json({ success: false, error: 'Bot not found' }, { status: 404 });
+
+    // === TIER GATING on start ===
+    if (action === 'start') {
+      const requiredTier = (bot as any).bot_type === 'dca' ? 2 : 3;
+      const { data: userTier } = await supabaseAdmin
+        .from('users')
+        .select('tier_level, tier_active')
+        .eq('id', userId)
+        .maybeSingle();
+
+      const userLevel = Number(userTier?.tier_level ?? 0);
+      if (!userTier?.tier_active || userLevel < requiredTier) {
+        return NextResponse.json({
+          success: false,
+          error: `Upgrade required: Tier ${requiredTier} needed to start this bot.`,
+          requiresTier: requiredTier,
+        }, { status: 403 });
+      }
+    }
 
     const validActions = ['start', 'stop', 'pause'];
     if (!validActions.includes(action)) {

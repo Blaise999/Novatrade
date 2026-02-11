@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const validTypes = ['deposit', 'withdrawal', 'trade_open', 'trade_close', 'bonus', 'adjustment', 'fee', 'reversal'];
+    const validTypes = ['deposit', 'withdrawal', 'trade_open', 'trade_close', 'bonus', 'adjustment', 'fee', 'reversal', 'tier_bonus'];
     if (!validTypes.includes(type)) {
       return NextResponse.json(
         { success: false, error: `Invalid type. Must be one of: ${validTypes.join(', ')}` },

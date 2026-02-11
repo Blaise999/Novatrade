@@ -49,7 +49,9 @@ export interface User {
   phone?: string;
   avatarUrl?: string;
   role: 'user' | 'admin';
-  tier: 'basic' | 'starter' | 'pro' | 'elite' | 'vip';
+  tier: 'basic' | 'starter' | 'trader' | 'professional' | 'elite' | 'pro' | 'vip';
+  tierLevel: number;
+  tierActive: boolean;
   balance: number;
   bonusBalance: number;
   totalDeposited: number;
@@ -117,7 +119,9 @@ function dbRowToUser(row: any): User {
     phone: row.phone || undefined,
     avatarUrl: row.avatar_url || undefined,
     role: row.role || 'user',
-    tier: row.tier || 'basic',
+    tier: row.tier_code || row.tier || 'basic',
+    tierLevel: Number(row.tier_level ?? 0),
+    tierActive: Boolean(row.tier_active),
     balance: Number(row.balance_available ?? 0) || 0,
     bonusBalance: Number(row.balance_bonus ?? 0) || 0,
     totalDeposited: Number(row.total_deposited ?? 0) || 0,
@@ -282,7 +286,9 @@ export const useStore = create<AuthStore>((set, get) => ({
               first_name: authData.user.user_metadata?.first_name || '',
               last_name: authData.user.user_metadata?.last_name || '',
               role: 'user',
-              tier: 'basic',
+              tier_code: 'basic',
+              tier_level: 0,
+              tier_active: false,
               balance_available: 0,
               balance_bonus: 0,
               total_deposited: 0,
@@ -343,6 +349,8 @@ export const useStore = create<AuthStore>((set, get) => ({
           lastName: lastName || '',
           role: 'user',
           tier: 'basic',
+          tierLevel: 0,
+          tierActive: false,
           balance: 0,
           bonusBalance: 0,
           totalDeposited: 0,
