@@ -1,217 +1,209 @@
 // lib/services/trade-history.ts
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
 
-type MarketType = 'crypto' | 'fx' | 'stocks';
-type AssetType = 'crypto' | 'forex' | 'stock' | 'commodity' | 'index';
-type TradeType = 'binary' | 'spot' | 'margin' | 'cfd';
-type Direction = 'up' | 'down' | 'buy' | 'sell' | 'long' | 'short';
-type Status = 'pending' | 'active' | 'won' | 'lost' | 'closed' | 'cancelled' | 'expired';
+type MarketType = "crypto" | "fx" | "stocks" | "forex"; // accept forex input, store as fx
+type TradeStatus = "open" | "pending" | "closed" | "cancelled" | "liquidated" | "active"; // accept active input, store as open
 
-export type SaveTradeInput = {
+const normalizeMarketType = (m: MarketType): "crypto" | "fx" | "stocks" => {
+  if (m === "forex") return "fx";
+  if (m === "crypto" || m === "fx" || m === "stocks") return m;
+  return "crypto";
+};
+
+const normalizeStatus = (s: TradeStatus): "open" | "pending" | "closed" | "cancelled" | "liquidated" => {
+  if (s === "active") return "open";
+  if (s === "open" || s === "pending" || s === "closed" || s === "cancelled" || s === "liquidated") return s;
+  return "open";
+};
+
+// direction can be buy/sell OR long/short. We store long/short for consistency.
+const normalizeDirection = (v?: string) => {
+  const x = (v ?? "").toLowerCase().trim();
+  if (x === "buy" || x === "long") return "long";
+  if (x === "sell" || x === "short") return "short";
+  return x || "long";
+};
+
+async function resolveAssetId(symbol: string, marketType: "crypto" | "fx" | "stocks") {
+  // Best effort: if you have assets seeded, use it. If not, just return null.
+  try {
+    const { data } = await supabase
+      .from("assets")
+      .select("id")
+      .eq("symbol", symbol)
+      .limit(1)
+      .maybeSingle();
+    return data?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveTradeToHistory(input: {
   userId: string;
   symbol: string;
 
-  // flexible inputs (so other pages won’t break)
-  marketType?: string;
-  assetType?: string;
-  tradeType?: string;
-  direction?: string;
-
-  // some pages might send these
-  type?: string; // buy/sell
-  side?: string; // long/short
-  status?: string; // open/active/pending/etc
-
+  // new/correct
+  marketType: MarketType;
+  assetType?: string;       // optional
+  tradeType?: string;       // spot/margin/etc
+  direction?: string;       // buy/sell or long/short
   amount: number;
+  quantity: number;
+  leverage: number;
   entryPrice: number;
-
-  quantity?: number;
-  leverage?: number;
-
+  exitPrice?: number | null;
   stopLoss?: number;
   takeProfit?: number;
 
   payoutPercent?: number;
   durationSeconds?: number;
+  expiresAt?: string | null;
 
-  fee?: number;
-  fees?: number; // tolerate your existing "fees" key
-  commission?: number;
+  fee?: number;             // use this for FX fees
+  fees?: number;            // accept old callers
+  commission?: number;      // use for stocks commission
   swap?: number;
 
   sessionId?: string;
+  signalId?: string;
+  isCopyTrade?: boolean;
   idempotencyKey?: string;
-};
 
-const normalizeMarketType = (v?: string): MarketType => {
-  const x = String(v ?? '').toLowerCase();
-  if (x === 'fx' || x === 'forex') return 'fx';
-  if (x === 'stocks' || x === 'stock') return 'stocks';
-  return 'crypto';
-};
+  status?: TradeStatus;
 
-const normalizeAssetType = (v?: string): AssetType => {
-  const x = String(v ?? '').toLowerCase();
-  if (x === 'forex' || x === 'fx') return 'forex';
-  if (x === 'stock' || x === 'stocks') return 'stock';
-  if (x === 'commodity') return 'commodity';
-  if (x === 'index') return 'index';
-  return 'crypto';
-};
-
-const normalizeTradeType = (v?: string, marketType?: MarketType): TradeType => {
-  const x = String(v ?? '').toLowerCase();
-  if (x === 'binary') return 'binary';
-  if (x === 'spot') return 'spot';
-  if (x === 'margin') return 'margin';
-  if (x === 'cfd') return 'cfd';
-  // sensible fallback: FX is usually margin
-  if (marketType === 'fx') return 'margin';
-  return 'spot';
-};
-
-const normalizeDirection = (direction?: string, type?: string, side?: string): Direction => {
-  const d = String(direction ?? '').toLowerCase();
-  if (['up', 'down', 'buy', 'sell', 'long', 'short'].includes(d)) return d as Direction;
-
-  const t = String(type ?? '').toLowerCase();
-  if (t === 'buy') return 'buy';
-  if (t === 'sell') return 'sell';
-
-  const s = String(side ?? '').toLowerCase();
-  if (s === 'long') return 'long';
-  if (s === 'short') return 'short';
-
-  return 'buy';
-};
-
-const normalizeStatus = (v?: string): Status => {
-  const x = String(v ?? '').toLowerCase();
-  // map common app words → your CHECK constraint values
-  if (x === 'open') return 'active';
-  if (x === 'active') return 'active';
-  if (x === 'pending') return 'pending';
-  if (x === 'won') return 'won';
-  if (x === 'lost') return 'lost';
-  if (x === 'closed') return 'closed';
-  if (x === 'cancelled') return 'cancelled';
-  if (x === 'expired') return 'expired';
-  return 'active';
-};
-
-export async function saveTradeToHistory(input: SaveTradeInput) {
-  if (!isSupabaseConfigured()) return { success: false, error: 'Supabase not configured' };
+  // old callers (stocks page)
+  type?: string; // buy/sell
+  side?: string; // long/short
+}) {
+  if (!isSupabaseConfigured()) return { success: false, error: "Supabase not configured" };
 
   const market_type = normalizeMarketType(input.marketType);
-  const asset_type = normalizeAssetType(input.assetType);
-  const trade_type = normalizeTradeType(input.tradeType, market_type);
-  const direction = normalizeDirection(input.direction, input.type, input.side);
-  const status = normalizeStatus(input.status);
+  const status = normalizeStatus(input.status ?? "open");
 
-  const fee = Number(input.fee ?? input.fees ?? 0) || 0;
+  const direction =
+    normalizeDirection(input.direction ?? input.side ?? input.type);
 
-  const row = {
+  const asset_id = await resolveAssetId(input.symbol, market_type);
+
+  const idempotency_key =
+    input.idempotencyKey ??
+    input.sessionId ??
+    `${input.userId}:${market_type}:${input.symbol}:${Date.now()}`;
+
+  const payload: any = {
     user_id: input.userId,
+    asset_id, // may be null if assets not seeded
     symbol: input.symbol,
-
-    market_type,
-    asset_type,
-    trade_type,
+    asset_type: input.assetType ?? market_type,
+    trade_type: input.tradeType ?? "spot",
     direction,
-
     amount: input.amount,
-    quantity: input.quantity ?? null,
-    leverage: input.leverage ?? 1,
-
+    quantity: input.quantity,
+    leverage: input.leverage,
     entry_price: input.entryPrice,
-    exit_price: null,
-
+    exit_price: input.exitPrice ?? null,
     stop_loss: input.stopLoss ?? null,
     take_profit: input.takeProfit ?? null,
-
-    payout_percent: input.payoutPercent ?? 85,
+    payout_percent: input.payoutPercent ?? null,
     duration_seconds: input.durationSeconds ?? null,
-
+    expires_at: input.expiresAt ?? null,
     status,
-    profit_loss: 0,
+    profit_loss: null,
     payout_amount: null,
-
-    fee,
-    commission: input.commission ?? 0,
-    swap: input.swap ?? 0,
-
+    fee: input.fee ?? input.fees ?? null,
+    commission: input.commission ?? null,
+    swap: input.swap ?? null,
     session_id: input.sessionId ?? null,
-    idempotency_key: input.idempotencyKey ?? null,
+    signal_id: input.signalId ?? null,
+    is_copy_trade: input.isCopyTrade ?? false,
+    idempotency_key,
+    opened_at: new Date().toISOString(),
+    market_type,
   };
 
-  const { data, error } = await supabase.from('trades').insert(row).select('id').single();
+  const { data, error } = await supabase
+    .from("trade") // ✅ your real table
+    .insert(payload)
+    .select("id")
+    .single();
+
   if (error) return { success: false, error: error.message };
-  return { success: true, id: data?.id as string };
+  return { success: true, tradeId: data?.id as string };
 }
 
-export type CloseTradeInput = {
+export async function closeTradeInHistory(input: {
   userId: string;
   symbol: string;
   exitPrice: number;
   pnl: number;
-  status?: 'closed' | 'won' | 'lost';
-  sessionId?: string; // best matching key
-};
+  status?: "closed" | "liquidated" | "cancelled";
+  tradeId?: string;
+  sessionId?: string;
+}) {
+  if (!isSupabaseConfigured()) return { success: false, error: "Supabase not configured" };
 
-export async function closeTradeInHistory(input: CloseTradeInput) {
-  if (!isSupabaseConfigured()) return { success: false, error: 'Supabase not configured' };
+  const finalStatus = input.status ?? "closed";
 
-  let tradeId: string | null = null;
+  // 1) If we know tradeId, close directly
+  if (input.tradeId) {
+    const { error } = await supabase
+      .from("trade")
+      .update({
+        status: finalStatus,
+        exit_price: input.exitPrice,
+        profit_loss: input.pnl,
+        closed_at: new Date().toISOString(),
+      })
+      .eq("id", input.tradeId)
+      .eq("user_id", input.userId);
 
-  // best: match by session_id (your margin position id)
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  }
+
+  // 2) If we know session_id, close by session_id
   if (input.sessionId) {
-    const { data, error } = await supabase
-      .from('trades')
-      .select('id')
-      .eq('user_id', input.userId)
-      .eq('symbol', input.symbol)
-      .eq('session_id', input.sessionId)
-      .in('status', ['active', 'pending'])
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const { error } = await supabase
+      .from("trade")
+      .update({
+        status: finalStatus,
+        exit_price: input.exitPrice,
+        profit_loss: input.pnl,
+        closed_at: new Date().toISOString(),
+      })
+      .eq("session_id", input.sessionId)
+      .eq("user_id", input.userId);
 
     if (error) return { success: false, error: error.message };
-    tradeId = data?.id ?? null;
+    return { success: true };
   }
 
-  // fallback: last active/pending trade for symbol
-  if (!tradeId) {
-    const { data, error } = await supabase
-      .from('trades')
-      .select('id')
-      .eq('user_id', input.userId)
-      .eq('symbol', input.symbol)
-      .in('status', ['active', 'pending'])
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+  // 3) fallback: find latest open trade for this symbol, then close it
+  const { data: openTrade, error: findErr } = await supabase
+    .from("trade")
+    .select("id")
+    .eq("user_id", input.userId)
+    .eq("symbol", input.symbol)
+    .in("status", ["open", "pending"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    if (error) return { success: false, error: error.message };
-    tradeId = data?.id ?? null;
-  }
-
-  if (!tradeId) return { success: false, error: 'No active trade found to close' };
-
-  const finalStatus =
-    input.status ?? (input.pnl > 0 ? 'won' : input.pnl < 0 ? 'lost' : 'closed');
+  if (findErr) return { success: false, error: findErr.message };
+  if (!openTrade?.id) return { success: false, error: "No open trade found to close" };
 
   const { error: updErr } = await supabase
-    .from('trades')
+    .from("trade")
     .update({
-      exit_price: input.exitPrice,
-      closed_at: new Date().toISOString(),
-      profit_loss: input.pnl,
       status: finalStatus,
+      exit_price: input.exitPrice,
+      profit_loss: input.pnl,
+      closed_at: new Date().toISOString(),
     })
-    .eq('id', tradeId)
-    .eq('user_id', input.userId);
+    .eq("id", openTrade.id)
+    .eq("user_id", input.userId);
 
   if (updErr) return { success: false, error: updErr.message };
-  return { success: true, id: tradeId };
+  return { success: true };
 }

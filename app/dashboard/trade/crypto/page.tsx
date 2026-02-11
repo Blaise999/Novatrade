@@ -22,7 +22,32 @@ import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { useSpotTradingStore } from '@/lib/spot-trading-store';
 import type { SpotPosition } from '@/lib/spot-trading-types';
 import KYCGate from '@/components/KYCGate';
-import { closeTradeInHistory } from '@/lib/services/trade-history';
+
+// ============================================================
+// DB LEDGER HELPERS
+// Make sure *every* buy/sell writes a clean row into `trades`
+// so Admin + History can always see it.
+// ============================================================
+
+const getPositionAvgPrice = (position: SpotPosition, fallback: number) => {
+  const p: any = position as any;
+  const n = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+  return (
+    n(p.average_price) ??
+    n(p.avg_price) ??
+    n(p.averagePrice) ??
+    n(p.avgPrice) ??
+    (n(p.total_cost_basis) && n(p.quantity) && p.quantity > 0 ? p.total_cost_basis / p.quantity : null) ??
+    (n(p.totalCostBasis) && n(p.quantity) && p.quantity > 0 ? p.totalCostBasis / p.quantity : null) ??
+    fallback
+  );
+};
+
+const insertTradeRow = async (row: Record<string, any>) => {
+  const { error } = await supabase.from('trades').insert(row);
+  if (error) throw error;
+};
 
 // ============================================
 // TYPES
@@ -598,7 +623,10 @@ export default function CryptoTradingPage() {
       if (!result.success) throw new Error(result.error || 'Trade failed');
 
       if (isSupabaseConfigured()) {
-        await supabase.from('trades').insert({
+        const now = new Date().toISOString();
+
+        // ✅ Ledger row: one row per executed transaction
+        await insertTradeRow({
           user_id: user.id,
           pair: `${selectedSymbol}/USD`,
           symbol: selectedSymbol,
@@ -609,14 +637,16 @@ export default function CryptoTradingPage() {
           quantity: qty,
           entry_price: currentPrice,
           current_price: currentPrice,
+          exit_price: currentPrice,
           leverage: 1,
           margin_used: amount,
           pnl: 0,
           pnl_percentage: 0,
           fees: 0,
-          status: 'open',
+          status: 'closed',
           source: 'live',
-          opened_at: new Date().toISOString(),
+          opened_at: now,
+          closed_at: now,
         });
 
         await refreshUser();
@@ -661,16 +691,37 @@ export default function CryptoTradingPage() {
       if (!result.success) throw new Error(result.error || 'Sell failed');
 
       if (isSupabaseConfigured()) {
-        // ✅ Close the trade in history
-        if (user?.id) {
-          closeTradeInHistory({
-            userId: user.id,
-            symbol: selectedSymbol,
-            exitPrice: currentPrice,
-            pnl: result.realizedPnL ?? 0,
-            status: 'closed',
-          });
-        }
+        const now = new Date().toISOString();
+        const entryGuess = getPositionAvgPrice(position, currentPrice);
+        const pnl = Number(result.realizedPnL ?? 0);
+
+        const soldNotional = sellQty * currentPrice;
+        const soldCostBasis = sellQty * entryGuess;
+        const pnlPct = soldCostBasis > 0 ? (pnl / soldCostBasis) * 100 : 0;
+
+        // ✅ Ledger row: one row per executed transaction
+        await insertTradeRow({
+          user_id: user.id,
+          pair: `${selectedSymbol}/USD`,
+          symbol: selectedSymbol,
+          market_type: 'crypto',
+          type: 'sell',
+          side: 'long',
+          amount: soldNotional,
+          quantity: sellQty,
+          entry_price: entryGuess,
+          current_price: currentPrice,
+          exit_price: currentPrice,
+          leverage: 1,
+          margin_used: soldNotional,
+          pnl,
+          pnl_percentage: pnlPct,
+          fees: 0,
+          status: 'closed',
+          source: 'live',
+          opened_at: now,
+          closed_at: now,
+        });
 
         await refreshUser();
         await loadTrades();
