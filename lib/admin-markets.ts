@@ -1,684 +1,432 @@
 // lib/admin-markets.ts
+'use client';
+
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
-// ============================================
-// HYBRID MARKET ARCHITECTURE
-// ============================================
-// - Standard pairs: Real market data (simulated here)
-// - Admin-controlled pairs: Rare/exotic FX (local store)
-// ============================================
+export type TimestampInput = number | Date | string | null | undefined;
 
-// ✅ admin-controlled rare pairs (NO NGN)
-export const ADMIN_CONTROLLED_PAIRS = [
-  'USD/TRY',
-  'USD/ZAR',
-  'USD/BRL',
-  'USD/MXN',
-  'USD/PLN',
-  'USD/ISK',
-] as const;
+export function toTimestamp(input: TimestampInput): number {
+  // Canonical: ms since epoch
+  if (typeof input === 'number' && Number.isFinite(input)) {
+    // If someone passed seconds (10 digits-ish), convert to ms
+    if (input > 0 && input < 1e12) return Math.round(input * 1000);
+    return Math.round(input);
+  }
 
-export type AdminControlledPair = (typeof ADMIN_CONTROLLED_PAIRS)[number];
+  if (input instanceof Date) {
+    const ms = input.getTime();
+    return Number.isFinite(ms) ? ms : Date.now();
+  }
 
-// ✅ type guard (better than boolean include)
-export function isAdminControlledPair(symbol: string): symbol is AdminControlledPair {
-  return (ADMIN_CONTROLLED_PAIRS as readonly string[]).includes(symbol);
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+
+    // numeric string
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      const n = Number(trimmed);
+      if (Number.isFinite(n)) {
+        if (n > 0 && n < 1e12) return Math.round(n * 1000);
+        return Math.round(n);
+      }
+    }
+
+    // ISO / date string
+    const d = new Date(trimmed);
+    const ms = d.getTime();
+    return Number.isFinite(ms) ? ms : Date.now();
+  }
+
+  return Date.now();
 }
 
-// ✅ Candle format used across the app (serializable + FX page friendly)
+export interface CustomPair {
+  id: string;      // stable key used everywhere
+  symbol: string;  // display symbol
+  name: string;
+  basePrice: number;
+}
+
 export interface OHLCCandle {
   id: string;
-  pairId: string;
-  timestamp: number; // ms since epoch (NOT Date) => safe for persist + no TS instanceof drama
+  timestamp: number; // ✅ ms since epoch (persist-safe)
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number;
-  isSimulated?: boolean;
 }
 
-// Alias for backward compatibility
+// Some pages import `Candle` for charts
 export type Candle = OHLCCandle;
 
-// Pair configuration
-export interface CustomPair {
-  id: string; // should equal symbol (e.g., "USD/TRY")
-  symbol: string;
-  name: string;
-  description: string;
-  basePrice: number;
-  pipSize: number;
-  leverageMax: number;
-  spreadPips: number;
-  isActive: boolean;
+type PriceQuote = { bid: number; ask: number };
+
+type CandleDraft = Omit<OHLCCandle, 'id' | 'timestamp'> & {
+  id?: string;
+  timestamp?: TimestampInput;
+};
+
+type CandlePatch = Partial<OHLCCandle> & {
+  timestamp?: TimestampInput;
+};
+
+function clampNum(n: unknown, fallback = 0): number {
+  const x = typeof n === 'number' ? n : Number(n);
+  return Number.isFinite(x) ? x : fallback;
 }
 
-// Price data (serializable)
-export interface PriceData {
-  bid: number;
-  ask: number;
-  timestamp: number; // ms since epoch
+function newId(): string {
+  // stable enough for UI keys
+  return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-// ✅ Initial rare pairs (admin-controlled)
-const initialCustomPairs: CustomPair[] = [
-  {
-    id: 'USD/TRY',
-    symbol: 'USD/TRY',
-    name: 'US Dollar / Turkish Lira',
-    description: 'Exotic FX pair (high volatility / wider spreads)',
-    basePrice: 32.15,
-    pipSize: 0.0001,
-    leverageMax: 50,
-    spreadPips: 25,
-    isActive: true,
-  },
-  {
-    id: 'USD/ZAR',
-    symbol: 'USD/ZAR',
-    name: 'US Dollar / South African Rand',
-    description: 'Exotic FX pair (EM volatility / commodity sensitivity)',
-    basePrice: 19.05,
-    pipSize: 0.0001,
-    leverageMax: 50,
-    spreadPips: 18,
-    isActive: true,
-  },
-  {
-    id: 'USD/BRL',
-    symbol: 'USD/BRL',
-    name: 'US Dollar / Brazilian Real',
-    description: 'Exotic FX pair (bigger intraday ranges)',
-    basePrice: 4.95,
-    pipSize: 0.0001,
-    leverageMax: 50,
-    spreadPips: 12,
-    isActive: true,
-  },
-  {
-    id: 'USD/MXN',
-    symbol: 'USD/MXN',
-    name: 'US Dollar / Mexican Peso',
-    description: 'Exotic FX pair (often liquid, still volatile)',
-    basePrice: 17.12,
-    pipSize: 0.0001,
-    leverageMax: 75,
-    spreadPips: 10,
-    isActive: true,
-  },
-  {
-    id: 'USD/PLN',
-    symbol: 'USD/PLN',
-    name: 'US Dollar / Polish Zloty',
-    description: 'Less common Europe pair (risk-on/risk-off swings)',
-    basePrice: 4.01,
-    pipSize: 0.0001,
-    leverageMax: 75,
-    spreadPips: 8,
-    isActive: true,
-  },
-  {
-    id: 'USD/ISK',
-    symbol: 'USD/ISK',
-    name: 'US Dollar / Icelandic Krona',
-    description: 'Very rare pair (low liquidity; larger spreads)',
-    basePrice: 138.2,
-    pipSize: 0.01, // ISK-style quoting
-    leverageMax: 25,
-    spreadPips: 30,
-    isActive: true,
-  },
-];
+function normalizeCandleDraft(draft: CandleDraft): OHLCCandle {
+  const ts = toTimestamp(draft.timestamp);
+  const o = clampNum(draft.open);
+  const h = clampNum(draft.high);
+  const l = clampNum(draft.low);
+  const c = clampNum(draft.close);
+  const v = clampNum(draft.volume);
 
-// ---------- small utils ----------
-const generateId = () => `c_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    id: draft.id ?? newId(),
+    timestamp: ts,
+    open: o,
+    high: h,
+    low: l,
+    close: c,
+    volume: v,
+  };
+}
 
-const toNum = (v: unknown, fallback = 0) => {
-  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
-  return Number.isFinite(n) ? n : fallback;
-};
+function sortByTimestampAsc(a: OHLCCandle, b: OHLCCandle) {
+  return a.timestamp - b.timestamp;
+}
 
-const toTimestamp = (v: unknown): number => {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (v instanceof Date) return v.getTime();
-  if (typeof v === 'string') {
-    const asNum = Number(v);
-    if (Number.isFinite(asNum)) return asNum;
-    const d = new Date(v);
-    const t = d.getTime();
-    if (Number.isFinite(t)) return t;
-  }
-  return Date.now();
-};
-
-export type CandleInput = Omit<OHLCCandle, 'id' | 'pairId' | 'timestamp'> & {
-  timestamp: number | Date | string;
-  isSimulated?: boolean;
-};
-
-// Admin market store state
-interface AdminMarketState {
+interface AdminMarketStore {
   customPairs: CustomPair[];
-
-  // Price data for admin-controlled pairs
-  currentPrices: Record<string, PriceData>;
-
-  // Historical candles for admin-controlled pairs
   candles: Record<string, OHLCCandle[]>;
-
-  // ✅ Per-pair pause map
+  currentPrices: Record<string, PriceQuote>;
   isPaused: Record<string, boolean>;
 
-  // Actions
   setCurrentPrice: (pairId: string, bid: number, ask: number) => void;
   pauseTrading: (pairId: string) => void;
   resumeTrading: (pairId: string) => void;
 
-  addCandle: (pairId: string, candle: CandleInput) => void;
-  editCandle: (pairId: string, candleId: string, updates: Partial<OHLCCandle>) => void;
-  deleteCandle: (pairId: string, candleId: string) => void;
+  addCandle: (pairId: string, candle: CandleDraft) => void;
+  editCandle: (pairId: string, candleId: string, patch: CandlePatch) => void;
   clearCandles: (pairId: string) => void;
 
-  // Pattern generators
-  generateBullFlag: (pairId: string, basePrice: number, opts?: { clearFirst?: boolean }) => void;
-  generateHeadAndShoulders: (pairId: string, basePrice: number, opts?: { clearFirst?: boolean }) => void;
-  generateDoubleBottom: (pairId: string, basePrice: number, opts?: { clearFirst?: boolean }) => void;
-  generateBreakout: (
-    pairId: string,
-    basePrice: number,
-    direction: 'up' | 'down',
-    opts?: { clearFirst?: boolean }
-  ) => void;
+  generateBullFlag: (pairId: string, basePrice: number) => void;
+  generateHeadAndShoulders: (pairId: string, basePrice: number) => void;
+  generateDoubleBottom: (pairId: string, basePrice: number) => void;
+  generateBreakout: (pairId: string, basePrice: number, dir: 'up' | 'down') => void;
 }
 
-// Generate initial prices
-const generateInitialPrices = (): Record<string, PriceData> => {
-  const prices: Record<string, PriceData> = {};
-  for (const pair of initialCustomPairs) {
-    const spread = pair.spreadPips * pair.pipSize;
-    prices[pair.id] = {
-      bid: pair.basePrice,
-      ask: pair.basePrice + spread,
-      timestamp: Date.now(),
-    };
-  }
-  return prices;
-};
-
-// Generate initial pause state
-const generateInitialPauseState = (): Record<string, boolean> => {
-  const state: Record<string, boolean> = {};
-  for (const pair of initialCustomPairs) state[pair.id] = false;
-  return state;
-};
-
-// Generate initial empty candles
-const generateInitialCandles = (): Record<string, OHLCCandle[]> => {
-  const out: Record<string, OHLCCandle[]> = {};
-  for (const pair of initialCustomPairs) out[pair.id] = [];
-  return out;
-};
-
-// ✅ safe storage (won’t crash on server)
-const safeSessionStorage = {
-  getItem: (name: string) => {
-    if (typeof window === 'undefined') return null;
-    return window.sessionStorage.getItem(name);
-  },
-  setItem: (name: string, value: string) => {
-    if (typeof window === 'undefined') return;
-    window.sessionStorage.setItem(name, value);
-  },
-  removeItem: (name: string) => {
-    if (typeof window === 'undefined') return;
-    window.sessionStorage.removeItem(name);
-  },
-};
-
-const ALLOWED_ADMIN_KEYS = new Set<string>(initialCustomPairs.map((p) => p.id));
-
-export const useAdminMarketStore = create<AdminMarketState>()(
+export const useAdminMarketStore = create<AdminMarketStore>()(
   persist(
     (set, get) => ({
-      customPairs: initialCustomPairs,
-      currentPrices: generateInitialPrices(),
-      candles: generateInitialCandles(),
-      isPaused: generateInitialPauseState(),
+      customPairs: [
+        { id: 'DEMO/USD', symbol: 'DEMO/USD', name: 'Demo Pair', basePrice: 1 },
+      ],
+
+      candles: {},
+      currentPrices: {},
+      isPaused: {},
 
       setCurrentPrice: (pairId, bid, ask) => {
-        const b = toNum(bid);
-        const a = toNum(ask);
-        if (!Number.isFinite(b) || !Number.isFinite(a)) return;
-
-        set((state) => ({
-          currentPrices: {
-            ...state.currentPrices,
-            [pairId]: { bid: b, ask: a, timestamp: Date.now() },
-          },
+        const b = clampNum(bid);
+        const a = clampNum(ask);
+        set((s) => ({
+          currentPrices: { ...s.currentPrices, [pairId]: { bid: b, ask: a } },
         }));
       },
 
       pauseTrading: (pairId) => {
-        set((state) => ({
-          isPaused: { ...state.isPaused, [pairId]: true },
-        }));
+        set((s) => ({ isPaused: { ...s.isPaused, [pairId]: true } }));
       },
 
       resumeTrading: (pairId) => {
-        set((state) => ({
-          isPaused: { ...state.isPaused, [pairId]: false },
-        }));
+        set((s) => ({ isPaused: { ...s.isPaused, [pairId]: false } }));
       },
 
-      addCandle: (pairId, candle) => {
-        const newCandle: OHLCCandle = {
-          id: generateId(),
-          pairId,
-          timestamp: toTimestamp(candle.timestamp),
-          open: toNum(candle.open),
-          high: toNum(candle.high),
-          low: toNum(candle.low),
-          close: toNum(candle.close),
-          volume: toNum(candle.volume, 0),
-          isSimulated: !!candle.isSimulated,
-        };
+      addCandle: (pairId, candleDraft) => {
+        const candle = normalizeCandleDraft(candleDraft);
 
-        // basic sanity
-        if (
-          !Number.isFinite(newCandle.open) ||
-          !Number.isFinite(newCandle.high) ||
-          !Number.isFinite(newCandle.low) ||
-          !Number.isFinite(newCandle.close)
-        ) {
-          return;
-        }
+        set((s) => {
+          const prev = s.candles[pairId] ?? [];
+          const next = [...prev, candle].sort(sortByTimestampAsc);
 
-        set((state) => ({
-          candles: {
-            ...state.candles,
-            [pairId]: [...(state.candles[pairId] || []), newCandle].slice(-500),
-          },
-        }));
+          // keep it sane
+          const trimmed = next.length > 600 ? next.slice(-600) : next;
+
+          return { candles: { ...s.candles, [pairId]: trimmed } };
+        });
       },
 
-      editCandle: (pairId, candleId, updates) => {
-        set((state) => ({
-          candles: {
-            ...state.candles,
-            [pairId]: (state.candles[pairId] || []).map((c) => {
-              if (c.id !== candleId) return c;
+      editCandle: (pairId, candleId, patch) => {
+        set((s) => {
+          const prev = s.candles[pairId] ?? [];
+          if (!prev.length) return s;
 
-              const next: OHLCCandle = {
-                ...c,
-                ...updates,
-                timestamp: updates.timestamp ? toTimestamp(updates.timestamp) : c.timestamp,
-                open: updates.open !== undefined ? toNum(updates.open) : c.open,
-                high: updates.high !== undefined ? toNum(updates.high) : c.high,
-                low: updates.low !== undefined ? toNum(updates.low) : c.low,
-                close: updates.close !== undefined ? toNum(updates.close) : c.close,
-                volume: updates.volume !== undefined ? toNum(updates.volume) : c.volume,
-              };
+          const next = prev.map((c) => {
+            if (c.id !== candleId) return c;
 
-              return next;
-            }),
-          },
-        }));
-      },
+            const ts = patch.timestamp !== undefined ? toTimestamp(patch.timestamp) : c.timestamp;
 
-      deleteCandle: (pairId, candleId) => {
-        set((state) => ({
-          candles: {
-            ...state.candles,
-            [pairId]: (state.candles[pairId] || []).filter((c) => c.id !== candleId),
-          },
-        }));
+            return {
+              ...c,
+              ...patch,
+              timestamp: ts, // ✅ always number
+              open: patch.open !== undefined ? clampNum(patch.open, c.open) : c.open,
+              high: patch.high !== undefined ? clampNum(patch.high, c.high) : c.high,
+              low: patch.low !== undefined ? clampNum(patch.low, c.low) : c.low,
+              close: patch.close !== undefined ? clampNum(patch.close, c.close) : c.close,
+              volume: patch.volume !== undefined ? clampNum(patch.volume, c.volume) : c.volume,
+            };
+          });
+
+          next.sort(sortByTimestampAsc);
+
+          return { candles: { ...s.candles, [pairId]: next } };
+        });
       },
 
       clearCandles: (pairId) => {
-        set((state) => ({
-          candles: {
-            ...state.candles,
-            [pairId]: [],
-          },
+        set((s) => ({ candles: { ...s.candles, [pairId]: [] } }));
+      },
+
+      generateBullFlag: (pairId, basePrice) => {
+        const now = Date.now();
+        const intervalMs = 5 * 60 * 1000;
+
+        const start = basePrice;
+        const up1 = start * 1.02;
+        const up2 = start * 1.04;
+
+        const candles: OHLCCandle[] = [];
+
+        // pump up
+        for (let i = 0; i < 12; i++) {
+          const t = now - (30 - i) * intervalMs;
+          const o = start + (up1 - start) * (i / 11);
+          const c = o + (Math.random() * 0.0006);
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.0008,
+            low: Math.min(o, c) - Math.random() * 0.0006,
+            close: c,
+            volume: 800 + Math.random() * 1200,
+          });
+        }
+
+        // flag consolidation
+        for (let i = 0; i < 10; i++) {
+          const t = now - (18 - i) * intervalMs;
+          const center = up1;
+          const wiggle = (Math.random() - 0.5) * 0.002;
+          const o = center + wiggle;
+          const c = center + (Math.random() - 0.5) * 0.002;
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.001,
+            low: Math.min(o, c) - Math.random() * 0.001,
+            close: c,
+            volume: 500 + Math.random() * 900,
+          });
+        }
+
+        // breakout
+        for (let i = 0; i < 8; i++) {
+          const t = now - (8 - i) * intervalMs;
+          const o = up1 + (up2 - up1) * (i / 7);
+          const c = o + Math.random() * 0.0012;
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.0014,
+            low: Math.min(o, c) - Math.random() * 0.0008,
+            close: c,
+            volume: 900 + Math.random() * 1400,
+          });
+        }
+
+        candles.sort(sortByTimestampAsc);
+
+        set((s) => ({
+          candles: { ...s.candles, [pairId]: candles },
         }));
       },
 
-      // ---------------------------
-      // PATTERN GENERATORS
-      // ---------------------------
-      generateBullFlag: (pairId, basePrice, opts) => {
-        const { addCandle, setCurrentPrice, clearCandles } = get();
-        if (opts?.clearFirst) clearCandles(pairId);
+      generateHeadAndShoulders: (pairId, basePrice) => {
+        const now = Date.now();
+        const intervalMs = 5 * 60 * 1000;
 
-        const candles: CandleInput[] = [];
-        let t = Date.now() - 20 * 60_000;
-        let price = basePrice;
+        const candles: OHLCCandle[] = [];
+        const pts = [
+          basePrice * 1.01,
+          basePrice * 1.03, // left shoulder
+          basePrice * 1.02,
+          basePrice * 1.05, // head
+          basePrice * 1.02,
+          basePrice * 1.03, // right shoulder
+          basePrice * 1.01,
+          basePrice * 0.99, // break
+        ];
 
-        // Phase 1: Strong upward move (5)
-        for (let i = 0; i < 5; i++) {
-          const change = basePrice * 0.003 * (1 + Math.random() * 0.5);
-          const open = price;
-          const close = price + change;
-          const high = close + basePrice * 0.001 * Math.random();
-          const low = open - basePrice * 0.0005 * Math.random();
+        for (let i = 0; i < 40; i++) {
+          const t = now - (40 - i) * intervalMs;
+          const idx = Math.floor((i / 39) * (pts.length - 1));
+          const nextIdx = Math.min(idx + 1, pts.length - 1);
+          const a = pts[idx];
+          const b = pts[nextIdx];
+          const p = a + (b - a) * ((i % 5) / 5);
 
-          candles.push({ timestamp: t, open, high, low, close, volume: 50_000 + Math.random() * 50_000 });
-          price = close;
-          t += 60_000;
+          const o = p + (Math.random() - 0.5) * 0.001;
+          const c = p + (Math.random() - 0.5) * 0.001;
+
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.0012,
+            low: Math.min(o, c) - Math.random() * 0.0012,
+            close: c,
+            volume: 600 + Math.random() * 1000,
+          });
         }
 
-        // Phase 2: Consolidation/Flag (8)
-        const flagTop = price;
-        const flagBottom = price - basePrice * 0.008;
-
-        for (let i = 0; i < 8; i++) {
-          const open = price;
-          const direction = i % 2 === 0 ? -1 : 1;
-          const change = basePrice * 0.002 * direction * (0.5 + Math.random() * 0.5);
-          let close = price + change;
-          close = Math.max(flagBottom, Math.min(flagTop, close));
-          const high = Math.max(open, close) + basePrice * 0.001 * Math.random();
-          const low = Math.min(open, close) - basePrice * 0.001 * Math.random();
-
-          candles.push({ timestamp: t, open, high, low, close, volume: 20_000 + Math.random() * 30_000 });
-          price = close;
-          t += 60_000;
-        }
-
-        // Phase 3: Breakout (5)
-        for (let i = 0; i < 5; i++) {
-          const change = basePrice * 0.004 * (1 + Math.random() * 0.5);
-          const open = price;
-          const close = price + change;
-          const high = close + basePrice * 0.002 * Math.random();
-          const low = open - basePrice * 0.001 * Math.random();
-
-          candles.push({ timestamp: t, open, high, low, close, volume: 60_000 + Math.random() * 40_000 });
-          price = close;
-          t += 60_000;
-        }
-
-        candles.forEach((c) => addCandle(pairId, { ...c, isSimulated: true }));
-        const last = candles[candles.length - 1];
-        setCurrentPrice(pairId, last.close, last.close + basePrice * 0.0002);
+        candles.sort(sortByTimestampAsc);
+        set((s) => ({ candles: { ...s.candles, [pairId]: candles } }));
       },
 
-      generateHeadAndShoulders: (pairId, basePrice, opts) => {
-        const { addCandle, setCurrentPrice, clearCandles } = get();
-        if (opts?.clearFirst) clearCandles(pairId);
+      generateDoubleBottom: (pairId, basePrice) => {
+        const now = Date.now();
+        const intervalMs = 5 * 60 * 1000;
 
-        const candles: CandleInput[] = [];
-        let t = Date.now() - 25 * 60_000;
-        let price = basePrice;
+        const candles: OHLCCandle[] = [];
+        const top = basePrice * 1.02;
+        const bot = basePrice * 0.98;
 
-        const push = (open: number, close: number, volBase: number) => {
-          const high = Math.max(open, close) + basePrice * 0.001 * Math.random();
-          const low = Math.min(open, close) - basePrice * 0.001 * Math.random();
-          candles.push({ timestamp: t, open, high, low, close, volume: volBase + Math.random() * volBase });
-          price = close;
-          t += 60_000;
-        };
+        const path = [
+          top,
+          bot,
+          basePrice * 1.005,
+          bot,
+          top,
+          basePrice * 1.03,
+        ];
 
-        // Left shoulder (5 up, 3 down)
-        for (let i = 0; i < 5; i++) push(price, price + basePrice * 0.002 * (1 + Math.random() * 0.3), 40_000);
-        for (let i = 0; i < 3; i++) push(price, price - basePrice * 0.002 * (1 + Math.random() * 0.3), 30_000);
+        for (let i = 0; i < 45; i++) {
+          const t = now - (45 - i) * intervalMs;
+          const idx = Math.floor((i / 44) * (path.length - 1));
+          const nextIdx = Math.min(idx + 1, path.length - 1);
+          const a = path[idx];
+          const b = path[nextIdx];
+          const p = a + (b - a) * ((i % 6) / 6);
 
-        // Head (6 up, 4 down)
-        for (let i = 0; i < 6; i++) push(price, price + basePrice * 0.003 * (1 + Math.random() * 0.3), 50_000);
-        for (let i = 0; i < 4; i++) push(price, price - basePrice * 0.003 * (1 + Math.random() * 0.3), 35_000);
+          const o = p + (Math.random() - 0.5) * 0.001;
+          const c = p + (Math.random() - 0.5) * 0.001;
 
-        // Right shoulder (4 up, 5 breakdown)
-        for (let i = 0; i < 4; i++) push(price, price + basePrice * 0.0015 * (1 + Math.random() * 0.3), 25_000);
-        for (let i = 0; i < 5; i++) push(price, price - basePrice * 0.004 * (1 + Math.random() * 0.5), 55_000);
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.001,
+            low: Math.min(o, c) - Math.random() * 0.001,
+            close: c,
+            volume: 650 + Math.random() * 1100,
+          });
+        }
 
-        candles.forEach((c) => addCandle(pairId, { ...c, isSimulated: true }));
-        const last = candles[candles.length - 1];
-        setCurrentPrice(pairId, last.close, last.close + basePrice * 0.0002);
+        candles.sort(sortByTimestampAsc);
+        set((s) => ({ candles: { ...s.candles, [pairId]: candles } }));
       },
 
-      generateDoubleBottom: (pairId, basePrice, opts) => {
-        const { addCandle, setCurrentPrice, clearCandles } = get();
-        if (opts?.clearFirst) clearCandles(pairId);
+      generateBreakout: (pairId, basePrice, dir) => {
+        const now = Date.now();
+        const intervalMs = 5 * 60 * 1000;
 
-        const candles: CandleInput[] = [];
-        let t = Date.now() - 22 * 60_000;
-        let price = basePrice;
+        const candles: OHLCCandle[] = [];
 
-        const push = (open: number, close: number, volBase: number) => {
-          const high = Math.max(open, close) + basePrice * 0.001 * Math.random();
-          const low = Math.min(open, close) - basePrice * 0.001 * Math.random();
-          candles.push({ timestamp: t, open, high, low, close, volume: volBase + Math.random() * volBase });
-          price = close;
-          t += 60_000;
-        };
+        // flat
+        for (let i = 0; i < 28; i++) {
+          const t = now - (36 - i) * intervalMs;
+          const center = basePrice;
+          const o = center + (Math.random() - 0.5) * 0.0015;
+          const c = center + (Math.random() - 0.5) * 0.0015;
 
-        // Drop (5)
-        for (let i = 0; i < 5; i++) push(price, price - basePrice * 0.003 * (1 + Math.random() * 0.3), 40_000);
-        const bottom = price;
-
-        // Bounce (4)
-        for (let i = 0; i < 4; i++) push(price, price + basePrice * 0.002 * (1 + Math.random() * 0.3), 30_000);
-
-        // Retest (4)
-        for (let i = 0; i < 4; i++) {
-          let close = price - basePrice * 0.002 * (1 + Math.random() * 0.3);
-          if (i === 3) close = bottom + basePrice * 0.001;
-          push(price, close, 35_000);
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.0012,
+            low: Math.min(o, c) - Math.random() * 0.0012,
+            close: c,
+            volume: 500 + Math.random() * 800,
+          });
         }
 
-        // Rally (6)
-        for (let i = 0; i < 6; i++) push(price, price + basePrice * 0.004 * (1 + Math.random() * 0.5), 55_000);
+        // break
+        for (let i = 0; i < 10; i++) {
+          const t = now - (10 - i) * intervalMs;
+          const move = (basePrice * 0.02) * (i / 9) * (dir === 'up' ? 1 : -1);
+          const o = basePrice + move;
+          const c = o + (Math.random() * 0.001) * (dir === 'up' ? 1 : -1);
 
-        candles.forEach((c) => addCandle(pairId, { ...c, isSimulated: true }));
-        const last = candles[candles.length - 1];
-        setCurrentPrice(pairId, last.close, last.close + basePrice * 0.0002);
-      },
-
-      generateBreakout: (pairId, basePrice, direction, opts) => {
-        const { addCandle, setCurrentPrice, clearCandles } = get();
-        if (opts?.clearFirst) clearCandles(pairId);
-
-        const candles: CandleInput[] = [];
-        let t = Date.now() - 18 * 60_000;
-        let price = basePrice;
-        const top = basePrice * 1.005;
-        const bot = basePrice * 0.995;
-
-        // Consolidation (12)
-        for (let i = 0; i < 12; i++) {
-          const open = price;
-          const dir = Math.random() > 0.5 ? 1 : -1;
-          let close = price + dir * basePrice * 0.002 * Math.random();
-          close = Math.max(bot, Math.min(top, close));
-          const high = Math.max(open, close) + basePrice * 0.001 * Math.random();
-          const low = Math.min(open, close) - basePrice * 0.001 * Math.random();
-
-          candles.push({ timestamp: t, open, high, low, close, volume: 20_000 + Math.random() * 25_000 });
-          price = close;
-          t += 60_000;
+          candles.push({
+            id: newId(),
+            timestamp: t,
+            open: o,
+            high: Math.max(o, c) + Math.random() * 0.0016,
+            low: Math.min(o, c) - Math.random() * 0.0016,
+            close: c,
+            volume: 900 + Math.random() * 1500,
+          });
         }
 
-        // Breakout (6)
-        for (let i = 0; i < 6; i++) {
-          const change = basePrice * 0.005 * (1 + Math.random() * 0.5);
-          const open = price;
-          const close = direction === 'up' ? price + change : price - change;
-          const high =
-            direction === 'up'
-              ? close + basePrice * 0.002 * Math.random()
-              : open + basePrice * 0.001 * Math.random();
-          const low =
-            direction === 'up'
-              ? open - basePrice * 0.001 * Math.random()
-              : close - basePrice * 0.002 * Math.random();
-
-          candles.push({ timestamp: t, open, high, low, close, volume: 60_000 + Math.random() * 50_000 });
-          price = close;
-          t += 60_000;
-        }
-
-        candles.forEach((c) => addCandle(pairId, { ...c, isSimulated: true }));
-        const last = candles[candles.length - 1];
-        setCurrentPrice(pairId, last.close, last.close + basePrice * 0.0002);
+        candles.sort(sortByTimestampAsc);
+        set((s) => ({ candles: { ...s.candles, [pairId]: candles } }));
       },
     }),
     {
-      name: 'admin-markets-storage',
-      version: 3, // ✅ bump to force fresh migrate away from NOVA/DEMO/TRD
-      storage: createJSONStorage(() => safeSessionStorage),
-      partialize: (state) => ({
-        customPairs: state.customPairs,
-        candles: state.candles,
-        currentPrices: state.currentPrices,
-        isPaused: state.isPaused,
+      name: 'novatrade_admin_markets_v1',
+      storage: createJSONStorage(() => localStorage),
+      version: 1,
+      partialize: (s) => ({
+        customPairs: s.customPairs,
+        candles: s.candles,
+        currentPrices: s.currentPrices,
+        isPaused: s.isPaused,
       }),
-      migrate: (persisted: any) => {
-        // ✅ prune old stored pairs + normalize timestamps
-        const next = persisted ?? {};
-
-        // candles
-        const rawCandles = (next.candles ?? {}) as Record<string, any[]>;
-        const fixedCandles: Record<string, OHLCCandle[]> = {};
-        for (const pair of initialCustomPairs) fixedCandles[pair.id] = [];
-
-        for (const k of Object.keys(rawCandles)) {
-          if (!ALLOWED_ADMIN_KEYS.has(k)) continue;
-          const arr = Array.isArray(rawCandles[k]) ? rawCandles[k] : [];
-          fixedCandles[k] = arr
-            .map((c) => ({
-              id: String(c?.id ?? generateId()),
-              pairId: String(c?.pairId ?? k),
-              timestamp: toTimestamp(c?.timestamp),
-              open: toNum(c?.open),
-              high: toNum(c?.high),
-              low: toNum(c?.low),
-              close: toNum(c?.close),
-              volume: toNum(c?.volume, 0),
-              isSimulated: !!c?.isSimulated,
-            }))
-            .filter(
-              (c) =>
-                Number.isFinite(c.open) &&
-                Number.isFinite(c.high) &&
-                Number.isFinite(c.low) &&
-                Number.isFinite(c.close)
-            )
-            .slice(-500);
-        }
-
-        // prices
-        const rawPrices = (next.currentPrices ?? {}) as Record<string, any>;
-        const fixedPrices: Record<string, PriceData> = generateInitialPrices();
-        for (const k of Object.keys(rawPrices)) {
-          if (!ALLOWED_ADMIN_KEYS.has(k)) continue;
-          fixedPrices[k] = {
-            bid: toNum(rawPrices[k]?.bid, fixedPrices[k]?.bid ?? 0),
-            ask: toNum(rawPrices[k]?.ask, fixedPrices[k]?.ask ?? 0),
-            timestamp: toTimestamp(rawPrices[k]?.timestamp),
-          };
-        }
-
-        // pause
-        const rawPaused = (next.isPaused ?? {}) as Record<string, any>;
-        const fixedPaused: Record<string, boolean> = generateInitialPauseState();
-        for (const k of Object.keys(rawPaused)) {
-          if (!ALLOWED_ADMIN_KEYS.has(k)) continue;
-          fixedPaused[k] = !!rawPaused[k];
-        }
-
-        return {
-          ...next,
-          customPairs: initialCustomPairs,
-          candles: fixedCandles,
-          currentPrices: fixedPrices,
-          isPaused: fixedPaused,
-        };
-      },
     }
   )
 );
 
-// ============================================
-// HELPER FUNCTIONS
-// ============================================
-
-// Base price for any symbol (standard + admin rare)
-function getBasePrice(symbol: string): number {
-  const prices: Record<string, number> = {
-    // Majors (for simulated "real" list)
-    'EUR/USD': 1.085,
-    'GBP/USD': 1.265,
-    'USD/JPY': 149.5,
-    'AUD/USD': 0.658,
-    'USD/CAD': 1.345,
-    'USD/CHF': 0.895,
-    'NZD/USD': 0.615,
-
-    // ✅ Rare admin pairs
-    'USD/TRY': 32.15,
-    'USD/ZAR': 19.05,
-    'USD/BRL': 4.95,
-    'USD/MXN': 17.12,
-    'USD/PLN': 4.01,
-    'USD/ISK': 138.2,
-  };
-
-  return prices[symbol] || 1.0;
+// Helpers some pages expect
+export function isAdminControlledPair(pairId: string): boolean {
+  const { customPairs } = useAdminMarketStore.getState();
+  return (customPairs ?? []).some((p) => p.id === pairId || p.symbol === pairId);
 }
 
-// Fetch simulated “real” market data
-export async function fetchRealMarketData(
-  symbol: string,
-  timeframe: string = '1m',
-  limit: number = 100
-): Promise<Candle[]> {
-  const candles: Candle[] = [];
-  const base = getBasePrice(symbol);
+export function getMarketData(pairId: string): {
+  price: PriceQuote;
+  candles: OHLCCandle[];
+  paused: boolean;
+} {
+  const s = useAdminMarketStore.getState();
+  const pair = (s.customPairs ?? []).find((p) => p.id === pairId || p.symbol === pairId);
 
-  // timeframe ignored here (you can scale step later)
-  for (let i = limit; i > 0; i--) {
-    const ts = Date.now() - i * 60_000;
+  const base = pair?.basePrice ?? 1;
+  const price = s.currentPrices[pairId] ?? { bid: base, ask: base + 0.0002 };
+  const candles = s.candles[pairId] ?? [];
+  const paused = !!s.isPaused[pairId];
 
-    // Slightly larger move for exotics
-    const exoticBoost = symbol.includes('TRY') || symbol.includes('ZAR') || symbol.includes('ISK') ? 3 : 1;
-    const volatility = 0.0002 * exoticBoost;
-    const trend = Math.sin(i * 0.1) * 0.001;
-
-    const open = base * (1 + trend + (Math.random() - 0.5) * volatility);
-    const close = open * (1 + (Math.random() - 0.5) * volatility);
-    const high = Math.max(open, close) * (1 + Math.random() * volatility);
-    const low = Math.min(open, close) * (1 - Math.random() * volatility);
-
-    candles.push({
-      id: `real_${symbol}_${i}`,
-      pairId: symbol,
-      timestamp: ts,
-      open,
-      high,
-      low,
-      close,
-      volume: Math.random() * 10_000_000,
-      isSimulated: true,
-    });
-  }
-
-  return candles;
-}
-
-// Get market data - decides between admin store or simulated real data
-export async function getMarketData(
-  symbol: string,
-  timeframe: string = '1m',
-  limit: number = 100
-): Promise<{ candles: Candle[]; isAdminControlled: boolean }> {
-  if (isAdminControlledPair(symbol)) {
-    const store = useAdminMarketStore.getState();
-    const arr = store.candles[symbol] || [];
-    return { candles: arr, isAdminControlled: true };
-  }
-
-  const candles = await fetchRealMarketData(symbol, timeframe, limit);
-  return { candles, isAdminControlled: false };
+  return { price, candles, paused };
 }
