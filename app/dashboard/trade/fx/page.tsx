@@ -891,7 +891,7 @@ export default function FXTradingPage() {
             <div className="hidden sm:flex items-center gap-2">
               {isAdminPair && (
                 <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg">
-                  <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
+                  <span className="text-xs text-cream/70 font-medium">Trade</span>
                 </div>
               )}
 
