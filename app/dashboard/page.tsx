@@ -204,7 +204,7 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
 
           <div className="flex flex-wrap gap-3 mt-5">
             <Link
-              href="/dashboard/wallet"
+              href="/dashboard/deposit"
               className="flex items-center gap-2 px-4 py-2.5 bg-gold text-void font-semibold text-sm rounded-xl hover:bg-gold/90 transition-all"
             >
               <CreditCard className="w-4 h-4" /> Deposit

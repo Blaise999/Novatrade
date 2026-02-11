@@ -2,6 +2,8 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { fxNotionalInAccount, fxPnlInAccount } from './fx-math';
+
 import {
   TradingAccount,
   StockPosition,

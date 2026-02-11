@@ -559,7 +559,7 @@ export default function FXTradingPage() {
         const ask = sym === symbol ? currentAsk : typeof midOther === 'number' ? midOther : Number((pos as any).currentPrice ?? 0);
 
         const px = side === 'long' ? bid : ask;
-        if (Number.isFinite(px)) updateMarginPositionPrice((pos as any).id, px);
+        if (Number.isFinite(px)) updateMarginPositionPrice((pos as any).symbol, px);
       }
     }, 850);
 
