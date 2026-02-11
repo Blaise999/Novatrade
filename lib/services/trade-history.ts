@@ -123,7 +123,7 @@ export async function saveTradeToHistory(input: {
   };
 
   const { data, error } = await supabase
-    .from("trade") // ✅ your real table
+    .from("trades")
     .insert(payload)
     .select("id")
     .single();
@@ -148,7 +148,7 @@ export async function closeTradeInHistory(input: {
   // 1) If we know tradeId, close directly
   if (input.tradeId) {
     const { error } = await supabase
-      .from("trade")
+      .from("trades")
       .update({
         status: finalStatus,
         exit_price: input.exitPrice,
@@ -165,7 +165,7 @@ export async function closeTradeInHistory(input: {
   // 2) If we know session_id, close by session_id
   if (input.sessionId) {
     const { error } = await supabase
-      .from("trade")
+      .from("trades")
       .update({
         status: finalStatus,
         exit_price: input.exitPrice,
@@ -181,7 +181,7 @@ export async function closeTradeInHistory(input: {
 
   // 3) fallback: find latest open trade for this symbol, then close it
   const { data: openTrade, error: findErr } = await supabase
-    .from("trade")
+    .from("trades")
     .select("id")
     .eq("user_id", input.userId)
     .eq("symbol", input.symbol)
@@ -194,7 +194,7 @@ export async function closeTradeInHistory(input: {
   if (!openTrade?.id) return { success: false, error: "No open trade found to close" };
 
   const { error: updErr } = await supabase
-    .from("trade")
+    .from("trades")
     .update({
       status: finalStatus,
       exit_price: input.exitPrice,

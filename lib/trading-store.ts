@@ -194,7 +194,7 @@ interface TradingAccountState {
     fee: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
 
-  updateMarginPositionPrice: (symbol: string, price: number) => void;
+  updateMarginPositionPrice: (symbol: string, price: number) => { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }[];
 
   // Risk management
   checkLiquidation: () => string[];
@@ -909,10 +909,35 @@ export const useTradingAccountStore = create<TradingAccountState>()(
       },
 
       updateMarginPositionPrice: (symbol, price) => {
+        const slTpTriggered: { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }[] = [];
+
         set((state) => {
           const updatedPositions = state.marginPositions.map((p) => {
             if (p.symbol !== symbol) return p;
             const unrealizedPnL = calculateMarginPnL(p, price);
+
+            // --- SL/TP detection ---
+            const side = (p as any).side as string;
+            const isLong = side === 'long';
+
+            // Stop Loss check
+            if (p.stopLoss != null && Number.isFinite(p.stopLoss)) {
+              const slHit = isLong ? price <= p.stopLoss : price >= p.stopLoss;
+              if (slHit) {
+                const slPnl = calculateMarginPnL(p, p.stopLoss);
+                slTpTriggered.push({ id: p.id, symbol: p.symbol, side, reason: 'sl', triggerPrice: p.stopLoss, pnl: slPnl });
+              }
+            }
+
+            // Take Profit check
+            if (p.takeProfit != null && Number.isFinite(p.takeProfit)) {
+              const tpHit = isLong ? price >= p.takeProfit : price <= p.takeProfit;
+              if (tpHit) {
+                const tpPnl = calculateMarginPnL(p, p.takeProfit);
+                slTpTriggered.push({ id: p.id, symbol: p.symbol, side, reason: 'tp', triggerPrice: p.takeProfit, pnl: tpPnl });
+              }
+            }
+
             return {
               ...p,
               currentPrice: price,
@@ -942,6 +967,9 @@ export const useTradingAccountStore = create<TradingAccountState>()(
               : null,
           };
         });
+
+        // Return triggered SL/TP info so callers can handle auto-close
+        return slTpTriggered;
       },
 
       checkLiquidation: () => {

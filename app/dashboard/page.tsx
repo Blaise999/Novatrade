@@ -18,7 +18,7 @@ export default function DashboardOverview() {
   const { user, refreshUser } = useStore();
   const { bots, fetchBots } = useBotEngine();
   const [hideBalance, setHideBalance] = useState(false);
-  const [recentTrades, setRecentTrades] = useState<any[]>([]);
+  const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
   // ✅ live wallet state (wagmi)
   const { address: liveAddress, isConnected: liveConnected } = useAccount();
@@ -27,22 +27,106 @@ export default function DashboardOverview() {
     if (user?.id) {
       fetchBots(user.id);
       refreshUser();
-      loadRecentTrades();
+      loadRecentActivity();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
-  const loadRecentTrades = async () => {
+  const loadRecentActivity = async () => {
     if (!user?.id || !isSupabaseConfigured()) return;
     try {
-      const { data } = await supabase
+      // Fetch trades
+      const { data: trades } = await supabase
         .from('trades')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
         .limit(5);
 
-      if (data) setRecentTrades(data);
+      // Fetch deposits
+      const { data: deposits } = await supabase
+        .from('deposits')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch tier purchases
+      const { data: tierPurchases } = await supabase
+        .from('tier_purchases')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch bonus transactions
+      const { data: bonuses } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('user_id', user.id)
+        .in('type', ['tier_bonus', 'bonus', 'deposit'])
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Normalize into unified activity items
+      const items: any[] = [];
+
+      (trades || []).forEach((t: any) => {
+        items.push({
+          id: `trade-${t.id}`,
+          kind: 'trade',
+          label: t.symbol || t.pair || 'Trade',
+          sublabel: `${t.direction || t.type || 'Trade'} • ${t.market_type || t.asset_type || ''}`,
+          amount: Number(t.amount ?? 0),
+          pnl: Number(t.profit_loss ?? t.pnl ?? 0),
+          status: t.status,
+          created_at: t.created_at || t.opened_at,
+        });
+      });
+
+      (deposits || []).forEach((d: any) => {
+        items.push({
+          id: `dep-${d.id}`,
+          kind: 'deposit',
+          label: 'Deposit',
+          sublabel: `${d.network || d.currency || 'Funds'} • ${d.status}`,
+          amount: Number(d.amount ?? 0),
+          pnl: Number(d.amount ?? 0),
+          status: d.status,
+          created_at: d.created_at,
+        });
+      });
+
+      (tierPurchases || []).forEach((tp: any) => {
+        const tierNames: Record<number, string> = { 1: 'Starter', 2: 'Trader', 3: 'Professional', 4: 'Elite' };
+        items.push({
+          id: `tier-${tp.id}`,
+          kind: 'tier',
+          label: `${tierNames[tp.tier_level] || 'Tier'} Purchase`,
+          sublabel: `Tier ${tp.tier_level} • ${tp.status}`,
+          amount: Number(tp.price_amount ?? 0),
+          pnl: tp.status === 'approved' ? Number(tp.bonus_amount ?? 0) : 0,
+          status: tp.status,
+          created_at: tp.created_at,
+        });
+      });
+
+      (bonuses || []).forEach((b: any) => {
+        items.push({
+          id: `tx-${b.id}`,
+          kind: 'bonus',
+          label: b.type === 'tier_bonus' ? 'Tier Bonus' : b.type === 'deposit' ? 'Deposit Credit' : 'Bonus',
+          sublabel: b.description || b.reference_type || 'Credit',
+          amount: Math.abs(Number(b.amount ?? 0)),
+          pnl: Number(b.amount ?? 0),
+          status: 'completed',
+          created_at: b.created_at,
+        });
+      });
+
+      // Sort by date descending, take top 8
+      items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setRecentActivity(items.slice(0, 8));
     } catch {}
   };
 
@@ -342,41 +426,66 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
           </Link>
         </div>
 
-        {recentTrades.length === 0 ? (
-          <p className="text-center py-6 text-cream/30 text-sm">No recent trades</p>
+        {recentActivity.length === 0 ? (
+          <p className="text-center py-6 text-cream/30 text-sm">No recent activity</p>
         ) : (
           <div className="space-y-2">
-            {recentTrades.map((t: any) => (
-              <div key={t.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                      t.pnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'
-                    }`}
-                  >
-                    {t.pnl >= 0 ? (
-                      <ArrowUpRight className="w-4 h-4 text-profit" />
-                    ) : (
-                      <ArrowDownRight className="w-4 h-4 text-loss" />
+            {recentActivity.map((item: any) => {
+              const isPositive = item.kind === 'deposit' || item.kind === 'bonus' || item.kind === 'tier' || item.pnl >= 0;
+              const iconColor = item.kind === 'deposit' ? 'bg-electric/20' :
+                item.kind === 'tier' ? 'bg-gold/20' :
+                item.kind === 'bonus' ? 'bg-purple-500/20' :
+                isPositive ? 'bg-profit/20' : 'bg-loss/20';
+              const textColor = item.kind === 'deposit' ? 'text-electric' :
+                item.kind === 'tier' ? 'text-gold' :
+                item.kind === 'bonus' ? 'text-purple-400' :
+                isPositive ? 'text-profit' : 'text-loss';
+
+              return (
+                <div key={item.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${iconColor}`}>
+                      {item.kind === 'deposit' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.kind === 'tier' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.kind === 'bonus' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.pnl >= 0 ? (
+                        <ArrowUpRight className="w-4 h-4 text-profit" />
+                      ) : (
+                        <ArrowDownRight className="w-4 h-4 text-loss" />
+                      )}
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-medium text-cream">{item.label}</p>
+                      <p className="text-xs text-cream/40">
+                        {item.sublabel} • {new Date(item.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <p className={`text-sm font-bold ${textColor}`}>
+                      {item.kind === 'trade' ? (
+                        <>{item.pnl >= 0 ? '+' : ''}${Number(item.pnl).toFixed(2)}</>
+                      ) : (
+                        <>+${Number(item.amount).toFixed(2)}</>
+                      )}
+                    </p>
+                    {item.kind === 'trade' && (
+                      <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>
+                    )}
+                    {item.kind !== 'trade' && item.status && (
+                      <p className={`text-xs ${item.status === 'approved' || item.status === 'completed' ? 'text-emerald-400/60' : item.status === 'pending' ? 'text-yellow-400/60' : 'text-cream/40'}`}>
+                        {item.status}
+                      </p>
                     )}
                   </div>
-
-                  <div>
-                    <p className="text-sm font-medium text-cream">{t.pair || 'Trade'}</p>
-                    <p className="text-xs text-cream/40">
-                      {t.close_reason || t.type || 'Trade'} • {new Date(t.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
                 </div>
-
-                <div className="text-right">
-                  <p className={`text-sm font-bold ${(t.pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
-                    {(t.pnl ?? 0) >= 0 ? '+' : ''}${Number(t.pnl ?? 0).toFixed(2)}
-                  </p>
-                  <p className="text-xs text-cream/40">${Number(t.amount ?? 0).toFixed(2)}</p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

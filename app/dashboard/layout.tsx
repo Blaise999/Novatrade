@@ -430,7 +430,7 @@ export default function DashboardLayout({
 
             {/* Deposit Button */}
             <Link
-              href="/dashboard/tier"
+              href="/dashboard/deposit"
               className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
             >
               <CreditCard className="w-4 h-4" />

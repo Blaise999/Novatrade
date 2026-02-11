@@ -22,6 +22,8 @@ import {
   calculateGridProfitPerCycle,
 } from '@/lib/bot-trading-types';
 
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+
 const PAIRS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
   'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
@@ -34,6 +36,8 @@ export default function DashboardBotsPage() {
 
   const [botAccess, setBotAccess] = useState<{ dca: boolean; grid: boolean }>({ dca: false, grid: false });
   const [accessLoading, setAccessLoading] = useState(true);
+  const [tierLevel, setTierLevel] = useState(0);
+  const [tierActive, setTierActive] = useState(false);
   const [showActivate, setShowActivate] = useState<'dca' | 'grid' | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [createType, setCreateType] = useState<'dca' | 'grid' | null>(null);
@@ -49,14 +53,37 @@ export default function DashboardBotsPage() {
     if (!user?.id) return;
     setAccessLoading(true);
     try {
+      // Check activation keys
       const res = await fetch(`/api/bots/keys?action=check&userId=${user.id}`);
       const data = await res.json();
       if (data.success) setBotAccess(data.access);
+
+      // Check tier level from Supabase
+      if (isSupabaseConfigured()) {
+        const { data: userData } = await supabase
+          .from('users')
+          .select('tier_level, tier_active')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        const tl = Number(userData?.tier_level ?? 0);
+        const ta = Boolean(userData?.tier_active);
+        setTierLevel(tl);
+        setTierActive(ta);
+      }
     } catch {}
     setAccessLoading(false);
   };
 
-  const hasAnyAccess = botAccess.dca || botAccess.grid;
+  // DCA requires tier >= 2, Grid requires tier >= 3
+  const dcaTierOk = tierActive && tierLevel >= 2;
+  const gridTierOk = tierActive && tierLevel >= 3;
+
+  // Access = tier check AND (activation key OR tier grants it automatically)
+  const dcaAllowed = dcaTierOk && botAccess.dca;
+  const gridAllowed = gridTierOk && botAccess.grid;
+
+  const hasAnyAccess = dcaAllowed || gridAllowed;
   const activeBots = bots.filter(b => b.status === 'running').length;
   const totalPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
   const totalInvested = bots.reduce((s, b) => s + (b.invested_amount ?? 0), 0);
@@ -84,13 +111,15 @@ export default function DashboardBotsPage() {
       {/* Activation Cards */}
       <div className="grid md:grid-cols-2 gap-4">
         <ActivationCard botType="dca" name="DCA Master"
-          description="Dollar-cost averaging with safety orders, trailing take-profit, and automatic dip-buying"
-          icon={Clock} activated={botAccess.dca} loading={accessLoading} color="purple"
-          onActivate={() => setShowActivate('dca')} />
+          description={!dcaTierOk ? `Requires Trader Tier (Tier 2) — Current: ${['Basic','Starter','Trader','Professional','Elite'][tierLevel] || 'Basic'}` : "Dollar-cost averaging with safety orders, trailing take-profit, and automatic dip-buying"}
+          icon={Clock} activated={dcaAllowed} loading={accessLoading} color="purple"
+          onActivate={() => dcaTierOk ? setShowActivate('dca') : {}}
+          tierLocked={!dcaTierOk} />
         <ActivationCard botType="grid" name="Grid Warrior"
-          description="Automated buy-low sell-high grid strategy — profits from price oscillation in any range"
-          icon={Grid3X3} activated={botAccess.grid} loading={accessLoading} color="orange"
-          onActivate={() => setShowActivate('grid')} />
+          description={!gridTierOk ? `Requires Professional Tier (Tier 3) — Current: ${['Basic','Starter','Trader','Professional','Elite'][tierLevel] || 'Basic'}` : "Automated buy-low sell-high grid strategy — profits from price oscillation in any range"}
+          icon={Grid3X3} activated={gridAllowed} loading={accessLoading} color="orange"
+          onActivate={() => gridTierOk ? setShowActivate('grid') : {}}
+          tierLocked={!gridTierOk} />
       </div>
 
       {/* Stats + Bot List (only if has access) */}
@@ -141,14 +170,33 @@ export default function DashboardBotsPage() {
       {!accessLoading && !hasAnyAccess && (
         <div className="text-center py-12 bg-white/5 rounded-2xl border border-white/10">
           <Lock className="w-10 h-10 text-cream/20 mx-auto mb-3" />
-          <h3 className="text-lg font-semibold text-cream mb-2">Activate a Bot to Get Started</h3>
-          <p className="text-sm text-cream/40 max-w-md mx-auto mb-6">
-            Purchase an activation key from our team, enter it above, and start running automated strategies.
-          </p>
-          <Link href="/invest/bots/contact?bot=dca"
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-electric text-void rounded-xl font-semibold text-sm hover:bg-electric/90 transition-all">
-            <ExternalLink className="w-4 h-4" /> Contact Sales
-          </Link>
+          {(!dcaTierOk && !gridTierOk) ? (
+            <>
+              <h3 className="text-lg font-semibold text-cream mb-2">Tier Upgrade Required</h3>
+              <p className="text-sm text-cream/40 max-w-md mx-auto mb-2">
+                DCA Bots require <span className="text-electric font-semibold">Trader Tier ($1,000)</span> and
+                Grid Warriors require <span className="text-gold font-semibold">Professional Tier ($3,000)</span>.
+              </p>
+              <p className="text-xs text-cream/30 max-w-md mx-auto mb-6">
+                {tierLevel === 0 ? 'You need to purchase a tier first.' : `Your current tier: ${['Basic','Starter','Trader','Professional','Elite'][tierLevel] || 'Basic'}`}
+              </p>
+              <Link href="/dashboard/tier"
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-gold text-void rounded-xl font-semibold text-sm hover:bg-gold/90 transition-all">
+                <ExternalLink className="w-4 h-4" /> Upgrade Tier
+              </Link>
+            </>
+          ) : (
+            <>
+              <h3 className="text-lg font-semibold text-cream mb-2">Activate a Bot to Get Started</h3>
+              <p className="text-sm text-cream/40 max-w-md mx-auto mb-6">
+                Your tier grants bot access! Purchase an activation key from our team, enter it above, and start running automated strategies.
+              </p>
+              <Link href="/invest/bots/contact?bot=dca"
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-electric text-void rounded-xl font-semibold text-sm hover:bg-electric/90 transition-all">
+                <ExternalLink className="w-4 h-4" /> Contact Sales
+              </Link>
+            </>
+          )}
         </div>
       )}
 
@@ -162,7 +210,7 @@ export default function DashboardBotsPage() {
         {showCreate && (
           <CreateBotModal onClose={() => { setShowCreate(false); setCreateType(null); }}
             createType={createType} setCreateType={setCreateType} userId={user?.id ?? ''}
-            botAccess={botAccess}
+            botAccess={{ dca: dcaAllowed, grid: gridAllowed }}
             onCreateDCA={async (p) => { await createDCABot(p); setShowCreate(false); setCreateType(null); }}
             onCreateGrid={async (p) => { await createGridBot(p); setShowCreate(false); setCreateType(null); }} />
         )}
@@ -174,16 +222,16 @@ export default function DashboardBotsPage() {
 /* ============================================
    ACTIVATION CARD
    ============================================ */
-function ActivationCard({ botType, name, description, icon: Icon, activated, loading, color, onActivate }: {
+function ActivationCard({ botType, name, description, icon: Icon, activated, loading, color, onActivate, tierLocked }: {
   botType: 'dca' | 'grid'; name: string; description: string; icon: any;
-  activated: boolean; loading: boolean; color: 'purple' | 'orange'; onActivate: () => void;
+  activated: boolean; loading: boolean; color: 'purple' | 'orange'; onActivate: () => void; tierLocked?: boolean;
 }) {
   const c = color === 'purple'
     ? { bg: 'from-purple-500/15 to-purple-500/5', border: 'border-purple-500/20', aBorder: 'border-purple-400/40', text: 'text-purple-400', btn: 'bg-purple-500 hover:bg-purple-400' }
     : { bg: 'from-orange-500/15 to-orange-500/5', border: 'border-orange-500/20', aBorder: 'border-orange-400/40', text: 'text-orange-400', btn: 'bg-orange-500 hover:bg-orange-400' };
 
   return (
-    <div className={`p-5 bg-gradient-to-br ${c.bg} rounded-xl border ${activated ? c.aBorder : c.border} transition-all`}>
+    <div className={`p-5 bg-gradient-to-br ${c.bg} rounded-xl border ${activated ? c.aBorder : c.border} transition-all ${tierLocked ? 'opacity-60' : ''}`}>
       <div className="flex items-start gap-4">
         <div className={`w-12 h-12 rounded-xl bg-white/5 flex items-center justify-center flex-shrink-0 ${activated ? 'ring-2 ring-profit/30' : ''}`}>
           <Icon className={`w-6 h-6 ${c.text}`} />
@@ -197,6 +245,10 @@ function ActivationCard({ botType, name, description, icon: Icon, activated, loa
               <span className="flex items-center gap-1 px-2 py-0.5 bg-profit/20 text-profit text-[10px] font-bold rounded-full">
                 <CheckCircle className="w-3 h-3" /> ACTIVE
               </span>
+            ) : tierLocked ? (
+              <span className="flex items-center gap-1 px-2 py-0.5 bg-gold/20 text-gold text-[10px] font-bold rounded-full">
+                <Lock className="w-3 h-3" /> TIER REQUIRED
+              </span>
             ) : (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-white/10 text-cream/40 text-[10px] font-bold rounded-full">
                 <Lock className="w-3 h-3" /> LOCKED
@@ -204,7 +256,13 @@ function ActivationCard({ botType, name, description, icon: Icon, activated, loa
             )}
           </div>
           <p className="text-xs text-cream/50 mb-3">{description}</p>
-          {!loading && !activated && (
+          {!loading && tierLocked && (
+            <Link href="/dashboard/tier"
+              className="flex items-center gap-2 px-4 py-2 bg-gold/80 hover:bg-gold text-void font-semibold text-sm rounded-lg transition-all w-fit">
+              <Sparkles className="w-4 h-4" /> Upgrade Tier
+            </Link>
+          )}
+          {!loading && !activated && !tierLocked && (
             <div className="flex items-center gap-3 flex-wrap">
               <button onClick={onActivate}
                 className={`flex items-center gap-2 px-4 py-2 ${c.btn} text-white font-semibold text-sm rounded-lg transition-all`}>

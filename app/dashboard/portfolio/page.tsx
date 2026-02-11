@@ -212,6 +212,46 @@ export default function PortfolioPage() {
     getTotalUnrealizedPnL,
     getDisplayPortfolioValue,
   } = useSpotTradingStore();
+
+  const [shieldTierOk, setShieldTierOk] = useState(false);
+  const [shieldMsg, setShieldMsg] = useState('');
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const checkShieldTier = async () => {
+      try {
+        const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+        if (!isSupabaseConfigured()) { setShieldTierOk(true); return; }
+        const { data } = await supabase
+          .from('users')
+          .select('tier_level, tier_active')
+          .eq('id', user.id)
+          .maybeSingle();
+        const tl = Number(data?.tier_level ?? 0);
+        const ta = Boolean(data?.tier_active);
+        setShieldTierOk(ta && tl >= 1);
+      } catch { setShieldTierOk(false); }
+    };
+    checkShieldTier();
+  }, [user?.id]);
+
+  const handleToggleShield = (positionId: string) => {
+    if (!shieldTierOk) {
+      setShieldMsg('Shield Protection requires Starter Tier ($500) or higher. Upgrade in Tiers & Plans.');
+      setTimeout(() => setShieldMsg(''), 4000);
+      return;
+    }
+    toggleShield(positionId);
+  };
+
+  const handleEnableAllShields = () => {
+    if (!shieldTierOk) {
+      setShieldMsg('Shield Protection requires Starter Tier ($500) or higher.');
+      setTimeout(() => setShieldMsg(''), 4000);
+      return;
+    }
+    enableAllShields();
+  };
   
   const [selectedPeriod, setSelectedPeriod] = useState<'1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'>('1M');
   const globalShieldOn = isGlobalShieldActive();
@@ -244,6 +284,15 @@ export default function PortfolioPage() {
 
   return (
     <div className="p-4 lg:p-6 max-w-7xl mx-auto">
+      {/* Shield Tier Warning */}
+      {shieldMsg && (
+        <div className="mb-4 p-3 bg-gold/10 border border-gold/30 rounded-xl flex items-center gap-3">
+          <Lock className="w-4 h-4 text-gold shrink-0" />
+          <p className="text-sm text-gold">{shieldMsg}</p>
+          <Link href="/dashboard/tier" className="ml-auto text-xs text-electric hover:underline whitespace-nowrap">Upgrade →</Link>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
@@ -259,7 +308,7 @@ export default function PortfolioPage() {
                 <span className="text-sm text-cream font-medium">Shield Mode</span>
               </div>
               <button
-                onClick={() => globalShieldOn ? disableAllShields() : enableAllShields()}
+                onClick={() => globalShieldOn ? disableAllShields() : handleEnableAllShields()}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
                   globalShieldOn ? 'bg-blue-500' : 'bg-white/10'
                 }`}
@@ -428,7 +477,7 @@ export default function PortfolioPage() {
                     <PositionRow 
                       key={position.id} 
                       position={position}
-                      onToggleShield={() => toggleShield(position.id)}
+                      onToggleShield={() => handleToggleShield(position.id)}
                     />
                   ))}
                 </tbody>
