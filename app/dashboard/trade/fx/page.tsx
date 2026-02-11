@@ -21,7 +21,6 @@ import {
   X,
   Lock,
   Crown,
-  BookOpen,
   Activity,
 } from 'lucide-react';
 
@@ -30,12 +29,7 @@ import { useAdminSessionStore } from '@/lib/admin-store';
 import { useStore } from '@/lib/supabase/store-supabase';
 import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
-import {
-  useAdminMarketStore,
-  isAdminControlledPair,
-  getMarketData,
-  Candle,
-} from '@/lib/admin-markets';
+import { useAdminMarketStore, isAdminControlledPair, getMarketData, Candle } from '@/lib/admin-markets';
 import { useMembershipStore, TIER_CONFIG, canPerformAction } from '@/lib/membership-tiers';
 import { marketAssets } from '@/lib/data';
 import { MarginPosition } from '@/lib/trading-types';
@@ -64,30 +58,31 @@ const standardForexAssets: FXAsset[] = (marketAssets as any[])
   .filter((a) => a?.type === 'forex')
   .map(toFxAsset);
 
-// Educational pairs for admin control
-const educationalPairs: FXAsset[] = [
-  { id: 'nova-usd', symbol: 'NOVA/USD', name: 'NOVA Token / US Dollar', price: 1.25, change24h: 2.5, type: 'forex' },
-  { id: 'demo-usd', symbol: 'DEMO/USD', name: 'Demo Trading Pair', price: 2.0, change24h: 0.8, type: 'forex' },
-  { id: 'trd-usd', symbol: 'TRD/USD', name: 'TRD Token / US Dollar', price: 0.85, change24h: -1.2, type: 'forex' },
+// ✅ Rare/exotic pairs (admin-controlled UI), replaces NOVA/DEMO/TRD
+const rarePairs: FXAsset[] = [
+  { id: 'usd-try', symbol: 'USD/TRY', name: 'US Dollar / Turkish Lira', price: 32.15, change24h: 0.7, type: 'forex' },
+  { id: 'usd-zar', symbol: 'USD/ZAR', name: 'US Dollar / South African Rand', price: 19.05, change24h: -0.3, type: 'forex' },
+  { id: 'usd-brl', symbol: 'USD/BRL', name: 'US Dollar / Brazilian Real', price: 4.95, change24h: 0.1, type: 'forex' },
+  { id: 'usd-mxn', symbol: 'USD/MXN', name: 'US Dollar / Mexican Peso', price: 17.12, change24h: -0.2, type: 'forex' },
+  { id: 'usd-pln', symbol: 'USD/PLN', name: 'US Dollar / Polish Zloty', price: 4.01, change24h: 0.2, type: 'forex' },
+  { id: 'usd-isk', symbol: 'USD/ISK', name: 'US Dollar / Icelandic Krona', price: 138.2, change24h: -0.1, type: 'forex' },
 ];
+
 
 // Leverage options for forex
 const leverageOptions = [10, 20, 50, 100, 200, 500];
 
-// Currency flag emojis
+// Currency flag emojis (rare pairs only)
 const currencyFlags: Record<string, string> = {
-  EUR: '🇪🇺',
   USD: '🇺🇸',
-  GBP: '🇬🇧',
-  JPY: '🇯🇵',
-  AUD: '🇦🇺',
-  CAD: '🇨🇦',
-  CHF: '🇨🇭',
-  NZD: '🇳🇿',
-  NOVA: '🌟',
-  TRD: '📈',
-  DEMO: '🎮',
+  TRY: '🇹🇷',
+  ZAR: '🇿🇦',
+  BRL: '🇧🇷',
+  MXN: '🇲🇽',
+  PLN: '🇵🇱',
+  ISK: '🇮🇸',
 };
+
 
 // Chart timeframes
 const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
@@ -139,6 +134,10 @@ const normalizeCandles = (raw: unknown): Candle[] => {
     .filter(Boolean) as Candle[];
 };
 
+// ✅ Treat our rarePairs as admin-controlled (even if isAdminControlledPair() is still legacy)
+const RARE_PAIR_SYMBOLS = new Set(rarePairs.map((p) => p.symbol));
+const isAdminPairSymbol = (sym: string) => RARE_PAIR_SYMBOLS.has(sym) || isAdminControlledPair(sym);
+
 export default function FXTradingPage() {
   const {
     marginAccount,
@@ -148,21 +147,31 @@ export default function FXTradingPage() {
     updateMarginPositionPrice,
   } = useTradingAccountStore();
 
-  // User store for balance refresh
   const { refreshUser, user } = useStore();
 
-  // Admin session store (typed mismatch fix)
+  // Debug: enable via ?debug=1
+  const debugEnabled = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('debug') === '1';
+  }, []);
+  const dbg = useCallback(
+    (...args: any[]) => {
+      if (!debugEnabled) return;
+      // eslint-disable-next-line no-console
+      console.log('[FX]', ...args);
+    },
+    [debugEnabled]
+  );
+
+  // Admin session store
   const adminSession = useAdminSessionStore() as any;
   const activeSignal = adminSession?.activeSignal ?? adminSession?.signal ?? null;
 
-  // Membership store (typed mismatch fix)
+  // Membership store
   const membership = useMembershipStore() as any;
   const currentTier = (membership?.currentTier ?? membership?.tier ?? 'free') as keyof typeof TIER_CONFIG;
-  const totalDeposited = Number(
-    membership?.totalDeposited ?? membership?.totalDeposit ?? membership?.depositedTotal ?? 0
-  );
+  const totalDeposited = Number(membership?.totalDeposited ?? membership?.totalDeposit ?? membership?.depositedTotal ?? 0);
 
-  // Tier config (safe defaults)
   const tierConfig =
     ((TIER_CONFIG as any)[currentTier] as any) ?? {
       maxLeverage: 0,
@@ -175,7 +184,7 @@ export default function FXTradingPage() {
     };
   const tierName = tierConfig.displayName ?? tierConfig.name ?? String(currentTier);
 
-  // Admin market store for educational pairs
+  // Admin market store for admin-controlled pairs
   const adminMarket = useAdminMarketStore() as any;
   const adminPrices = (adminMarket?.currentPrices ?? {}) as Record<string, { bid: number; ask: number }>;
   const isPaused = !!adminMarket?.isPaused;
@@ -184,7 +193,7 @@ export default function FXTradingPage() {
   // STATE
   // ======================
   const [selectedAsset, setSelectedAsset] = useState<FXAsset>(() => {
-    return standardForexAssets[0] ?? educationalPairs[0];
+    return standardForexAssets[0] ?? rarePairs[0];
   });
 
   const [showAssetSelector, setShowAssetSelector] = useState(false);
@@ -215,7 +224,7 @@ export default function FXTradingPage() {
   const [positionToClose, setPositionToClose] = useState<MarginPosition | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('chart');
 
-  // Refs (to avoid interval re-creating + stale closures)
+  // Refs (avoid stale closures)
   const selectedSymbolRef = useRef<string>(selectedAsset.symbol);
   const bidRef = useRef<number>(bidPrice);
   const askRef = useRef<number>(askPrice);
@@ -232,15 +241,15 @@ export default function FXTradingPage() {
   useEffect(() => { pausedRef.current = isPaused; }, [isPaused]);
   useEffect(() => { livePricesRef.current = livePrices; }, [livePrices]);
 
-  // User balance (admin-set balance counts as deposit)
+  // User balance
   const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
 
   // Tier gating: tier-based OR if admin has set a balance
   const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
 
-  const isEducationalPair = useMemo(() => isAdminControlledPair(selectedAsset.symbol), [selectedAsset.symbol]);
+  const isAdminPair = useMemo(() => isAdminPairSymbol(selectedAsset.symbol), [selectedAsset.symbol]);
 
-  // Filter positions for this market (typed mismatch fix)
+  // Filter positions for this market
   const forexPositions = useMemo(() => {
     return marginPositions.filter((p) => {
       const t = (p as any).assetType ?? (p as any).marketType ?? (p as any).type ?? (p as any).market;
@@ -293,14 +302,11 @@ export default function FXTradingPage() {
   }, [mobileTab]);
 
   // ======================
-  // CHART DATA (ULTRA SNAPPY)
-  // - show cached instantly
-  // - fetch in background (AbortController)
+  // CHART DATA (SNAPPY)
   // ======================
   useEffect(() => {
     const key = `${selectedAsset.symbol}|${chartTimeframe}`;
 
-    // instant cache paint
     const cached = candleCacheRef.current.get(key);
     if (cached && cached.length) setChartCandles(cached);
     else setChartCandles([]);
@@ -314,13 +320,14 @@ export default function FXTradingPage() {
         const candles = normalizeCandles((result as any)?.candles ?? result);
         candleCacheRef.current.set(key, candles);
         setChartCandles(candles);
-      } catch {
-        // keep cached/placeholder
+        dbg('candles loaded', { symbol: selectedAsset.symbol, tf: chartTimeframe, n: candles.length });
+      } catch (e) {
+        dbg('candles load failed', e);
       }
     })();
 
     return () => ac.abort();
-  }, [selectedAsset.symbol, chartTimeframe]);
+  }, [selectedAsset.symbol, chartTimeframe, dbg]);
 
   // ======================
   // LIVE PRICES
@@ -329,14 +336,14 @@ export default function FXTradingPage() {
     let alive = true;
     const ac = new AbortController();
 
-    const allSymbols = [...educationalPairs.map((a) => a.symbol), ...standardForexAssets.map((a) => a.symbol)];
+    const allSymbols = [...rarePairs.map((a) => a.symbol), ...standardForexAssets.map((a) => a.symbol)];
     const uniqueAll = Array.from(new Set(allSymbols));
 
     const tickSelected = async () => {
       const symbol = selectedSymbolRef.current;
 
       // Admin controlled pair: prefer adminPrices (zero network)
-      if (isAdminControlledPair(symbol)) {
+      if (isAdminPairSymbol(symbol)) {
         if (pausedRef.current) return;
         const p = adminPricesRef.current?.[symbol];
         if (p?.bid && p?.ask) {
@@ -381,8 +388,8 @@ export default function FXTradingPage() {
           });
           return;
         }
-      } catch {
-        // fall through
+      } catch (e) {
+        dbg('tickSelected fetch failed', { symbol, e });
       }
 
       // Fallback simulation
@@ -391,7 +398,7 @@ export default function FXTradingPage() {
         const base =
           livePricesRef.current?.[symbol] ??
           (standardForexAssets.find((a) => a.symbol === symbol)?.price ??
-            educationalPairs.find((a) => a.symbol === symbol)?.price ??
+            rarePairs.find((a) => a.symbol === symbol)?.price ??
             1);
 
         const volatility = Math.max(base * 0.00004, 0.00001);
@@ -439,16 +446,16 @@ export default function FXTradingPage() {
             return next;
           });
         });
-      } catch {
-        // ignore
+      } catch (e) {
+        dbg('tickAll failed', e);
       }
     };
 
     tickSelected();
     tickAll();
 
-    const idSelected = setInterval(tickSelected, 650);
-    const idAll = setInterval(tickAll, 6500);
+    const idSelected = setInterval(tickSelected, 750);
+    const idAll = setInterval(tickAll, 7000);
 
     return () => {
       alive = false;
@@ -456,7 +463,7 @@ export default function FXTradingPage() {
       clearInterval(idSelected);
       clearInterval(idAll);
     };
-  }, []);
+  }, [dbg]);
 
   // ======================
   // POSITION MARK-TO-MARKET
@@ -486,7 +493,7 @@ export default function FXTradingPage() {
         const px = side === 'long' ? bid : ask;
         if (Number.isFinite(px)) updateMarginPositionPrice((pos as any).id, px);
       }
-    }, 800);
+    }, 850);
 
     return () => {
       alive = false;
@@ -504,11 +511,13 @@ export default function FXTradingPage() {
     return price.toFixed(5);
   }, []);
 
-  // Trade metrics (memo)
-  const positionValue = useMemo(() => lotSize * 100000 * askPrice, [lotSize, askPrice]);
+  // pip sizing (simple)
+  const pipSize = useMemo(() => (selectedAsset.symbol.includes('JPY') ? 0.01 : 0.0001), [selectedAsset.symbol]);
+
+  const positionValue = useMemo(() => lotSize * 100000 * (tradeDirection === 'buy' ? askPrice : bidPrice), [lotSize, askPrice, bidPrice, tradeDirection]);
   const requiredMargin = useMemo(() => positionValue / leverage, [positionValue, leverage]);
   const pipValue = useMemo(() => lotSize * 10, [lotSize]);
-  const spreadPips = useMemo(() => (askPrice - bidPrice) / 0.0001, [askPrice, bidPrice]);
+  const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
 
   const metrics = useMemo(
     () => ({
@@ -520,12 +529,10 @@ export default function FXTradingPage() {
     [spreadPips, pipValue, requiredMargin, positionValue]
   );
 
-  // Toggle favorite (stable)
   const toggleFavorite = useCallback((symbol: string) => {
     setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
   }, []);
 
-  // Handle trade execution
   const handleTrade = useCallback(async () => {
     if (!canTrade) {
       setNotification({ type: 'error', message: 'Upgrade to Starter tier ($500 deposit) to trade' });
@@ -534,10 +541,7 @@ export default function FXTradingPage() {
     }
 
     if (leverage > Number(tierConfig.maxLeverage ?? 0) && Number(tierConfig.maxLeverage ?? 0) > 0) {
-      setNotification({
-        type: 'error',
-        message: `Max leverage for ${tierName} tier is 1:${tierConfig.maxLeverage}`,
-      });
+      setNotification({ type: 'error', message: `Max leverage for ${tierName} tier is 1:${tierConfig.maxLeverage}` });
       setTimeout(() => setNotification(null), 3000);
       return;
     }
@@ -562,41 +566,34 @@ export default function FXTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // ✅ Save to trades table for history (schema-correct)
-     // ✅ Save to trades table for history (schema-correct)
-if (user?.id) {
-  const sessionId =
-    (result as any)?.positionId ??
-    (result as any)?.id ??
-    undefined;
+      if (user?.id) {
+        const sessionId = (result as any)?.positionId ?? (result as any)?.id ?? undefined;
 
-  const saved = await saveTradeToHistory({
-    userId: user.id,
-    symbol: selectedAsset.symbol,
+        const saved = await saveTradeToHistory({
+          userId: user.id,
+          symbol: selectedAsset.symbol,
 
-    // ✅ MUST match your TradeMarketType union
-    marketType: 'forex',     // <-- FIX: was 'fx'
-    assetType: 'forex',
-    tradeType: 'margin',
-    direction: tradeDirection, // buy/sell allowed
+          // ✅ MUST match your TradeMarketType union
+          marketType: 'forex',
+          assetType: 'forex',
+          tradeType: 'margin',
+          direction: tradeDirection,
 
-    amount: positionValue,
-    quantity: lotSize * 100000,
-    entryPrice,
-    leverage,
+          amount: positionValue,
+          quantity: qty,
+          entryPrice,
+          leverage,
 
-    fee,
-    stopLoss: stopLoss || undefined,
-    takeProfit: takeProfit || undefined,
+          fee,
+          stopLoss: stopLoss || undefined,
+          takeProfit: takeProfit || undefined,
 
-    status: 'active',
-    sessionId,
-  });
+          status: 'active',
+          sessionId,
+        });
 
-  if (!(saved as any)?.success) {
-    console.warn('[FX] trade saved locally but history insert failed:', (saved as any)?.error);
-  }
-}
+        if (!(saved as any)?.success) dbg('history insert failed', (saved as any)?.error);
+      }
 
       setNotification({
         type: 'success',
@@ -626,9 +623,9 @@ if (user?.id) {
     refreshUser,
     user?.id,
     formatPrice,
+    dbg,
   ]);
 
-  // Handle close position
   const handleClosePosition = useCallback(
     async (position: MarginPosition) => {
       const side = (position as any).side;
@@ -641,7 +638,6 @@ if (user?.id) {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        // ✅ Update trade in history as closed (schema-correct)
         if (user?.id) {
           const closed = await closeTradeInHistory({
             userId: user.id,
@@ -649,12 +645,10 @@ if (user?.id) {
             exitPrice,
             pnl,
             status: 'closed',
-            sessionId: (position as any).id, // match session_id if saved
+            sessionId: (position as any).id,
           });
 
-          if (!(closed as any)?.success) {
-            console.warn('[FX] trade closed locally but history close failed:', (closed as any)?.error);
-          }
+          if (!(closed as any)?.success) dbg('history close failed', (closed as any)?.error);
         }
 
         setNotification({
@@ -669,10 +663,9 @@ if (user?.id) {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user?.id]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user?.id, dbg]
   );
 
-  // Margin metrics — use user balance as fallback (admin-edited balance counts)
   const accountBalance = Number(marginAccount?.balance ?? 0) || userBalance;
 
   const usedMargin = useMemo(
@@ -688,16 +681,15 @@ if (user?.id) {
   const freeMargin = equity - usedMargin;
   const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
 
-  // Check for admin signal
   const isSignalActive = activeSignal?.asset === selectedAsset.symbol && !!activeSignal?.isActive;
 
   // ======================
-  // ASSET LIST FILTERS (FAST)
+  // ASSET LIST FILTERS
   // ======================
-  const filteredEducational = useMemo(() => {
+  const filteredRare = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return educationalPairs;
-    return educationalPairs.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
+    if (!q) return rarePairs;
+    return rarePairs.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
   }, [searchQuery]);
 
   const filteredFavorites = useMemo(() => {
@@ -715,7 +707,7 @@ if (user?.id) {
   }, [favorites, searchQuery]);
 
   // ======================
-  // CHART GEOMETRY (MEMOIZED)
+  // CHART GEOMETRY
   // ======================
   const chartData = useMemo(() => {
     const { width, height } = chartDimensions;
@@ -783,7 +775,7 @@ if (user?.id) {
       padding,
       chartHeight,
     };
-  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
+  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices]);
 
   return (
     <KYCGate action="trade forex">
@@ -801,9 +793,7 @@ if (user?.id) {
                   {currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}
                 </span>
                 <div className="text-left">
-                  <p className="text-sm sm:text-base font-semibold text-cream truncate">
-                    {selectedAsset.symbol}
-                  </p>
+                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedAsset.symbol}</p>
                   <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
                 </div>
               </div>
@@ -814,15 +804,11 @@ if (user?.id) {
             <div className="flex items-center gap-3 sm:gap-6">
               <div className="text-center">
                 <p className="text-xs text-cream/50">Bid</p>
-                <p className="text-sm sm:text-lg font-mono font-semibold text-loss">
-                  {formatPrice(bidPrice)}
-                </p>
+                <p className="text-sm sm:text-lg font-mono font-semibold text-loss">{formatPrice(bidPrice)}</p>
               </div>
               <div className="text-center">
                 <p className="text-xs text-cream/50">Ask</p>
-                <p className="text-sm sm:text-lg font-mono font-semibold text-profit">
-                  {formatPrice(askPrice)}
-                </p>
+                <p className="text-sm sm:text-lg font-mono font-semibold text-profit">{formatPrice(askPrice)}</p>
               </div>
               <div className="text-center hidden sm:block">
                 <p className="text-xs text-cream/50">Spread</p>
@@ -832,10 +818,9 @@ if (user?.id) {
 
             {/* Badges */}
             <div className="hidden sm:flex items-center gap-2">
-              {isEducationalPair && (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-500/20 border border-purple-500/30 rounded-lg">
-                  <BookOpen className="w-4 h-4 text-purple-400" />
-                  <span className="text-xs text-purple-400 font-medium">Educational</span>
+              {isAdminPair && (
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg">
+                  <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
                 </div>
               )}
 
@@ -878,9 +863,7 @@ if (user?.id) {
                     key={tf}
                     onClick={() => setChartTimeframe(tf)}
                     className={`px-2 sm:px-3 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                      chartTimeframe === tf
-                        ? 'bg-gold text-void'
-                        : 'text-cream/50 hover:text-cream hover:bg-white/5'
+                      chartTimeframe === tf ? 'bg-gold text-void' : 'text-cream/50 hover:text-cream hover:bg-white/5'
                     }`}
                   >
                     {tf}
@@ -890,17 +873,13 @@ if (user?.id) {
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setChartType('candle')}
-                  className={`p-1.5 rounded-lg ${
-                    chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'
-                  }`}
+                  className={`p-1.5 rounded-lg ${chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
                 >
                   <CandlestickChart className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => setChartType('line')}
-                  className={`p-1.5 rounded-lg ${
-                    chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'
-                  }`}
+                  className={`p-1.5 rounded-lg ${chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
                 >
                   <LineChartIcon className="w-4 h-4" />
                 </button>
@@ -908,18 +887,14 @@ if (user?.id) {
             </div>
 
             {/* Chart Area */}
-            <div
-              ref={chartRef}
-              className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
-              style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
-            >
-              {isEducationalPair && (
-                <div className="absolute top-2 left-2 z-10 px-2 py-1 bg-purple-500/20 border border-purple-500/30 rounded-lg lg:hidden">
-                  <span className="text-xs text-purple-400 font-medium">📚 Educational</span>
+            <div ref={chartRef} className="flex-1 relative bg-charcoal/30 w-full overflow-hidden" style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}>
+              {isAdminPair && (
+                <div className="absolute top-2 left-2 z-10 px-2 py-1 bg-white/5 border border-white/10 rounded-lg lg:hidden">
+                  <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
                 </div>
               )}
 
-              {isPaused && isEducationalPair && (
+              {isPaused && isAdminPair && (
                 <div className="absolute inset-0 bg-void/50 flex items-center justify-center z-20">
                   <div className="px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 rounded-lg">
                     <span className="text-yellow-500 font-medium">⏸️ Market Paused by Admin</span>
@@ -927,12 +902,7 @@ if (user?.id) {
                 </div>
               )}
 
-              <svg
-                className="w-full h-full block"
-                viewBox={`0 0 ${chartDimensions.width} ${chartDimensions.height}`}
-                preserveAspectRatio="xMidYMid meet"
-                style={{ display: 'block' }}
-              >
+              <svg className="w-full h-full block" viewBox={`0 0 ${chartDimensions.width} ${chartDimensions.height}`} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
                 <defs>
                   <linearGradient id="chartGradientFx" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="rgb(0, 217, 165)" stopOpacity="0.3" />
@@ -940,52 +910,21 @@ if (user?.id) {
                   </linearGradient>
                 </defs>
 
-                {/* Grid */}
                 {[...Array(10)].map((_, i) => (
-                  <line
-                    key={`h-${i}`}
-                    x1="0"
-                    y1={i * (chartDimensions.height / 10)}
-                    x2={chartDimensions.width}
-                    y2={i * (chartDimensions.height / 10)}
-                    stroke="rgba(255,255,255,0.05)"
-                  />
+                  <line key={`h-${i}`} x1="0" y1={i * (chartDimensions.height / 10)} x2={chartDimensions.width} y2={i * (chartDimensions.height / 10)} stroke="rgba(255,255,255,0.05)" />
                 ))}
                 {[...Array(20)].map((_, i) => (
-                  <line
-                    key={`v-${i}`}
-                    x1={i * (chartDimensions.width / 20)}
-                    y1="0"
-                    x2={i * (chartDimensions.width / 20)}
-                    y2={chartDimensions.height}
-                    stroke="rgba(255,255,255,0.05)"
-                  />
+                  <line key={`v-${i}`} x1={i * (chartDimensions.width / 20)} y1="0" x2={i * (chartDimensions.width / 20)} y2={chartDimensions.height} stroke="rgba(255,255,255,0.05)" />
                 ))}
 
-                {/* Candlesticks */}
                 {chartType === 'candle' &&
                   chartData.candles.map((c, i) => (
                     <g key={i}>
-                      <line
-                        x1={c.x}
-                        y1={c.highY}
-                        x2={c.x}
-                        y2={c.lowY}
-                        stroke={c.isGreen ? '#00d9a5' : '#ef4444'}
-                        strokeWidth="1"
-                      />
-                      <rect
-                        x={c.x - c.width / 2}
-                        y={Math.min(c.openY, c.closeY)}
-                        width={c.width}
-                        height={Math.abs(c.closeY - c.openY) || 1}
-                        fill={c.isGreen ? '#00d9a5' : '#ef4444'}
-                        rx="1"
-                      />
+                      <line x1={c.x} y1={c.highY} x2={c.x} y2={c.lowY} stroke={c.isGreen ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
+                      <rect x={c.x - c.width / 2} y={Math.min(c.openY, c.closeY)} width={c.width} height={Math.abs(c.closeY - c.openY) || 1} fill={c.isGreen ? '#00d9a5' : '#ef4444'} rx="1" />
                     </g>
                   ))}
 
-                {/* Line chart */}
                 {chartType === 'line' && chartData.candles.length > 0 && (
                   <>
                     <path
@@ -1001,63 +940,24 @@ if (user?.id) {
                       d={`M ${chartData.candles[0]?.x || 0} ${chartData.candles[0]?.closeY || 0} ${chartData.candles
                         .slice(1)
                         .map((c) => `L ${c.x} ${c.closeY}`)
-                        .join(' ')} L ${chartData.candles[chartData.candles.length - 1]?.x || 0} ${
-                        chartDimensions.height
-                      } L ${chartData.candles[0]?.x || 0} ${chartDimensions.height} Z`}
+                        .join(' ')} L ${chartData.candles[chartData.candles.length - 1]?.x || 0} ${chartDimensions.height} L ${chartData.candles[0]?.x || 0} ${chartDimensions.height} Z`}
                       fill="url(#chartGradientFx)"
                     />
                   </>
                 )}
 
-                {/* Current price line */}
-                <line
-                  x1="0"
-                  y1={chartDimensions.height / 2}
-                  x2={chartDimensions.width}
-                  y2={chartDimensions.height / 2}
-                  stroke="#d4af37"
-                  strokeDasharray="4"
-                />
-                <rect
-                  x={chartDimensions.width - 70}
-                  y={chartDimensions.height / 2 - 10}
-                  width="65"
-                  height="20"
-                  fill="#d4af37"
-                  rx="3"
-                />
-                <text
-                  x={chartDimensions.width - 37}
-                  y={chartDimensions.height / 2 + 4}
-                  textAnchor="middle"
-                  fill="#0a0a0f"
-                  fontSize="11"
-                  fontFamily="monospace"
-                >
+                <line x1="0" y1={chartDimensions.height / 2} x2={chartDimensions.width} y2={chartDimensions.height / 2} stroke="#d4af37" strokeDasharray="4" />
+                <rect x={chartDimensions.width - 70} y={chartDimensions.height / 2 - 10} width="65" height="20" fill="#d4af37" rx="3" />
+                <text x={chartDimensions.width - 37} y={chartDimensions.height / 2 + 4} textAnchor="middle" fill="#0a0a0f" fontSize="11" fontFamily="monospace">
                   {formatPrice(askPrice)}
                 </text>
 
-                {/* Price labels */}
                 {chartData.maxPrice > 0 && (
                   <>
-                    <text
-                      x={chartDimensions.width - 5}
-                      y={25}
-                      textAnchor="end"
-                      fill="#666"
-                      fontSize="10"
-                      fontFamily="monospace"
-                    >
+                    <text x={chartDimensions.width - 5} y={25} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
                       {formatPrice(chartData.maxPrice)}
                     </text>
-                    <text
-                      x={chartDimensions.width - 5}
-                      y={chartDimensions.height - 10}
-                      textAnchor="end"
-                      fill="#666"
-                      fontSize="10"
-                      fontFamily="monospace"
-                    >
+                    <text x={chartDimensions.width - 5} y={chartDimensions.height - 10} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
                       {formatPrice(chartData.minPrice)}
                     </text>
                   </>
@@ -1067,12 +967,7 @@ if (user?.id) {
           </div>
 
           {/* Trading Panel */}
-          <div
-            className={`${
-              mobileTab === 'trade' ? 'flex' : 'hidden'
-            } lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}
-          >
-            {/* Tier Gate */}
+          <div className={`${mobileTab === 'trade' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}>
             {!canTrade && (
               <div className="p-4 m-3 bg-gold/10 border border-gold/30 rounded-xl">
                 <div className="flex items-center gap-3 mb-2">
@@ -1092,11 +987,8 @@ if (user?.id) {
               </div>
             )}
 
-            {/* Tier Badge */}
             <div className="px-3 py-2 border-b border-white/10">
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 ${tierConfig.bgColor} ${tierConfig.borderColor} border rounded-lg`}
-              >
+              <div className={`flex items-center gap-2 px-3 py-1.5 ${tierConfig.bgColor} ${tierConfig.borderColor} border rounded-lg`}>
                 <span className="text-lg">{tierConfig.icon}</span>
                 <div>
                   <span className={`text-sm font-medium ${tierConfig.color}`}>{tierName} Tier</span>
@@ -1105,7 +997,6 @@ if (user?.id) {
               </div>
             </div>
 
-            {/* Account Summary */}
             <div className="p-3 border-b border-white/10">
               <div className="grid grid-cols-2 gap-2">
                 <div className="p-2 bg-white/5 rounded-lg">
@@ -1137,7 +1028,6 @@ if (user?.id) {
               )}
             </div>
 
-            {/* Direction Toggle */}
             <div className="p-3 border-b border-white/10">
               <div className="flex gap-2">
                 <button
@@ -1163,7 +1053,6 @@ if (user?.id) {
               </div>
             </div>
 
-            {/* Lot Size */}
             <div className="p-3 border-b border-white/10">
               <label className="block text-xs text-cream/50 mb-2">Lot Size</label>
               <div className="flex items-center gap-2">
@@ -1207,7 +1096,6 @@ if (user?.id) {
               </div>
             </div>
 
-            {/* Leverage */}
             <div className="p-3 border-b border-white/10">
               <label className="block text-xs text-cream/50 mb-2">Leverage</label>
               <div className="grid grid-cols-3 gap-1">
@@ -1228,14 +1116,11 @@ if (user?.id) {
               </div>
             </div>
 
-            {/* Order Summary */}
             <div className="p-3 border-b border-white/10">
               <div className="space-y-2 text-sm">
                 <div className="flex justify-between">
                   <span className="text-cream/50">Entry Price</span>
-                  <span className="text-cream font-mono">
-                    {formatPrice(tradeDirection === 'buy' ? askPrice : bidPrice)}
-                  </span>
+                  <span className="text-cream font-mono">{formatPrice(tradeDirection === 'buy' ? askPrice : bidPrice)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-cream/50">Position Value</span>
@@ -1258,7 +1143,6 @@ if (user?.id) {
               </div>
             </div>
 
-            {/* Execute Button */}
             <div className="p-3">
               <button
                 onClick={handleTrade}
@@ -1379,11 +1263,7 @@ if (user?.id) {
                   <tr key={(position as any).id} className="border-t border-white/5 hover:bg-white/5">
                     <td className="p-2 text-cream font-medium">{(position as any).symbol}</td>
                     <td className="p-2">
-                      <span
-                        className={`px-2 py-0.5 text-xs font-medium rounded ${
-                          (position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
-                        }`}
-                      >
+                      <span className={`px-2 py-0.5 text-xs font-medium rounded ${(position as any).side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
                         {(position as any).side?.toUpperCase?.() ?? '—'}
                       </span>
                     </td>
@@ -1448,11 +1328,11 @@ if (user?.id) {
                 </div>
 
                 <div className="overflow-y-auto max-h-[60vh]">
-                  {/* Educational Pairs */}
-                  {filteredEducational.length > 0 && (
+                  {/* Rare Pairs (Admin Controlled) */}
+                  {filteredRare.length > 0 && (
                     <div className="p-2 border-b border-white/10">
-                      <p className="px-2 py-1 text-xs text-purple-400 font-medium">📚 Educational Pairs (Admin Controlled)</p>
-                      {filteredEducational.map((asset) => {
+                      <p className="px-2 py-1 text-xs text-cream/60 font-medium">Rare Pairs (Admin Controlled)</p>
+                      {filteredRare.map((asset) => {
                         const p = adminPrices?.[asset.symbol];
                         const bid = p?.bid ?? (livePrices[asset.symbol] ?? asset.price);
                         const ask = p?.ask ?? (livePrices[asset.symbol] ?? asset.price) * 1.0002;
@@ -1466,13 +1346,13 @@ if (user?.id) {
                               setAskPrice(Number(ask));
                               setShowAssetSelector(false);
                             }}
-                            className="w-full flex items-center justify-between p-3 hover:bg-purple-500/10 rounded-lg transition-colors"
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
                           >
                             <div className="flex items-center gap-3">
                               <span className="text-xl">{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
                               <div className="text-left">
                                 <p className="text-sm font-medium text-cream">{asset.symbol}</p>
-                                <p className="text-xs text-purple-400">{asset.name}</p>
+                                <p className="text-xs text-cream/50">{asset.name}</p>
                               </div>
                             </div>
                             <div className="text-right">
@@ -1537,7 +1417,7 @@ if (user?.id) {
 
                   {/* All Pairs */}
                   <div className="p-2">
-                    <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Pairs (Real Market Data)</p>
+                    <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Pairs</p>
                     {filteredAll.map((asset) => {
                       const mid = livePrices[asset.symbol] ?? asset.price;
                       return (
