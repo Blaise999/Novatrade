@@ -182,7 +182,7 @@ function WalletContent() {
     }
 
     // ✅ FIX: oderId -> orderId
- submitDeposit({
+await submitDeposit({
   amount: parseFloat(amount),
   method: selectedMethodType!,
   methodId,
@@ -192,6 +192,9 @@ function WalletContent() {
   userId: user.id,
   userEmail: user.email,
 });
+
+
+
 
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
