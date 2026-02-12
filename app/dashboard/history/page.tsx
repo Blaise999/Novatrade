@@ -344,7 +344,7 @@ function DebugPanel({
 /* -------------------------- page -------------------------- */
 
 export default function HistoryPage() {
-  const { user } = useStore();
+  const { user: storeUser } = useStore();
 
   const [tradeHistory, setTradeHistory] = useState<Trade[]>([]);
   const [loading, setLoading] = useState(true);
@@ -364,6 +364,43 @@ export default function HistoryPage() {
   const debugEnabled = useDebugEnabled();
   const dbg = useHistoryDebugger(debugEnabled);
 
+  // ✅ IMPORTANT: use stable refs (avoid dependency loops)
+  const dbgEnabled = dbg.enabled;
+  const dbgLog = dbg.log;
+  const dbgSetSnapshot = dbg.setSnapshot;
+
+  // ✅ Auth UID is the ONLY source of truth for trades.user_id
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  // Load auth user + keep in sync
+  useEffect(() => {
+    if (!isSupabaseConfigured()) return;
+
+    let alive = true;
+
+    (async () => {
+      try {
+        const { data, error } = await supabase.auth.getUser();
+        if (!alive) return;
+        if (error) dbgLog('warn', 'auth.getUser() error', error);
+        setAuthUserId(data.user?.id ?? null);
+      } finally {
+        if (alive) setAuthReady(true);
+      }
+    })();
+
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthUserId(session?.user?.id ?? null);
+      setAuthReady(true);
+    });
+
+    return () => {
+      alive = false;
+      data.subscription.unsubscribe();
+    };
+  }, [dbgLog]);
+
   // debounce search
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 250);
@@ -371,11 +408,27 @@ export default function HistoryPage() {
   }, [searchQuery]);
 
   const fetchTradeHistory = useCallback(async () => {
-    if (!user?.id || !isSupabaseConfigured()) {
+    if (!isSupabaseConfigured()) {
       setLoading(false);
-      dbg.log('warn', 'fetchTradeHistory() skipped: no user or supabase not configured', {
-        hasUser: !!user?.id,
-        supabaseConfigured: isSupabaseConfigured(),
+      return;
+    }
+
+    if (!authReady) {
+      // Wait for auth resolution (prevents “empty then later fill” flicker)
+      setLoading(true);
+      return;
+    }
+
+    if (!authUserId) {
+      // Not logged in
+      setTradeHistory([]);
+      setTotalTrades(0);
+      setError('Please sign in to view your trade history.');
+      setLoading(false);
+
+      dbgLog('warn', 'fetchTradeHistory() blocked: no authUserId', {
+        storeUserId: storeUser?.id ?? null,
+        authUserId: null,
       });
       return;
     }
@@ -383,8 +436,9 @@ export default function HistoryPage() {
     setLoading(true);
     setError(null);
 
-    dbg.log('info', 'fetchTradeHistory() start', {
-      userId: user.id,
+    dbgLog('info', 'fetchTradeHistory() start', {
+      storeUserId: storeUser?.id ?? null,
+      authUserId,
       statusFilter,
       marketFilter,
       debouncedQuery,
@@ -396,12 +450,12 @@ export default function HistoryPage() {
       let query = supabase
         .from('trades')
         .select('*', { count: 'exact' })
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false }); // safest default
+        .eq('user_id', authUserId)
+        .order('created_at', { ascending: false });
 
-      // Market filter
+      // Market filter (DB stores crypto | fx | stocks)
       if (marketFilter !== 'all') {
-        query = query.eq('market_type', marketFilter); // crypto | fx | stocks
+        query = query.eq('market_type', marketFilter);
       }
 
       // Search
@@ -409,13 +463,13 @@ export default function HistoryPage() {
         query = query.ilike('symbol', `%${debouncedQuery}%`);
       }
 
-      // Status filter (DB-side only where reliable)
+      // Status filter (DB-side where reliable)
       if (statusFilter === 'open') {
         query = query.in('status', ['open', 'pending', 'active']);
       } else if (statusFilter === 'cancelled') {
         query = query.in('status', ['cancelled', 'expired']);
       }
-      // won/lost handled after mapping (because "closed" becomes won/lost based on profit)
+      // won/lost handled after mapping (because "closed" can become won/lost based on profit)
 
       // Pagination
       const from = (page - 1) * pageSize;
@@ -425,7 +479,7 @@ export default function HistoryPage() {
       const { data, error: fetchError, count } = await query;
       if (fetchError) throw fetchError;
 
-      dbg.log('info', 'DB fetch done', {
+      dbgLog('info', 'DB fetch done', {
         rawRows: (data ?? []).length,
         count,
         sampleRaw: (data ?? [])[0] ?? null,
@@ -463,7 +517,7 @@ export default function HistoryPage() {
         ) {
           const effectiveQty = qty ?? (entry > 0 ? amount / entry : 0);
           const diff = exit - entry;
-          const signed = direction === 'down' ? -diff : diff;
+          const signed = direction === 'down' ? -(diff) : diff;
           profit = signed * effectiveQty * lev;
         }
 
@@ -505,7 +559,7 @@ export default function HistoryPage() {
         };
       });
 
-      // Apply won/lost filter after mapping (reliable across schemas)
+      // Apply won/lost after mapping (reliable across schemas)
       const filtered =
         statusFilter === 'won'
           ? mapped.filter((t) => t.status === 'won')
@@ -513,7 +567,7 @@ export default function HistoryPage() {
           ? mapped.filter((t) => t.status === 'lost')
           : mapped;
 
-      dbg.log('info', 'Mapping/filter result', {
+      dbgLog('info', 'Mapping/filter result', {
         mapped: mapped.length,
         final: filtered.length,
         sampleFinal: filtered[0] ?? null,
@@ -523,7 +577,7 @@ export default function HistoryPage() {
       setTotalTrades(count || 0);
     } catch (err: any) {
       console.error('Error fetching trade history:', err);
-      dbg.log('error', 'fetchTradeHistory() error', {
+      dbgLog('error', 'fetchTradeHistory() error', {
         message: err?.message ?? String(err),
         code: err?.code ?? null,
         details: err,
@@ -537,35 +591,37 @@ export default function HistoryPage() {
       setLoading(false);
     }
   }, [
-    user?.id,
+    authReady,
+    authUserId,
+    storeUser?.id,
     statusFilter,
     marketFilter,
     debouncedQuery,
     page,
     pageSize,
-    dbg, // ok: dbg functions are stable; if you get loop issues, replace with dbg.enabled/dbg.log
+    dbgLog,
   ]);
 
   useEffect(() => {
     fetchTradeHistory();
   }, [fetchTradeHistory]);
 
-  // Realtime updates
+  // Realtime updates (AUTH UID based)
   useEffect(() => {
-    if (!user?.id || !isSupabaseConfigured()) return;
+    if (!authReady || !authUserId || !isSupabaseConfigured()) return;
 
     const channel = supabase
-      .channel('trade-history-updates')
+      .channel(`trade-history-updates:${authUserId}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
           table: 'trades',
-          filter: `user_id=eq.${user.id}`,
+          filter: `user_id=eq.${authUserId}`,
         },
         () => {
-          dbg.log('info', 'Realtime change received -> refetch');
+          dbgLog('info', 'Realtime change received -> refetch');
           fetchTradeHistory();
         }
       )
@@ -574,46 +630,48 @@ export default function HistoryPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user?.id, fetchTradeHistory, dbg]);
+  }, [authReady, authUserId, fetchTradeHistory, dbgLog]);
 
   const runProbe = useCallback(async () => {
-    if (!dbg.enabled) return;
+    if (!dbgEnabled) return;
 
-    dbg.log('info', 'Running probe...');
+    dbgLog('info', 'Running probe...');
 
     try {
       const sessionRes = await supabase.auth.getSession();
       const userRes = await supabase.auth.getUser();
 
-      const storeUserId = user?.id ?? null;
-      const authUserId = userRes.data?.user?.id ?? null;
+      const storeUserId = storeUser?.id ?? null;
+      const authId = userRes.data?.user?.id ?? null;
 
-      dbg.log('info', 'Auth/session check', {
+      dbgLog('info', 'Auth/session check', {
         hasSession: !!sessionRes.data?.session,
         storeUserId,
-        authUserId,
+        authUserId: authId,
       });
 
-      // Count probe
+      const probeUserId = authId ?? '__no_user__';
+
+      // Count probe (AUTH ID)
       const countRes = await supabase
         .from('trades')
         .select('id', { count: 'exact', head: true })
-        .eq('user_id', storeUserId ?? '__no_user__');
+        .eq('user_id', probeUserId);
 
-      dbg.log('info', 'Count probe finished', {
+      dbgLog('info', 'Count probe finished', {
         count: countRes.count,
         error: countRes.error?.message ?? null,
       });
 
-      // Last 10 raw rows
+      // Last 10 raw rows (AUTH ID)
       const last10Res = await supabase
         .from('trades')
         .select('id,user_id,symbol,market_type,asset_type,status,opened_at,created_at,profit_loss,entry_price,exit_price,session_id')
-        .eq('user_id', storeUserId ?? '__no_user__')
+        .eq('user_id', probeUserId)
         .order('created_at', { ascending: false })
         .limit(10);
 
-      dbg.log('info', 'Last10 probe finished', {
+      dbgLog('info', 'Last10 probe finished', {
         rows: last10Res.data?.length ?? 0,
         error: last10Res.error?.message ?? null,
       });
@@ -629,22 +687,18 @@ export default function HistoryPage() {
 
       const hints: string[] = [];
 
-      if (storeUserId && authUserId && storeUserId !== authUserId) {
-        hints.push('Mismatch: store user.id !== Supabase auth user.id. You may be querying the wrong user_id.');
+      if (storeUserId && authId && storeUserId !== authId) {
+        hints.push('Mismatch: store user.id !== Supabase auth user.id. (Now fixed: history uses auth user id.)');
       }
 
       if ((countRes.count ?? 0) === 0) {
         hints.push(
-          'Trades count is 0 for this user_id. Either saveTradeToHistory() never inserted rows, saved wrong user_id, or RLS blocked reads.'
+          'Trades count is 0 for this auth user_id. Either inserts used wrong user_id, or RLS is blocking reads.'
         );
       }
 
-      if (countRes.error?.message) {
-        hints.push(`Count probe error: ${countRes.error.message}`);
-      }
-      if (last10Res.error?.message) {
-        hints.push(`Last10 probe error: ${last10Res.error.message}`);
-      }
+      if (countRes.error?.message) hints.push(`Count probe error: ${countRes.error.message}`);
+      if (last10Res.error?.message) hints.push(`Last10 probe error: ${last10Res.error.message}`);
 
       if (
         String(last10Res.error?.message ?? '').toLowerCase().includes('row level security') ||
@@ -653,24 +707,18 @@ export default function HistoryPage() {
         hints.push('RLS hint: trades table policies may be blocking SELECT for this user.');
       }
 
-      if (last10.length > 0) {
-        const first = last10[0] as any;
-        if (!first.market_type) hints.push('Your rows have empty market_type. History market filters may hide them.');
-        if (!first.symbol) hints.push('Your rows have empty symbol. Search + display will look blank.');
-      }
-
-      dbg.setSnapshot({
+      dbgSetSnapshot({
         storeUserId,
-        authUserId,
+        authUserId: authId,
         userTradesCount: countRes.count ?? 0,
         distinct,
         last10,
         hints,
       });
     } catch (e: any) {
-      dbg.log('error', 'Probe crashed', e?.message ?? e);
+      dbgLog('error', 'Probe crashed', e?.message ?? e);
     }
-  }, [dbg, user?.id]);
+  }, [dbgEnabled, dbgLog, dbgSetSnapshot, storeUser?.id]);
 
   const stats = useMemo(() => {
     const completed = tradeHistory.filter((t) => t.status === 'won' || t.status === 'lost');
@@ -683,7 +731,8 @@ export default function HistoryPage() {
     const winRate = completed.length > 0 ? ((won / completed.length) * 100).toFixed(1) : '0.0';
 
     return {
-      totalTrades,
+      pageTrades: tradeHistory.length,
+      totalTradesDb: totalTrades,
       wonTrades: won,
       lostTrades: lost,
       totalProfit,
@@ -820,8 +869,8 @@ export default function HistoryPage() {
               <BarChart3 className="w-5 h-5 text-gold" />
             </div>
           </div>
-          <p className="text-xs text-slate-500">Trades (filtered)</p>
-          <p className="text-2xl font-bold text-cream">{loading ? '-' : stats.totalTrades}</p>
+          <p className="text-xs text-slate-500">Trades (this page)</p>
+          <p className="text-2xl font-bold text-cream">{loading ? '-' : stats.pageTrades}</p>
         </motion.div>
 
         <motion.div
