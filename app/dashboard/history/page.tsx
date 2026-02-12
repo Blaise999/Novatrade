@@ -16,6 +16,9 @@ import {
   Target,
   RefreshCw,
   AlertCircle,
+  Bug,
+  Copy,
+  Trash2,
 } from 'lucide-react';
 
 import { useStore } from '@/lib/supabase/store-supabase';
@@ -42,6 +45,8 @@ interface Trade {
   date: string;
   created_at: string;
 }
+
+/* -------------------------- small utils -------------------------- */
 
 function toNum(v: any, fallback = 0) {
   const n = Number(v);
@@ -102,13 +107,12 @@ function formatPrice(v: number) {
 
 function normalizeDirection(raw: any): 'up' | 'down' {
   const v = String(raw ?? '').toLowerCase().trim();
-  // supports: up/down, buy/sell, long/short
   if (['down', 'sell', 'short'].includes(v)) return 'down';
   return 'up';
 }
 
 function normalizeMarketTypeRow(t: any): TradeType {
-  // Prefer market_type (your canonical)
+  // Prefer market_type (canonical)
   const mt = String(t.market_type ?? '').toLowerCase(); // crypto | fx | stocks
   if (mt === 'crypto') return 'crypto';
   if (mt === 'fx') return 'forex';
@@ -124,20 +128,220 @@ function normalizeMarketTypeRow(t: any): TradeType {
 }
 
 function computeDisplayStatus(dbStatusRaw: string, profit: number): TradeStatus {
-  const s = dbStatusRaw.toLowerCase();
+  const s = String(dbStatusRaw ?? '').toLowerCase();
 
-  // Legacy statuses
   if (s === 'won') return 'won';
   if (s === 'lost') return 'lost';
   if (s === 'cancelled' || s === 'expired') return 'cancelled';
   if (s === 'active' || s === 'open' || s === 'pending') return 'pending';
   if (s === 'liquidated') return 'lost';
 
-  // Canonical: closed -> determine by profit sign
   if (s === 'closed') return profit >= 0 ? 'won' : 'lost';
 
   return 'pending';
 }
+
+/* -------------------------- smart debugger -------------------------- */
+
+type DebugLevel = 'info' | 'warn' | 'error';
+
+type DebugEntry = {
+  ts: string;
+  level: DebugLevel;
+  msg: string;
+  data?: any;
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeJson(obj: any) {
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
+}
+
+function useDebugEnabled() {
+  return useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('debug') === '1';
+  }, []);
+}
+
+function useHistoryDebugger(enabled: boolean) {
+  const [logs, setLogs] = useState<DebugEntry[]>([]);
+  const [snapshot, setSnapshot] = useState<any>(null);
+
+  const log = useCallback(
+    (level: DebugLevel, msg: string, data?: any) => {
+      if (!enabled) return;
+
+      setLogs((prev) => [{ ts: nowIso(), level, msg, data }, ...prev].slice(0, 250));
+
+      const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+      fn(`[HistoryDebug] ${msg}`, data ?? '');
+    },
+    [enabled]
+  );
+
+  const clear = useCallback(() => {
+    setLogs([]);
+    setSnapshot(null);
+  }, []);
+
+  const copy = useCallback(async () => {
+    if (!enabled) return;
+
+    const payload = { snapshot, logs };
+    try {
+      await navigator.clipboard.writeText(safeJson(payload));
+      log('info', 'Copied debug report to clipboard ✅');
+    } catch (e) {
+      log('error', 'Failed to copy debug report', e);
+    }
+  }, [enabled, logs, snapshot, log]);
+
+  return { enabled, logs, snapshot, setSnapshot, log, clear, copy };
+}
+
+function DebugPanel({
+  enabled,
+  logs,
+  snapshot,
+  onProbe,
+  onCopy,
+  onClear,
+}: {
+  enabled: boolean;
+  logs: DebugEntry[];
+  snapshot: any;
+  onProbe: () => void;
+  onCopy: () => void;
+  onClear: () => void;
+}) {
+  if (!enabled) return null;
+
+  return (
+    <div className="p-4 rounded-2xl border border-white/10 bg-white/5">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-cream">
+          <Bug className="w-4 h-4 text-gold" />
+          History Debugger
+        </div>
+        <span className="text-xs px-2 py-1 rounded-lg bg-gold/10 border border-gold/20 text-gold">
+          debug=1
+        </span>
+
+        <div className="ml-auto flex flex-wrap gap-2">
+          <button
+            onClick={onProbe}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 text-slate-300 hover:text-cream border border-white/10"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Run Probe
+          </button>
+
+          <button
+            onClick={onCopy}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 text-slate-300 hover:text-cream border border-white/10"
+          >
+            <Copy className="w-4 h-4" />
+            Copy Report
+          </button>
+
+          <button
+            onClick={onClear}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5 text-slate-300 hover:text-cream border border-white/10"
+          >
+            <Trash2 className="w-4 h-4" />
+            Clear
+          </button>
+        </div>
+      </div>
+
+      {snapshot && (
+        <div className="mt-3 grid grid-cols-1 lg:grid-cols-3 gap-3">
+          <div className="p-3 rounded-xl bg-black/20 border border-white/10">
+            <p className="text-xs text-slate-500">Store user.id</p>
+            <p className="text-sm text-cream break-all">{snapshot.storeUserId ?? '-'}</p>
+          </div>
+          <div className="p-3 rounded-xl bg-black/20 border border-white/10">
+            <p className="text-xs text-slate-500">Auth user.id</p>
+            <p className="text-sm text-cream break-all">{snapshot.authUserId ?? '-'}</p>
+          </div>
+          <div className="p-3 rounded-xl bg-black/20 border border-white/10">
+            <p className="text-xs text-slate-500">Trades count (user_id)</p>
+            <p className="text-sm text-cream">{snapshot.userTradesCount ?? '-'}</p>
+          </div>
+
+          <div className="p-3 rounded-xl bg-black/20 border border-white/10 lg:col-span-3">
+            <p className="text-xs text-slate-500">Distinct values (from last 10)</p>
+            <pre className="text-xs text-slate-300 mt-2 whitespace-pre-wrap break-words">
+              {safeJson(snapshot.distinct ?? {})}
+            </pre>
+          </div>
+
+          <div className="p-3 rounded-xl bg-black/20 border border-white/10 lg:col-span-3">
+            <p className="text-xs text-slate-500">Last 10 raw rows (preview)</p>
+            <pre className="text-xs text-slate-300 mt-2 whitespace-pre-wrap break-words max-h-56 overflow-auto">
+              {safeJson(snapshot.last10 ?? [])}
+            </pre>
+          </div>
+
+          {snapshot.hints?.length ? (
+            <div className="p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 lg:col-span-3">
+              <p className="text-xs text-yellow-200 uppercase">Hints</p>
+              <ul className="mt-2 space-y-1 text-sm text-yellow-100/90">
+                {snapshot.hints.map((h: string, idx: number) => (
+                  <li key={idx}>• {h}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      <div className="mt-3">
+        <p className="text-xs text-slate-500 mb-2">Logs</p>
+        <div className="space-y-2 max-h-64 overflow-auto">
+          {logs.length === 0 ? (
+            <p className="text-sm text-slate-400">No logs yet. Click “Run Probe”.</p>
+          ) : (
+            logs.map((l, i) => (
+              <div key={i} className="p-2 rounded-lg bg-black/20 border border-white/10">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded-md border ${
+                      l.level === 'error'
+                        ? 'text-loss border-loss/30 bg-loss/10'
+                        : l.level === 'warn'
+                        ? 'text-yellow-300 border-yellow-300/30 bg-yellow-500/10'
+                        : 'text-slate-300 border-white/10 bg-white/5'
+                    }`}
+                  >
+                    {l.level.toUpperCase()}
+                  </span>
+                  <span className="text-xs text-slate-500">{l.ts}</span>
+                </div>
+                <p className="text-sm text-cream mt-1">{l.msg}</p>
+                {l.data != null && (
+                  <pre className="text-xs text-slate-300 mt-2 whitespace-pre-wrap break-words">
+                    {safeJson(l.data)}
+                  </pre>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------- page -------------------------- */
 
 export default function HistoryPage() {
   const { user } = useStore();
@@ -157,6 +361,10 @@ export default function HistoryPage() {
 
   const pageSize = 20;
 
+  const debugEnabled = useDebugEnabled();
+  const dbg = useHistoryDebugger(debugEnabled);
+
+  // debounce search
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 250);
     return () => clearTimeout(t);
@@ -165,21 +373,33 @@ export default function HistoryPage() {
   const fetchTradeHistory = useCallback(async () => {
     if (!user?.id || !isSupabaseConfigured()) {
       setLoading(false);
+      dbg.log('warn', 'fetchTradeHistory() skipped: no user or supabase not configured', {
+        hasUser: !!user?.id,
+        supabaseConfigured: isSupabaseConfigured(),
+      });
       return;
     }
 
     setLoading(true);
     setError(null);
 
+    dbg.log('info', 'fetchTradeHistory() start', {
+      userId: user.id,
+      statusFilter,
+      marketFilter,
+      debouncedQuery,
+      page,
+      pageSize,
+    });
+
     try {
       let query = supabase
         .from('trades')
         .select('*', { count: 'exact' })
         .eq('user_id', user.id)
-        // prefer opened_at if you have it, else created_at works
-        .order('opened_at', { ascending: false });
+        .order('created_at', { ascending: false }); // safest default
 
-      // Market filter — canonical
+      // Market filter
       if (marketFilter !== 'all') {
         query = query.eq('market_type', marketFilter); // crypto | fx | stocks
       }
@@ -191,12 +411,11 @@ export default function HistoryPage() {
 
       // Status filter (DB-side only where reliable)
       if (statusFilter === 'open') {
-        // support legacy "active"
         query = query.in('status', ['open', 'pending', 'active']);
       } else if (statusFilter === 'cancelled') {
         query = query.in('status', ['cancelled', 'expired']);
       }
-      // won/lost handled after mapping because some trades use closed + profit_loss
+      // won/lost handled after mapping (because "closed" becomes won/lost based on profit)
 
       // Pagination
       const from = (page - 1) * pageSize;
@@ -205,6 +424,12 @@ export default function HistoryPage() {
 
       const { data, error: fetchError, count } = await query;
       if (fetchError) throw fetchError;
+
+      dbg.log('info', 'DB fetch done', {
+        rawRows: (data ?? []).length,
+        count,
+        sampleRaw: (data ?? [])[0] ?? null,
+      });
 
       const mapped: Trade[] = (data || []).map((t: any) => {
         const type = normalizeMarketTypeRow(t);
@@ -217,8 +442,8 @@ export default function HistoryPage() {
         // Profit base
         let profit = toNum(t.profit_loss, 0);
 
-        // Legacy binary fallback
-        const tradeTypeRaw = String(t.trade_type ?? '').toLowerCase(); // binary/spot/margin/...
+        // Binary fallback
+        const tradeTypeRaw = String(t.trade_type ?? '').toLowerCase();
         const statusRaw = String(t.status ?? '').toLowerCase();
         const payoutPct = toNum(t.payout_percent, 85);
 
@@ -288,16 +513,38 @@ export default function HistoryPage() {
           ? mapped.filter((t) => t.status === 'lost')
           : mapped;
 
+      dbg.log('info', 'Mapping/filter result', {
+        mapped: mapped.length,
+        final: filtered.length,
+        sampleFinal: filtered[0] ?? null,
+      });
+
       setTradeHistory(filtered);
-      // count is “DB filtered count” (market/search/open/cancelled), not post-mapped won/lost
       setTotalTrades(count || 0);
     } catch (err: any) {
       console.error('Error fetching trade history:', err);
+      dbg.log('error', 'fetchTradeHistory() error', {
+        message: err?.message ?? String(err),
+        code: err?.code ?? null,
+        details: err,
+        hint:
+          String(err?.message ?? '').toLowerCase().includes('row level security')
+            ? 'RLS is likely blocking reads for trades.'
+            : null,
+      });
       setError(err?.message || 'Failed to load trade history');
     } finally {
       setLoading(false);
     }
-  }, [user?.id, statusFilter, marketFilter, debouncedQuery, page]);
+  }, [
+    user?.id,
+    statusFilter,
+    marketFilter,
+    debouncedQuery,
+    page,
+    pageSize,
+    dbg, // ok: dbg functions are stable; if you get loop issues, replace with dbg.enabled/dbg.log
+  ]);
 
   useEffect(() => {
     fetchTradeHistory();
@@ -318,6 +565,7 @@ export default function HistoryPage() {
           filter: `user_id=eq.${user.id}`,
         },
         () => {
+          dbg.log('info', 'Realtime change received -> refetch');
           fetchTradeHistory();
         }
       )
@@ -326,7 +574,103 @@ export default function HistoryPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user?.id, fetchTradeHistory]);
+  }, [user?.id, fetchTradeHistory, dbg]);
+
+  const runProbe = useCallback(async () => {
+    if (!dbg.enabled) return;
+
+    dbg.log('info', 'Running probe...');
+
+    try {
+      const sessionRes = await supabase.auth.getSession();
+      const userRes = await supabase.auth.getUser();
+
+      const storeUserId = user?.id ?? null;
+      const authUserId = userRes.data?.user?.id ?? null;
+
+      dbg.log('info', 'Auth/session check', {
+        hasSession: !!sessionRes.data?.session,
+        storeUserId,
+        authUserId,
+      });
+
+      // Count probe
+      const countRes = await supabase
+        .from('trades')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', storeUserId ?? '__no_user__');
+
+      dbg.log('info', 'Count probe finished', {
+        count: countRes.count,
+        error: countRes.error?.message ?? null,
+      });
+
+      // Last 10 raw rows
+      const last10Res = await supabase
+        .from('trades')
+        .select('id,user_id,symbol,market_type,asset_type,status,opened_at,created_at,profit_loss,entry_price,exit_price,session_id')
+        .eq('user_id', storeUserId ?? '__no_user__')
+        .order('created_at', { ascending: false })
+        .limit(10);
+
+      dbg.log('info', 'Last10 probe finished', {
+        rows: last10Res.data?.length ?? 0,
+        error: last10Res.error?.message ?? null,
+      });
+
+      const last10 = last10Res.data ?? [];
+
+      const distinct = {
+        statuses: Array.from(new Set(last10.map((r: any) => String(r.status ?? '')))),
+        market_types: Array.from(new Set(last10.map((r: any) => String(r.market_type ?? '')))),
+        asset_types: Array.from(new Set(last10.map((r: any) => String(r.asset_type ?? '')))),
+        user_ids: Array.from(new Set(last10.map((r: any) => String(r.user_id ?? '')))),
+      };
+
+      const hints: string[] = [];
+
+      if (storeUserId && authUserId && storeUserId !== authUserId) {
+        hints.push('Mismatch: store user.id !== Supabase auth user.id. You may be querying the wrong user_id.');
+      }
+
+      if ((countRes.count ?? 0) === 0) {
+        hints.push(
+          'Trades count is 0 for this user_id. Either saveTradeToHistory() never inserted rows, saved wrong user_id, or RLS blocked reads.'
+        );
+      }
+
+      if (countRes.error?.message) {
+        hints.push(`Count probe error: ${countRes.error.message}`);
+      }
+      if (last10Res.error?.message) {
+        hints.push(`Last10 probe error: ${last10Res.error.message}`);
+      }
+
+      if (
+        String(last10Res.error?.message ?? '').toLowerCase().includes('row level security') ||
+        String(countRes.error?.message ?? '').toLowerCase().includes('row level security')
+      ) {
+        hints.push('RLS hint: trades table policies may be blocking SELECT for this user.');
+      }
+
+      if (last10.length > 0) {
+        const first = last10[0] as any;
+        if (!first.market_type) hints.push('Your rows have empty market_type. History market filters may hide them.');
+        if (!first.symbol) hints.push('Your rows have empty symbol. Search + display will look blank.');
+      }
+
+      dbg.setSnapshot({
+        storeUserId,
+        authUserId,
+        userTradesCount: countRes.count ?? 0,
+        distinct,
+        last10,
+        hints,
+      });
+    } catch (e: any) {
+      dbg.log('error', 'Probe crashed', e?.message ?? e);
+    }
+  }, [dbg, user?.id]);
 
   const stats = useMemo(() => {
     const completed = tradeHistory.filter((t) => t.status === 'won' || t.status === 'lost');
@@ -339,7 +683,7 @@ export default function HistoryPage() {
     const winRate = completed.length > 0 ? ((won / completed.length) * 100).toFixed(1) : '0.0';
 
     return {
-      totalTrades, // DB count for current DB filters
+      totalTrades,
       wonTrades: won,
       lostTrades: lost,
       totalProfit,
@@ -364,10 +708,7 @@ export default function HistoryPage() {
       t.profit,
     ]);
 
-    const csvContent =
-      [headers, ...rows]
-        .map((row) => row.map(csvEscape).join(','))
-        .join('\n') + '\n';
+    const csvContent = [headers, ...rows].map((row) => row.map(csvEscape).join(',')).join('\n') + '\n';
 
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -413,9 +754,12 @@ export default function HistoryPage() {
         <div>
           <h1 className="text-2xl font-display font-bold text-cream">Trade History</h1>
           <p className="text-slate-400 mt-1">All markets — Crypto, FX, Stocks</p>
-          <p className="text-xs text-slate-500 mt-2">
-            Stats shown for the current page (use Export for what you see).
-          </p>
+          <p className="text-xs text-slate-500 mt-2">Stats shown for the current page.</p>
+          {debugEnabled && (
+            <p className="text-xs text-gold/90 mt-1">
+              Debug enabled — add/remove <span className="font-mono">?debug=1</span>
+            </p>
+          )}
         </div>
 
         <div className="flex gap-2">
@@ -437,6 +781,16 @@ export default function HistoryPage() {
         </div>
       </div>
 
+      {/* Debug Panel */}
+      <DebugPanel
+        enabled={dbg.enabled}
+        logs={dbg.logs}
+        snapshot={dbg.snapshot}
+        onProbe={runProbe}
+        onCopy={dbg.copy}
+        onClear={dbg.clear}
+      />
+
       {/* Error State */}
       {error && (
         <div className="p-4 bg-loss/10 border border-loss/20 rounded-xl flex items-center gap-3">
@@ -456,7 +810,11 @@ export default function HistoryPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-gold/10 rounded-xl flex items-center justify-center">
               <BarChart3 className="w-5 h-5 text-gold" />
@@ -466,7 +824,12 @@ export default function HistoryPage() {
           <p className="text-2xl font-bold text-cream">{loading ? '-' : stats.totalTrades}</p>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.08 }}
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-profit/10 rounded-xl flex items-center justify-center">
               <Target className="w-5 h-5 text-profit" />
@@ -476,19 +839,39 @@ export default function HistoryPage() {
           <p className="text-2xl font-bold text-profit">{loading ? '-' : `${stats.winRate}%`}</p>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.16 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.16 }}
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center">
               <DollarSign className="w-5 h-5 text-electric" />
             </div>
           </div>
           <p className="text-xs text-slate-500">Invested (page)</p>
-          <p className="text-2xl font-bold text-cream">{loading ? '-' : `$${stats.totalInvested.toLocaleString()}`}</p>
+          <p className="text-2xl font-bold text-cream">
+            {loading ? '-' : `$${stats.totalInvested.toLocaleString()}`}
+          </p>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
-          <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'}`}>
-            {stats.totalProfit >= 0 ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.24 }}
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div
+            className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+              stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'
+            }`}
+          >
+            {stats.totalProfit >= 0 ? (
+              <TrendingUp className="w-5 h-5 text-profit" />
+            ) : (
+              <TrendingDown className="w-5 h-5 text-loss" />
+            )}
           </div>
           <p className="text-xs text-slate-500 mt-2">P&L (page)</p>
           <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-profit' : 'text-loss'}`}>
@@ -594,7 +977,11 @@ export default function HistoryPage() {
                   <div className="lg:hidden space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                            trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
+                          }`}
+                        >
                           {trade.direction === 'up' ? (
                             <TrendingUp className="w-5 h-5 text-profit" />
                           ) : (
@@ -629,7 +1016,15 @@ export default function HistoryPage() {
                       </div>
 
                       <div className="text-right">
-                        <p className={`font-semibold ${trade.status === 'pending' ? 'text-yellow-400' : trade.profit >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        <p
+                          className={`font-semibold ${
+                            trade.status === 'pending'
+                              ? 'text-yellow-400'
+                              : trade.profit >= 0
+                              ? 'text-profit'
+                              : 'text-loss'
+                          }`}
+                        >
                           {pnlLabel}
                         </p>
                         <p className="text-xs text-slate-500">{trade.date}</p>
@@ -640,7 +1035,11 @@ export default function HistoryPage() {
                   {/* Desktop */}
                   <div className="hidden lg:grid grid-cols-9 gap-4 items-center">
                     <div className="flex items-center gap-3">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
+                      <div
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                          trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
+                        }`}
+                      >
                         {trade.direction === 'up' ? (
                           <TrendingUp className="w-4 h-4 text-profit" />
                         ) : (
@@ -649,12 +1048,18 @@ export default function HistoryPage() {
                       </div>
                       <div>
                         <p className="text-sm font-semibold text-cream">{trade.asset}</p>
-                        <p className="text-xs text-slate-500">{trade.entryPrice ? `Entry: ${formatPrice(trade.entryPrice)}` : ''}</p>
+                        <p className="text-xs text-slate-500">
+                          {trade.entryPrice ? `Entry: ${formatPrice(trade.entryPrice)}` : ''}
+                        </p>
                       </div>
                     </div>
 
                     <div>
-                      <span className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(trade.type)}`}>
+                      <span
+                        className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(
+                          trade.type
+                        )}`}
+                      >
                         {marketLabel(trade.type)}
                       </span>
                     </div>
@@ -662,7 +1067,9 @@ export default function HistoryPage() {
                     <div className="text-sm text-cream">{sideLabel}</div>
                     <div className="text-sm text-cream">${trade.amount.toLocaleString()}</div>
                     <div className="text-sm font-mono text-cream">{formatPrice(trade.entryPrice)}</div>
-                    <div className="text-sm font-mono text-cream">{trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}</div>
+                    <div className="text-sm font-mono text-cream">
+                      {trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}
+                    </div>
 
                     <div className="flex items-center gap-1 text-sm text-slate-400">
                       <Clock className="w-3 h-3" />
@@ -694,7 +1101,11 @@ export default function HistoryPage() {
                         {pnlLabel}
                       </span>
 
-                      <span className={`ml-2 inline-flex items-center text-xs px-2 py-1 rounded-lg border ${statusPillClass(trade.status)}`}>
+                      <span
+                        className={`ml-2 inline-flex items-center text-xs px-2 py-1 rounded-lg border ${statusPillClass(
+                          trade.status
+                        )}`}
+                      >
                         {trade.status === 'pending' ? 'Open' : trade.status}
                       </span>
                     </div>
@@ -716,6 +1127,7 @@ export default function HistoryPage() {
         )}
       </div>
 
+      {/* Pagination */}
       {!loading && totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-slate-500">
