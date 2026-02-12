@@ -620,68 +620,22 @@ export default function FXTradingPage() {
 
         await refreshUser?.();
 
-        // ✅ FIX: closeTradeInHistory requires tradeId + no extra props
-        const userId = (user as any)?.id as string | undefined;
+        const userId = (user as any)?.id;
         if (userId) {
-          const tradeId = String((pos as any).id);
-          try {
-            await closeTradeInHistory({
-              tradeId,
-              userId,
-              exitPrice: px,
-              pnl,
-              status: 'closed',
-              closedAt: new Date().toISOString(),
-            });
-          } catch (e) {
-            // If history row doesn't exist (e.g., missed open insert), repair by creating then closing.
-            try {
-              const sym = String((pos as any).symbol ?? trigger.symbol);
-              const entry = Number((pos as any).avgEntry ?? (pos as any).entryPrice ?? 0);
-              const lev = Number((pos as any).leverage ?? 0);
-              const openedAt = String((pos as any).openedAt ?? (pos as any).createdAt ?? new Date().toISOString());
-              const lots = qty ? qty / 100000 : null;
-
-              await saveTradeToHistory({
-                id: tradeId,
-                userId,
-                accountId: (marginAccount as any)?.id ?? null,
-                marketType: 'fx',
-                assetType: 'forex',
-                pair: sym,
-                direction: side === 'long' ? 'buy' : 'sell',
-                quantity: qty || null,
-                lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
-                leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
-                entryPrice: Number.isFinite(entry) ? entry : px,
-                openedAt,
-                isSimulated: true,
-                notes: JSON.stringify({
-                  repaired: true,
-                  reason: 'auto-close',
-                  trigger: trigger.reason,
-                }),
-              });
-
-              await closeTradeInHistory({
-                tradeId,
-                userId,
-                exitPrice: px,
-                pnl,
-                status: 'closed',
-                closedAt: new Date().toISOString(),
-              });
-            } catch (e2) {
-              dbg('history close failed (auto)', e2);
-            }
-          }
+          const closed = await closeTradeInHistory({
+            userId,
+            symbol: (pos as any).symbol,
+            exitPrice: px,
+            pnl,
+            status: 'closed',
+            sessionId: (pos as any).id,
+          });
+          if (!(closed as any)?.success) dbg('history close failed (auto)', (closed as any)?.error);
         }
 
         setNotification({
           type: 'success',
-          message: `${trigger.reason === 'sl' ? 'Stop Loss' : 'Take Profit'} hit • ${(pos as any).symbol} • ${
-            pnl >= 0 ? '+' : ''
-          }${formatMoney(pnl)}`,
+          message: `${trigger.reason === 'sl' ? 'Stop Loss' : 'Take Profit'} hit • ${(pos as any).symbol} • ${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}`,
         });
         setTimeout(() => setNotification(null), 3500);
       } finally {
@@ -689,7 +643,7 @@ export default function FXTradingPage() {
         setTimeout(() => autoClosingIdsRef.current.delete(id), 2000);
       }
     },
-    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, user, dbg, formatMoney, marginAccount]
+    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, user, dbg, formatMoney]
   );
 
   useEffect(() => {
@@ -714,14 +668,7 @@ export default function FXTradingPage() {
 
         // Use best available mid for other pairs (simple)
         const midOther = livePricesRef.current?.[sym];
-        const basePx =
-          sym === symbolSelected
-            ? side === 'long'
-              ? currentBid
-              : currentAsk
-            : typeof midOther === 'number'
-            ? midOther
-            : Number(pos.currentPrice ?? 0);
+        const basePx = sym === symbolSelected ? (side === 'long' ? currentBid : currentAsk) : typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
 
         const px = Number(basePx);
         if (!Number.isFinite(px)) continue;
@@ -825,46 +772,31 @@ export default function FXTradingPage() {
         (result as any)?.id ??
         findJustOpenedPositionId(selectedAsset.symbol, qty, entryPrice);
 
-      // ✅ FIX: saveTradeToHistory input shape (no amount/fee/tradeType/status/sessionId/symbol)
-      const userId = (user as any)?.id as string | undefined;
-      if (userId && positionId) {
-        try {
-          await saveTradeToHistory({
-            id: String(positionId), // ✅ use positionId as history id so close can use tradeId = positionId
-            userId,
-            accountId: (marginAccount as any)?.id ?? null,
+      const userId = (user as any)?.id;
+      if (userId) {
+        const saved = await saveTradeToHistory({
+          userId,
+          symbol: selectedAsset.symbol,
 
-            marketType: 'fx',
-            assetType: 'forex',
-            pair: selectedAsset.symbol,
-            direction: tradeDirection,
+          marketType: 'forex',
+          assetType: 'forex',
+          tradeType: 'margin',
+          direction: tradeDirection,
 
-            quantity: qty,
-            lotSize,
-            leverage,
+          amount: notional, // notional
+          quantity: qty, // units
+          entryPrice,
+          leverage,
 
-            entryPrice,
-            stopLoss: stopLoss ?? null,
-            takeProfit: takeProfit ?? null,
+          fee,
+          stopLoss: stopLoss || undefined,
+          takeProfit: takeProfit || undefined,
 
-            openedAt: new Date().toISOString(),
-            isSimulated: true,
+          status: 'active',
+          sessionId: positionId, // ✅ now links correctly
+        });
 
-            // stash extra values safely
-            notes: JSON.stringify({
-              positionId,
-              tradeType: 'margin',
-              notional,
-              fee,
-              tier: currentTier,
-              side: tradeDirection === 'buy' ? 'long' : 'short',
-            }),
-          });
-        } catch (e) {
-          dbg('history insert failed', e);
-        }
-      } else {
-        dbg('history insert skipped (missing userId or positionId)', { userId, positionId });
+        if (!(saved as any)?.success) dbg('history insert failed', (saved as any)?.error);
       }
 
       setNotification({
@@ -896,8 +828,6 @@ export default function FXTradingPage() {
     formatPrice,
     findJustOpenedPositionId,
     dbg,
-    marginAccount,
-    currentTier,
   ]);
 
   const handleClosePosition = useCallback(
@@ -914,60 +844,18 @@ export default function FXTradingPage() {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        // ✅ FIX: closeTradeInHistory requires tradeId + no extra props
-        const userId = (user as any)?.id as string | undefined;
+        const userId = (user as any)?.id;
         if (userId) {
-          const tradeId = String((position as any).id);
-          try {
-            await closeTradeInHistory({
-              tradeId,
-              userId,
-              exitPrice,
-              pnl,
-              status: 'closed',
-              closedAt: new Date().toISOString(),
-            });
-          } catch (e) {
-            // repair by creating then closing
-            try {
-              const sym = String((position as any).symbol);
-              const entry = Number((position as any).avgEntry ?? (position as any).entryPrice ?? 0);
-              const lev = Number((position as any).leverage ?? 0);
-              const openedAt = String((position as any).openedAt ?? (position as any).createdAt ?? new Date().toISOString());
-              const lots = qty ? qty / 100000 : null;
+          const closed = await closeTradeInHistory({
+            userId,
+            symbol: (position as any).symbol,
+            exitPrice,
+            pnl,
+            status: 'closed',
+            sessionId: (position as any).id,
+          });
 
-              await saveTradeToHistory({
-                id: tradeId,
-                userId,
-                accountId: (marginAccount as any)?.id ?? null,
-                marketType: 'fx',
-                assetType: 'forex',
-                pair: sym,
-                direction: side === 'long' ? 'buy' : 'sell',
-                quantity: qty || null,
-                lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
-                leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
-                entryPrice: Number.isFinite(entry) ? entry : exitPrice,
-                openedAt,
-                isSimulated: true,
-                notes: JSON.stringify({
-                  repaired: true,
-                  reason: 'manual-close',
-                }),
-              });
-
-              await closeTradeInHistory({
-                tradeId,
-                userId,
-                exitPrice,
-                pnl,
-                status: 'closed',
-                closedAt: new Date().toISOString(),
-              });
-            } catch (e2) {
-              dbg('history close failed', e2);
-            }
-          }
+          if (!(closed as any)?.success) dbg('history close failed', (closed as any)?.error);
         }
 
         setNotification({
@@ -982,7 +870,7 @@ export default function FXTradingPage() {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg, formatMoney, marginAccount]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg, formatMoney]
   );
 
   const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;
@@ -1127,7 +1015,9 @@ export default function FXTradingPage() {
                   {currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}
                 </span>
                 <div className="text-left">
-                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedAsset.symbol}</p>
+                  <p className="text-sm sm:text-base font-semibold text-cream truncate">
+                    {selectedAsset.symbol}
+                  </p>
                   <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
                 </div>
               </div>
@@ -1277,14 +1167,7 @@ export default function FXTradingPage() {
                 {chartType === 'candle' &&
                   chartData.candles.map((c, i) => (
                     <g key={i}>
-                      <line
-                        x1={c.x}
-                        y1={c.highY}
-                        x2={c.x}
-                        y2={c.lowY}
-                        stroke={c.isGreen ? '#00d9a5' : '#ef4444'}
-                        strokeWidth="1"
-                      />
+                      <line x1={c.x} y1={c.highY} x2={c.x} y2={c.lowY} stroke={c.isGreen ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
                       <rect
                         x={c.x - c.width / 2}
                         y={Math.min(c.openY, c.closeY)}
@@ -1319,14 +1202,7 @@ export default function FXTradingPage() {
                   </>
                 )}
 
-                <line
-                  x1="0"
-                  y1={chartDimensions.height / 2}
-                  x2={chartDimensions.width}
-                  y2={chartDimensions.height / 2}
-                  stroke="#d4af37"
-                  strokeDasharray="4"
-                />
+                <line x1="0" y1={chartDimensions.height / 2} x2={chartDimensions.width} y2={chartDimensions.height / 2} stroke="#d4af37" strokeDasharray="4" />
                 <rect x={chartDimensions.width - 70} y={chartDimensions.height / 2 - 10} width="65" height="20" fill="#d4af37" rx="3" />
                 <text x={chartDimensions.width - 37} y={chartDimensions.height / 2 + 4} textAnchor="middle" fill="#0a0a0f" fontSize="11" fontFamily="monospace">
                   {formatPrice(askPrice)}
@@ -1427,14 +1303,549 @@ export default function FXTradingPage() {
               </div>
             </div>
 
-            {/* ... REST OF YOUR FILE IS UNCHANGED FROM HERE DOWN ... */}
-            {/* I left the remainder as-is because your TypeScript issues were ONLY from the history calls above. */}
-            {/* If you want, paste the remaining bottom half and I’ll return a single “complete no-comments” file. */}
+            <div className="p-3 border-b border-white/10">
+              <label className="block text-xs text-cream/50 mb-2">Lot Size</label>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setLotSize((v) => clamp(Number(v) - 0.1, 0.01, 100))}
+                  disabled={!canTrade}
+                  className="p-2 bg-white/5 hover:bg-white/10 rounded-lg disabled:opacity-50"
+                >
+                  <Minus className="w-4 h-4 text-cream" />
+                </button>
+                <input
+                  type="number"
+                  value={lotSize}
+                  onChange={(e) => setLotSize(clamp(parseFloat(e.target.value) || 0.01, 0.01, 100))}
+                  disabled={!canTrade}
+                  step="0.01"
+                  min="0.01"
+                  className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-cream text-center font-mono disabled:opacity-50"
+                />
+                <button
+                  onClick={() => setLotSize((v) => clamp(Number(v) + 0.1, 0.01, 100))}
+                  disabled={!canTrade}
+                  className="p-2 bg-white/5 hover:bg-white/10 rounded-lg disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4 text-cream" />
+                </button>
+              </div>
+              <div className="flex gap-1 mt-2">
+                {[0.01, 0.1, 0.5, 1.0].map((size) => (
+                  <button
+                    key={size}
+                    onClick={() => setLotSize(size)}
+                    disabled={!canTrade}
+                    className={`flex-1 py-1 text-xs rounded-lg transition-colors ${
+                      lotSize === size ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
+                    } disabled:opacity-50`}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-3 border-b border-white/10">
+              <label className="block text-xs text-cream/50 mb-2">Leverage</label>
+              <div className="grid grid-cols-3 gap-1">
+                {leverageOptions
+                  .filter((l) => Number(tierConfig.maxLeverage ?? 0) === 0 || l <= Number(tierConfig.maxLeverage ?? 0))
+                  .map((lev) => (
+                    <button
+                      key={lev}
+                      onClick={() => setLeverage(lev)}
+                      disabled={!canTrade}
+                      className={`py-2 text-xs rounded-lg transition-colors ${
+                        leverage === lev ? 'bg-gold text-void' : 'bg-white/5 text-cream/70 hover:bg-white/10'
+                      } disabled:opacity-50`}
+                    >
+                      1:{lev}
+                    </button>
+                  ))}
+              </div>
+            </div>
+
+            <div className="p-3 border-b border-white/10">
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Entry Price</span>
+                  <span className="text-cream font-mono">{formatPrice(entryPx)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Units</span>
+                  <span className="text-cream font-mono">{Math.round(units).toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Notional</span>
+                  <span className="text-cream font-mono">{formatMoney(positionNotional)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Required Margin</span>
+                  <span className="text-gold font-mono">{formatMoney(requiredMargin)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-cream/50">Spread</span>
+                  <span className="text-cream font-mono">{spreadPips.toFixed(1)} pips</span>
+                </div>
+                {Number(tierConfig.spreadDiscount ?? 0) > 0 && (
+                  <div className="flex justify-between text-profit">
+                    <span>Spread Discount</span>
+                    <span>-{tierConfig.spreadDiscount}%</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="p-3">
+              <button
+                onClick={handleTrade}
+                disabled={!canTrade || accountBalance === 0 || requiredMargin > freeMargin}
+                className={`w-full py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${
+                  tradeDirection === 'buy' ? 'bg-profit hover:bg-profit/90 text-void' : 'bg-loss hover:bg-loss/90 text-white'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {!canTrade ? (
+                  <>
+                    <Lock className="w-5 h-5" />
+                    Deposit to Trade
+                  </>
+                ) : accountBalance === 0 ? (
+                  <>
+                    <AlertCircle className="w-5 h-5" />
+                    Add Funds First
+                  </>
+                ) : requiredMargin > freeMargin ? (
+                  <>
+                    <AlertCircle className="w-5 h-5" />
+                    Insufficient Margin
+                  </>
+                ) : (
+                  <>
+                    {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {lotSize.toFixed(2)} Lots
+                  </>
+                )}
+              </button>
+
+              <p className="text-xs text-cream/30 text-center mt-2">Trading involves significant risk of loss</p>
+            </div>
           </div>
 
-          {/* Positions Panel + Modals + Toast */}
-          {/* (unchanged below) */}
+          {/* Positions Panel (Mobile) */}
+          <div className={`${mobileTab === 'positions' ? 'flex' : 'hidden'} lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}>
+            <div className="p-3 border-b border-white/10">
+              <h3 className="text-sm font-semibold text-cream">Open Positions ({forexPositions.length})</h3>
+            </div>
+
+            {forexPositions.length === 0 ? (
+              <div className="p-6 text-center">
+                <Activity className="w-8 h-8 text-cream/20 mx-auto mb-2" />
+                <p className="text-sm text-cream/50">No open positions</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/5">
+                {forexPositions.map((position) => {
+                  const sym = String((position as any).symbol);
+                  const side = ((position as any).side as 'long' | 'short') ?? 'long';
+                  const entry = Number((position as any).avgEntry ?? 0);
+                  const cur = Number((position as any).currentPrice ?? entry);
+                  const lots = Number((position as any).qty ?? 0) / 100000;
+
+                  const pips = calcPips(sym, entry, cur, side);
+                  const approxUsd = approxPnlInUsd(sym, pips, lots, cur);
+
+                  return (
+                    <div key={(position as any).id} className="p-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 text-xs font-medium rounded ${
+                              side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                            }`}
+                          >
+                            {side.toUpperCase()}
+                          </span>
+                          <span className="text-sm font-medium text-cream">{sym}</span>
+                        </div>
+
+                        <div className="text-right">
+                          <div className={`text-sm font-bold ${pips >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pips >= 0 ? '+' : ''}{pips.toFixed(1)} pips
+                          </div>
+                          {Number.isFinite(approxUsd) && (
+                            <div className="text-xs text-cream/50">
+                              ~ {approxUsd >= 0 ? '+' : ''}{formatMoney(approxUsd)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs text-cream/50">
+                        <span>
+                          {lots.toFixed(2)} lots @ {formatPrice(entry)}
+                        </span>
+                        <button
+                          onClick={() => {
+                            setPositionToClose(position as any);
+                            setShowCloseModal(true);
+                          }}
+                          className="px-3 py-1 bg-loss/20 text-loss rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Desktop Positions Bar */}
+        <div className="hidden lg:block flex-shrink-0 border-t border-white/10 bg-obsidian max-h-48 overflow-y-auto">
+          <div className="px-4 py-2 border-b border-white/5 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-cream">Open Positions ({forexPositions.length})</h3>
+            {forexPositions.length > 0 && (
+              <span className={`text-sm font-bold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                Total P&amp;L: {unrealizedPnL >= 0 ? '+' : ''}{formatMoney(unrealizedPnL)}
+              </span>
+            )}
+          </div>
+
+          {forexPositions.length === 0 ? (
+            <div className="p-4 text-center">
+              <p className="text-sm text-cream/50">No open positions</p>
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-cream/50 text-xs">
+                  <th className="text-left p-2">Symbol</th>
+                  <th className="text-left p-2">Side</th>
+                  <th className="text-right p-2">Lots</th>
+                  <th className="text-right p-2">Entry</th>
+                  <th className="text-right p-2">Current</th>
+                  <th className="text-right p-2">Pips</th>
+                  <th className="text-right p-2">P&amp;L</th>
+                  <th className="text-right p-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {forexPositions.map((position) => {
+                  const sym = String((position as any).symbol);
+                  const side = ((position as any).side as 'long' | 'short') ?? 'long';
+                  const entry = Number((position as any).avgEntry ?? 0);
+                  const cur = Number((position as any).currentPrice ?? entry);
+                  const lots = Number((position as any).qty ?? 0) / 100000;
+
+                  const pips = calcPips(sym, entry, cur, side);
+                  const approxUsd = approxPnlInUsd(sym, pips, lots, cur);
+
+                  return (
+                    <tr key={(position as any).id} className="border-t border-white/5 hover:bg-white/5">
+                      <td className="p-2 text-cream font-medium">{sym}</td>
+                      <td className="p-2">
+                        <span
+                          className={`px-2 py-0.5 text-xs font-medium rounded ${
+                            side === 'long' ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'
+                          }`}
+                        >
+                          {side.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="p-2 text-right text-cream">{lots.toFixed(2)}</td>
+                      <td className="p-2 text-right text-cream font-mono">{formatPrice(entry)}</td>
+                      <td className="p-2 text-right text-cream font-mono">{formatPrice(cur)}</td>
+                      <td className={`p-2 text-right font-bold ${pips >= 0 ? 'text-profit' : 'text-loss'}`}>
+                        {pips >= 0 ? '+' : ''}{pips.toFixed(1)}
+                      </td>
+                      <td className="p-2 text-right text-cream font-mono">
+                        {Number.isFinite(approxUsd) ? `${approxUsd >= 0 ? '+' : ''}${formatMoney(approxUsd)}` : '—'}
+                      </td>
+                      <td className="p-2 text-right">
+                        <button
+                          onClick={() => {
+                            setPositionToClose(position as any);
+                            setShowCloseModal(true);
+                          }}
+                          className="px-3 py-1 bg-loss/20 text-loss text-xs rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Close
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Asset Selector Modal */}
+        <AnimatePresence>
+          {showAssetSelector && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-void/90 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+              onClick={() => setShowAssetSelector(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-charcoal rounded-2xl border border-white/10 w-full max-w-md max-h-[80vh] overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="p-4 border-b border-white/10">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-lg font-semibold text-cream">Select Pair</h3>
+                    <button onClick={() => setShowAssetSelector(false)} className="p-1 hover:bg-white/10 rounded-lg">
+                      <X className="w-5 h-5 text-cream/50" />
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/30" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search pairs..."
+                      className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-lg text-cream placeholder:text-cream/30 focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-y-auto max-h-[60vh]">
+                  {/* Rare Pairs (Admin Controlled) */}
+                  {filteredRare.length > 0 && (
+                    <div className="p-2 border-b border-white/10">
+                      <p className="px-2 py-1 text-xs text-cream/60 font-medium">Rare Pairs (Admin Controlled)</p>
+                      {filteredRare.map((asset) => {
+                        const p = adminPrices?.[asset.symbol];
+                        const bid = p?.bid ?? (livePrices[asset.symbol] ?? asset.price);
+                        const ask = p?.ask ?? (livePrices[asset.symbol] ?? asset.price) * 1.0002;
+
+                        return (
+                          <button
+                            key={asset.id}
+                            onClick={() => {
+                              setSelectedAsset(asset);
+                              setBidPrice(Number(bid));
+                              setAskPrice(Number(ask));
+                              setShowAssetSelector(false);
+                            }}
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="text-xl">{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                              <div className="text-left">
+                                <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                                <p className="text-xs text-cream/50">{asset.name}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-mono text-cream">{formatPrice(Number(bid))}</p>
+                              <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                {asset.change24h >= 0 ? '+' : ''}
+                                {asset.change24h.toFixed(2)}%
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Favorites */}
+                  {filteredFavorites.length > 0 && (
+                    <div className="p-2 border-b border-white/10">
+                      <p className="px-2 py-1 text-xs text-gold font-medium">★ Favorites</p>
+                      {filteredFavorites.map((asset) => {
+                        const mid = livePrices[asset.symbol] ?? asset.price;
+                        return (
+                          <button
+                            key={asset.id}
+                            onClick={() => {
+                              setSelectedAsset(asset);
+                              const spread = Math.max(mid * 0.00006, 0.00001);
+                              setBidPrice(mid - spread / 2);
+                              setAskPrice(mid + spread / 2);
+                              setShowAssetSelector(false);
+                            }}
+                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleFavorite(asset.symbol);
+                                }}
+                                className="text-gold"
+                              >
+                                <Star className="w-4 h-4 fill-current" />
+                              </button>
+                              <span className="text-xl">{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                              <div className="text-left">
+                                <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                                <p className="text-xs text-cream/50">{asset.name}</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm font-mono text-cream">{formatPrice(mid)}</p>
+                              <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                {asset.change24h >= 0 ? '+' : ''}
+                                {asset.change24h.toFixed(2)}%
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* All Pairs */}
+                  <div className="p-2">
+                    <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Pairs</p>
+                    {filteredAll.map((asset) => {
+                      const mid = livePrices[asset.symbol] ?? asset.price;
+                      return (
+                        <button
+                          key={asset.id}
+                          onClick={() => {
+                            setSelectedAsset(asset);
+                            const spread = Math.max(mid * 0.00006, 0.00001);
+                            setBidPrice(mid - spread / 2);
+                            setAskPrice(mid + spread / 2);
+                            setShowAssetSelector(false);
+                          }}
+                          className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-lg transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFavorite(asset.symbol);
+                              }}
+                              className="text-cream/30 hover:text-gold"
+                            >
+                              <StarOff className="w-4 h-4" />
+                            </button>
+                            <span className="text-xl">{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                            <div className="text-left">
+                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/50">{asset.name}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-mono text-cream">{formatPrice(mid)}</p>
+                            <p className={`text-xs ${asset.change24h >= 0 ? 'text-profit' : 'text-loss'}`}>
+                              {asset.change24h >= 0 ? '+' : ''}
+                              {asset.change24h.toFixed(2)}%
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Close Position Modal */}
+        <AnimatePresence>
+          {showCloseModal && positionToClose && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-void/90 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+              onClick={() => setShowCloseModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-charcoal rounded-2xl border border-white/10 p-6 w-full max-w-sm"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 className="text-xl font-semibold text-cream mb-4">Close Position</h3>
+
+                <div className="space-y-3 mb-6">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Symbol</span>
+                    <span className="text-cream font-medium">{(positionToClose as any).symbol}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Side</span>
+                    <span className={(positionToClose as any).side === 'long' ? 'text-profit' : 'text-loss'}>
+                      {(positionToClose as any).side?.toUpperCase?.() ?? '—'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Lots</span>
+                    <span className="text-cream">
+                      {(Number((positionToClose as any).qty ?? 0) / 100000).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Entry Price</span>
+                    <span className="text-cream font-mono">{formatPrice(Number((positionToClose as any).avgEntry ?? 0))}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Exit Price</span>
+                    <span className="text-cream font-mono">
+                      {formatPrice((positionToClose as any).side === 'long' ? bidPrice : askPrice)}
+                    </span>
+                  </div>
+                  <div className="border-t border-white/10 pt-3 flex justify-between">
+                    <span className="text-cream font-medium">Estimated P&amp;L</span>
+                    <span className={`font-bold ${(positionToClose as any).unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(positionToClose as any).unrealizedPnL >= 0 ? '+' : ''}
+                      {formatMoney(Number((positionToClose as any).unrealizedPnL ?? 0))}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowCloseModal(false)}
+                    className="flex-1 py-3 bg-white/10 text-cream font-semibold rounded-xl hover:bg-white/20 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleClosePosition(positionToClose)}
+                    className="flex-1 py-3 bg-loss text-white font-semibold rounded-xl hover:bg-loss/90 transition-colors"
+                  >
+                    Close Position
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Notification Toast */}
+        <AnimatePresence>
+          {notification && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className={`fixed bottom-4 right-4 px-4 py-3 rounded-xl shadow-lg flex items-center gap-3 z-50 ${
+                notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'
+              }`}
+            >
+              {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+              <span className="font-medium">{notification.message}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </KYCGate>
   );
