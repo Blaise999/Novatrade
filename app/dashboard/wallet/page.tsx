@@ -140,16 +140,15 @@ function WalletContent() {
     if (!user?.id) return;
     setDepositsLoading(true);
     try {
-      const { supabase: sb, isSupabaseConfigured: isc } = await import('@/lib/supabase/client');
-      if (!isc()) { setDepositsLoading(false); return; }
-      const { data } = await sb
-        .from('deposits')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(50);
-      setDbDeposits(data || []);
-    } catch { /* fallback: keep empty */ }
+      const res = await fetch(`/api/deposits?userId=${user.id}`, {
+        headers: { 'x-user-id': user.id },
+        cache: 'no-store',
+      });
+      if (res.ok) {
+        const json = await res.json();
+        setDbDeposits(json.deposits || []);
+      }
+    } catch { /* network error — keep empty */ }
     setDepositsLoading(false);
   };
 
@@ -251,25 +250,27 @@ function WalletContent() {
       userEmail: user.email,
     });
 
-    // Save to Supabase deposits table for admin approval
+    // Submit via API route (service key, bypasses RLS)
     try {
-      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
-      if (isSupabaseConfigured()) {
-        await supabase.from('deposits').insert({
-          user_id: user.id,
+      const res = await fetch('/api/deposits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
           amount: parseFloat(amount),
           currency: 'USD',
           method: selectedMethodType || 'crypto',
-          method_name: methodName || 'Crypto',
-          network: selectedMethodType === 'crypto' ? (selectedCrypto?.network || '') : null,
-          transaction_ref: transactionRef || null,
-          tx_hash: transactionRef || null,
-          proof_url: proofImage || null,
-          status: 'pending',
-        });
+          methodName: methodName || 'Crypto',
+          network: selectedMethodType === 'crypto' ? (selectedCrypto?.network || '') : undefined,
+          txHash: transactionRef || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        console.error('Deposit API error:', data.error);
       }
-    } catch (e) {
-      console.error('Failed to save deposit to DB:', e);
+    } catch {
+      // Network error — local store has the fallback
     }
 
     await new Promise((resolve) => setTimeout(resolve, 1500));

@@ -1,7 +1,7 @@
 // components/NotificationPanel.tsx
 'use client';
 
-import { useState, useRef, useEffect, type ReactNode } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Bell,
   CheckCircle,
@@ -13,9 +13,9 @@ import {
   CreditCard,
   CheckCheck,
 } from 'lucide-react';
-import { useNotifications, type AppNotification } from '@/hooks/useNotifications';
+import { useNotifications, type Notification } from '@/hooks/useNotifications';
 
-const typeIcons: Record<string, ReactNode> = {
+const typeIcons: Record<string, React.ReactNode> = {
   tier_purchase: <Shield className="w-4 h-4 text-gold" />,
   deposit: <CreditCard className="w-4 h-4 text-profit" />,
   withdrawal: <CreditCard className="w-4 h-4 text-electric" />,
@@ -39,7 +39,14 @@ function timeAgo(dateStr: string): string {
 }
 
 export default function NotificationPanel() {
-  const { notifications, unreadCount, loading, refresh, markRead, markAllRead } = useNotifications();
+  const {
+    notifications,
+    unreadCount,
+    loading,
+    loadNotifications,
+    markRead,
+    markAllRead,
+  } = useNotifications();
 
   const [isOpen, setIsOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -61,10 +68,10 @@ export default function NotificationPanel() {
   const handleToggle = () => {
     const next = !isOpen;
     setIsOpen(next);
-    if (next) refresh(); // ✅ was loadNotifications()
+    if (next) loadNotifications();
   };
 
-  const handleClick = (n: AppNotification) => {
+  const handleClick = (n: Notification) => {
     if (!n.read_at) markRead(n.id);
   };
 
@@ -121,15 +128,21 @@ export default function NotificationPanel() {
                     !n.read_at ? 'bg-white/[0.02]' : ''
                   }`}
                 >
-                  <div className="mt-0.5 flex-shrink-0">{typeIcons[n.type] || typeIcons.info}</div>
+                  <div className="mt-0.5 flex-shrink-0">
+                    {typeIcons[n.type] || typeIcons.info}
+                  </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <p className={`text-sm font-medium truncate ${!n.read_at ? 'text-cream' : 'text-slate-400'}`}>
                         {n.title}
                       </p>
-                      {!n.read_at && <span className="w-2 h-2 rounded-full bg-electric flex-shrink-0" />}
+                      {!n.read_at && (
+                        <span className="w-2 h-2 rounded-full bg-electric flex-shrink-0" />
+                      )}
                     </div>
-                    {n.message && <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>}
+                    {n.message && (
+                      <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
+                    )}
                     <p className="text-[10px] text-slate-600 mt-1">{timeAgo(n.created_at)}</p>
                   </div>
                 </button>

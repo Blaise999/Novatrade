@@ -56,7 +56,8 @@ export function useUnifiedBalance(): UseUnifiedBalanceReturn {
     const initAccounts = async () => {
       console.log('[useUnifiedBalance] Initializing accounts for user:', user.id);
       
-      const userBalance = (user?.balance ?? 0) + (user?.bonusBalance ?? 0);
+      // ✅ FIX: balance_available ALREADY includes bonus. DO NOT add bonusBalance again.
+      const userBalance = user?.balance ?? 0;
 
       // 🔥 CRITICAL: Load crypto portfolio from Supabase first (cross-device sync)
       await spotTradingStore.loadFromSupabase(user.id, userBalance);
@@ -88,7 +89,8 @@ export function useUnifiedBalance(): UseUnifiedBalanceReturn {
     if (!user?.id) return;
 
     const unsubscribe = onBalanceUpdate((balance: BalanceSnapshot) => {
-      const total = balance.available + balance.bonus;
+      // ✅ FIX: balance.available IS the total (already includes bonus). Don't add bonus again.
+      const total = balance.available;
       
       // Sync to all stores
       tradingStore.syncBalanceFromUser(total);
@@ -107,7 +109,8 @@ export function useUnifiedBalance(): UseUnifiedBalanceReturn {
 
     const balance = await fetchUserBalance(user.id);
     if (balance) {
-      const total = balance.available + balance.bonus;
+      // ✅ FIX: available already includes bonus
+      const total = balance.available;
       tradingStore.syncBalanceFromUser(total);
       spotTradingStore.syncCashFromUser(total);
       refreshUser?.();
@@ -119,7 +122,8 @@ export function useUnifiedBalance(): UseUnifiedBalanceReturn {
     balance: {
       available: user?.balance ?? 0,
       bonus: user?.bonusBalance ?? 0,
-      total: (user?.balance ?? 0) + (user?.bonusBalance ?? 0),
+      // ✅ FIX: balance_available ALREADY includes bonus credit. total = available.
+      total: user?.balance ?? 0,
     },
     refreshBalance,
   };
@@ -136,8 +140,8 @@ export function useAvailableCash(): number {
   const cryptoAccount = useSpotTradingStore((s) => s.account);
 
   // The user's Supabase balance is the source of truth
-  // But we need to consider what's locked in positions
-  const userBalance = (user?.balance ?? 0) + (user?.bonusBalance ?? 0);
+  // ✅ FIX: balance_available ALREADY includes bonus. Don't add bonusBalance again.
+  const userBalance = user?.balance ?? 0;
   
   // Get margin locked in FX positions
   const marginUsed = marginAccount?.marginUsed ?? 0;

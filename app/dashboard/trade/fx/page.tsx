@@ -271,6 +271,8 @@ export default function FXTradingPage() {
   // Trading state
   const [tradeDirection, setTradeDirection] = useState<'buy' | 'sell'>('buy');
   const [lotSize, setLotSize] = useState(0.1);
+  const [tradeAmount, setTradeAmount] = useState<number>(50); // USD amount user wants to trade
+  const [inputMode, setInputMode] = useState<'amount' | 'lots'>('amount'); // default: simple amount mode
   const [leverage, setLeverage] = useState(100);
   const [stopLoss, setStopLoss] = useState<number | null>(null);
   const [takeProfit, setTakeProfit] = useState<number | null>(null);
@@ -786,16 +788,21 @@ export default function FXTradingPage() {
       return;
     }
 
-    if (!Number.isFinite(lotSize) || lotSize <= 0) {
-      setNotification({ type: 'error', message: 'Invalid lot size' });
+    // Compute effective lot size from amount or direct lot input
+    const tradeEntryPx = tradeDirection === 'buy' ? askPrice : bidPrice;
+    const computedLotsInner = tradeEntryPx > 0 ? (tradeAmount * leverage) / (tradeEntryPx * 100000) : 0;
+    const effLotSize = inputMode === 'amount' ? Math.max(0.01, Math.round(computedLotsInner * 100) / 100) : lotSize;
+
+    if (!Number.isFinite(effLotSize) || effLotSize <= 0) {
+      setNotification({ type: 'error', message: 'Invalid trade amount' });
       setTimeout(() => setNotification(null), 3000);
       return;
     }
 
-    const entryPrice = tradeDirection === 'buy' ? askPrice : bidPrice;
+    const entryPrice = tradeEntryPx;
 
     // FX qty in units: 1.0 lot = 100,000 units
-    const qty = lotSize * 100000;
+    const qty = effLotSize * 100000;
 
     // Notional (quote currency)
     const notional = qty * entryPrice;
@@ -840,7 +847,7 @@ export default function FXTradingPage() {
             direction: tradeDirection,
 
             quantity: qty,
-            lotSize,
+            lotSize: effLotSize,
             leverage,
 
             entryPrice,
@@ -869,7 +876,7 @@ export default function FXTradingPage() {
 
       setNotification({
         type: 'success',
-        message: `${tradeDirection.toUpperCase()} ${lotSize.toFixed(2)} lots • ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
+        message: `${tradeDirection.toUpperCase()} $${(qty * entryPrice / leverage).toFixed(2)} • ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
       });
     } else {
       setNotification({ type: 'error', message: (result as any)?.error || 'Trade failed' });
@@ -886,6 +893,8 @@ export default function FXTradingPage() {
     askPrice,
     bidPrice,
     lotSize,
+    tradeAmount,
+    inputMode,
     selectedAsset.symbol,
     selectedAsset.name,
     openMarginPosition,
@@ -899,6 +908,9 @@ export default function FXTradingPage() {
     marginAccount,
     currentTier,
   ]);
+
+  // ✅ Alias for button onClick
+  const executeTrade = handleTrade;
 
   const handleClosePosition = useCallback(
     async (position: MarginPosition) => {
@@ -1007,9 +1019,29 @@ export default function FXTradingPage() {
   // POSITION / TRADE METRICS (LOTS-BASED)
   // ======================
   const entryPx = tradeDirection === 'buy' ? askPrice : bidPrice;
-  const units = lotSize * 100000;
+
+  // ✅ Amount-based: auto-compute lots from user's dollar amount
+  // margin = notional / leverage → notional = margin * leverage → units = notional / price → lots = units / 100000
+  const computedLots = entryPx > 0 ? (tradeAmount * leverage) / (entryPx * 100000) : 0;
+  const effectiveLotSize = inputMode === 'amount' ? Math.max(0.01, Math.round(computedLots * 100) / 100) : lotSize;
+
+  const units = effectiveLotSize * 100000;
   const positionNotional = units * entryPx;
   const requiredMargin = leverage > 0 ? positionNotional / leverage : positionNotional;
+
+  // SL/TP dollar risk calculations
+  const slRisk = (() => {
+    if (!stopLoss || !entryPx || entryPx === 0) return null;
+    const priceDiff = tradeDirection === 'buy' ? entryPx - stopLoss : stopLoss - entryPx;
+    return priceDiff * units;
+  })();
+  const tpReward = (() => {
+    if (!takeProfit || !entryPx || entryPx === 0) return null;
+    const priceDiff = tradeDirection === 'buy' ? takeProfit - entryPx : entryPx - takeProfit;
+    return priceDiff * units;
+  })();
+  const spreadValue = askPrice - bidPrice;
+  const spreadCost = spreadValue * units;
 
   const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
 
@@ -1427,39 +1459,77 @@ export default function FXTradingPage() {
               </div>
             </div>
 
-            {/* Lot Size Input */}
+            {/* Amount / Lot Mode Toggle */}
             <div className="p-3 border-b border-white/10 space-y-3">
-              <div>
-                <label className="text-xs text-cream/50 mb-1 block">Lot Size</label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    value={lotSize}
-                    onChange={(e) => setLotSize(Number(e.target.value) || 0.01)}
-                    disabled={!canTrade}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-cream text-sm focus:border-gold/50 focus:outline-none disabled:opacity-50"
-                    placeholder="0.10"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-cream/30">lots</span>
-                </div>
-                <div className="flex gap-1 mt-1">
-                  {[0.01, 0.05, 0.1, 0.5, 1.0].map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setLotSize(v)}
-                      disabled={!canTrade}
-                      className={`flex-1 text-xs py-1 rounded ${lotSize === v ? 'bg-gold/20 text-gold' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
-                    >
-                      {v}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[10px] text-cream/30 mt-1">
-                  {(lotSize * 100000).toLocaleString()} units | Margin: {formatMoney(requiredMargin)}
-                </p>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs text-cream/50">Trade Size</label>
+                <button
+                  onClick={() => setInputMode(inputMode === 'amount' ? 'lots' : 'amount')}
+                  className="text-[10px] text-electric hover:text-electric/80 transition-colors"
+                >
+                  {inputMode === 'amount' ? 'Switch to Lots ›' : '‹ Switch to Amount'}
+                </button>
               </div>
+
+              {inputMode === 'amount' ? (
+                <>
+                  {/* Amount (USD) Input */}
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cream/40 text-sm font-medium">$</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={tradeAmount}
+                      onChange={(e) => setTradeAmount(Math.max(0, Number(e.target.value) || 0))}
+                      disabled={!canTrade}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg pl-7 pr-3 py-2.5 text-cream text-lg font-semibold focus:border-gold/50 focus:outline-none disabled:opacity-50"
+                      placeholder="50"
+                    />
+                  </div>
+                  <div className="flex gap-1.5">
+                    {[10, 25, 50, 100, 250, 500].map((v) => (
+                      <button
+                        key={v}
+                        onClick={() => setTradeAmount(v)}
+                        disabled={!canTrade}
+                        className={`flex-1 text-xs py-1.5 rounded-lg font-medium transition-all ${tradeAmount === v ? 'bg-gold/20 text-gold border border-gold/30' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
+                      >
+                        ${v}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Lot Size Input (advanced) */}
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      value={lotSize}
+                      onChange={(e) => setLotSize(Number(e.target.value) || 0.01)}
+                      disabled={!canTrade}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-cream text-sm focus:border-gold/50 focus:outline-none disabled:opacity-50"
+                      placeholder="0.10"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-cream/30">lots</span>
+                  </div>
+                  <div className="flex gap-1">
+                    {[0.01, 0.05, 0.1, 0.5, 1.0].map((v) => (
+                      <button
+                        key={v}
+                        onClick={() => setLotSize(v)}
+                        disabled={!canTrade}
+                        className={`flex-1 text-xs py-1 rounded ${lotSize === v ? 'bg-gold/20 text-gold' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
 
               {/* Leverage Selector */}
               <div>
@@ -1473,7 +1543,7 @@ export default function FXTradingPage() {
                       key={lv}
                       onClick={() => setLeverage(lv)}
                       disabled={!canTrade}
-                      className={`px-2 py-1 text-xs rounded ${leverage === lv ? 'bg-electric/20 text-electric border border-electric/30' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
+                      className={`px-2.5 py-1.5 text-xs rounded-lg font-medium transition-all ${leverage === lv ? 'bg-electric/20 text-electric border border-electric/30' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
                     >
                       1:{lv}
                     </button>
@@ -1482,10 +1552,15 @@ export default function FXTradingPage() {
               </div>
             </div>
 
-            {/* SL/TP */}
+            {/* SL/TP with Dollar Risk Display */}
             <div className="p-3 border-b border-white/10 space-y-2">
               <div>
-                <label className="text-xs text-cream/50 mb-1 block">Stop Loss (price)</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-cream/50">Stop Loss (optional)</label>
+                  {slRisk !== null && slRisk > 0 && (
+                    <span className="text-[10px] text-loss font-medium">Risk: -${Math.abs(slRisk).toFixed(2)}</span>
+                  )}
+                </div>
                 <input
                   type="number"
                   step="any"
@@ -1497,7 +1572,12 @@ export default function FXTradingPage() {
                 />
               </div>
               <div>
-                <label className="text-xs text-cream/50 mb-1 block">Take Profit (price)</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-cream/50">Take Profit (optional)</label>
+                  {tpReward !== null && tpReward > 0 && (
+                    <span className="text-[10px] text-profit font-medium">Target: +${Math.abs(tpReward).toFixed(2)}</span>
+                  )}
+                </div>
                 <input
                   type="number"
                   step="any"
@@ -1508,24 +1588,72 @@ export default function FXTradingPage() {
                   placeholder={`e.g. ${(entryPx * (tradeDirection === 'buy' ? 1.01 : 0.99)).toFixed(selectedAsset.symbol.includes('JPY') ? 3 : 5)}`}
                 />
               </div>
+              {/* Risk:Reward Ratio */}
+              {slRisk !== null && slRisk > 0 && tpReward !== null && tpReward > 0 && (
+                <div className="flex items-center justify-between p-2 bg-white/5 rounded-lg">
+                  <span className="text-[10px] text-cream/40">Risk : Reward</span>
+                  <span className="text-xs font-semibold text-cream">
+                    1 : {(tpReward / slRisk).toFixed(1)}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Order Preview */}
+            <div className="p-3 border-b border-white/10">
+              <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-2">Order Preview</p>
+              <div className="space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-[11px] text-cream/50">Amount (margin)</span>
+                  <span className="text-[11px] text-cream font-medium">{formatMoney(requiredMargin)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[11px] text-cream/50">Position size</span>
+                  <span className="text-[11px] text-cream font-medium">{formatMoney(positionNotional)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[11px] text-cream/50">Leverage</span>
+                  <span className="text-[11px] text-electric font-medium">1:{leverage}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[11px] text-cream/50">Lots / Units</span>
+                  <span className="text-[11px] text-cream/70">{effectiveLotSize.toFixed(2)} / {units.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[11px] text-cream/50">Spread cost</span>
+                  <span className="text-[11px] text-cream/70">≈ {formatMoney(spreadCost)}</span>
+                </div>
+                {slRisk !== null && slRisk > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-[11px] text-loss/70">Max loss (SL)</span>
+                    <span className="text-[11px] text-loss font-medium">-{formatMoney(Math.abs(slRisk))}</span>
+                  </div>
+                )}
+                {tpReward !== null && tpReward > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-[11px] text-profit/70">Target profit (TP)</span>
+                    <span className="text-[11px] text-profit font-medium">+{formatMoney(Math.abs(tpReward))}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Execute Button */}
             <div className="p-3">
-             <button
-  onClick={handleTrade}
-                disabled={!canTrade}
-                className={`w-full py-3 rounded-xl font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+              <button
+                onClick={executeTrade}
+                disabled={!canTrade || requiredMargin > freeMargin}
+                className={`w-full py-3.5 rounded-xl font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                   tradeDirection === 'buy'
                     ? 'bg-profit text-void hover:brightness-110'
                     : 'bg-loss text-white hover:brightness-110'
                 }`}
               >
-                {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {selectedAsset.symbol} @ {formatPrice(entryPx)}
+                {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {selectedAsset.symbol} — {formatMoney(requiredMargin)}
               </button>
-              <p className="text-[10px] text-cream/30 text-center mt-1">
-                {lotSize} lots | {formatMoney(positionNotional)} notional | 1:{leverage}
-              </p>
+              {requiredMargin > freeMargin && (
+                <p className="text-[10px] text-loss text-center mt-1">Insufficient margin (need {formatMoney(requiredMargin)}, have {formatMoney(freeMargin)})</p>
+              )}
             </div>
           </div>
 

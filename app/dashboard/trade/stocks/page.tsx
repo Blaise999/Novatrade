@@ -519,43 +519,20 @@ export default function StockTradingPage() {
       await refreshUser?.();
 
       // ✅ Save to trades table for history
-    // ✅ Save to trades table for history (aligned to the same shape you used in FX page)
-if (user?.id) {
-  try {
-    await saveTradeToHistory({
-      // use stock position id if you have one; if not, omit id (service can generate)
-      // id: String((result as any)?.positionId ?? ''),
-
-      userId: user.id,
-      accountId: (spotAccount as any)?.id ?? null,
-
-      marketType: 'stocks',
-      assetType: 'stock',
-
-      pair: selectedSymbol,
-      direction: 'buy',
-
-      quantity: effectiveShares,
-      lotSize: null,
-      leverage: 1,
-
-      entryPrice: askPrice,
-      openedAt: new Date().toISOString(),
-      isSimulated: true,
-
-      // keep extras here (commission, totals, etc.)
-      notes: JSON.stringify({
-        orderValue,
-        commission,
-        totalCost,
-        mode: orderMode,
-      }),
-    });
-  } catch {
-    // ignore
-  }
-}
-
+      if (user?.id) {
+        await saveTradeToHistory({
+          userId: user.id,
+          pair: selectedSymbol,
+          symbol: selectedSymbol,
+          marketType: 'stocks',
+          type: 'buy',
+          side: 'buy',
+          amount: effectiveShares * askPrice,
+          quantity: effectiveShares,
+          entryPrice: askPrice,
+          leverage: 1,
+        }).catch(() => {}); // don't block trade on history save failure
+      }
 
       setNotification({
         type: 'success',

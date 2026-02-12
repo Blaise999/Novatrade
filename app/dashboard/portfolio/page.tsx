@@ -235,40 +235,40 @@ export default function PortfolioPage() {
   const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(true);
 
-  // Fetch open FX/stock trades from trades table
+  // Fetch open FX/stock trades via API (service key, no client auth needed)
   useEffect(() => {
     if (!user?.id) return;
     const loadOpenTrades = async () => {
       try {
-        const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
-        if (!isSupabaseConfigured()) { setTradesLoading(false); return; }
-        const { data } = await supabase
-          .from('trades')
-          .select('id, pair, market_type, type, amount, quantity, entry_price, current_price, stop_loss, take_profit, leverage, pnl, status, created_at')
-          .eq('user_id', user.id)
-          .in('market_type', ['fx', 'stocks'])
-          .in('status', ['open', 'active', 'pending'])
-          .order('created_at', { ascending: false });
-        // Map DB column names to component-friendly names
-        const mapped: OpenTrade[] = (data || []).map((t: any) => ({
-          id: t.id,
-          symbol: t.pair || t.symbol || 'Unknown',
-          market_type: t.market_type,
-          direction: t.type || t.direction || 'buy',
-          amount: Number(t.amount || 0),
-          quantity: t.quantity,
-          entry_price: Number(t.entry_price || 0),
-          current_price: t.current_price ? Number(t.current_price) : null,
-          stop_loss: t.stop_loss,
-          take_profit: t.take_profit,
-          leverage: t.leverage,
-          profit_loss: Number(t.pnl || t.profit_loss || 0),
-          status: t.status,
-          created_at: t.created_at,
-        }));
+        const res = await fetch(`/api/user/trades?userId=${user.id}&status=open&pageSize=50`, {
+          headers: { 'x-user-id': user.id },
+          cache: 'no-store',
+        });
+        if (!res.ok) { setTradesLoading(false); return; }
+        const json = await res.json();
+        if (!json.success) { setTradesLoading(false); return; }
+
+        const mapped: OpenTrade[] = (json.trades || [])
+          .filter((t: any) => ['fx', 'stocks'].includes(t.market_type))
+          .map((t: any) => ({
+            id: t.id,
+            symbol: t.pair || t.symbol || 'Unknown',
+            market_type: t.market_type,
+            direction: t.type || t.direction || 'buy',
+            amount: Number(t.amount || 0),
+            quantity: t.quantity,
+            entry_price: Number(t.entry_price || 0),
+            current_price: t.current_price ? Number(t.current_price) : null,
+            stop_loss: t.stop_loss,
+            take_profit: t.take_profit,
+            leverage: t.leverage,
+            profit_loss: Number(t.pnl || t.profit_loss || 0),
+            status: t.status,
+            created_at: t.created_at,
+          }));
         setOpenTrades(mapped);
-      } catch (e) {
-        console.error('Failed to load open trades:', e);
+      } catch {
+        // Network error — silent
       } finally {
         setTradesLoading(false);
       }
