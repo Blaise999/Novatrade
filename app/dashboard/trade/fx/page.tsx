@@ -1512,8 +1512,8 @@ export default function FXTradingPage() {
 
             {/* Execute Button */}
             <div className="p-3">
-              <button
-                onClick={executeTrade}
+             <button
+  onClick={handleTrade}
                 disabled={!canTrade}
                 className={`w-full py-3 rounded-xl font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                   tradeDirection === 'buy'

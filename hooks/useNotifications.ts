@@ -1,113 +1,157 @@
 // hooks/useNotifications.ts
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { useStore } from '@/lib/supabase/store-supabase';
 
-export interface Notification {
+export type AppNotification = {
   id: string;
   user_id: string;
-  type: string;
+  type: 'info' | 'success' | 'warning' | 'error' | string;
   title: string;
   message: string;
-  data: any;
+  data: Record<string, any> | null;
   created_at: string;
   read_at: string | null;
-}
+};
 
-async function getAuthToken(): Promise<string | null> {
-  try {
-    const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
-    if (!isSupabaseConfigured()) return null;
-    const { data } = await supabase.auth.getSession();
-    return data.session?.access_token || null;
-  } catch {
-    return null;
-  }
-}
+type UseNotificationsOptions = {
+  limit?: number; // default 200
+  autoRefreshMs?: number; // default 0 (off)
+};
 
-export function useNotifications() {
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [unreadCount, setUnreadCount] = useState(0);
+export function useNotifications(opts: UseNotificationsOptions = {}) {
+  const { user } = useStore();
+  const userId = (user as any)?.id as string | undefined;
+
+  const limit = opts.limit ?? 200;
+  const autoRefreshMs = opts.autoRefreshMs ?? 0;
+
+  const [items, setItems] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState(false);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const headers = useCallback(async () => {
-    const token = await getAuthToken();
-    return token
-      ? { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-      : { 'Content-Type': 'application/json' };
-  }, []);
+  const aliveRef = useRef(true);
 
-  const refreshUnreadCount = useCallback(async () => {
-    try {
-      const h = await headers();
-      const res = await fetch('/api/notifications?unreadOnly=true', { headers: h, cache: 'no-store' });
-      if (!res.ok) return;
-      const json = await res.json();
-      setUnreadCount(json.unreadCount || 0);
-    } catch {}
-  }, [headers]);
+  const unreadCount = useMemo(
+    () => items.reduce((acc, n) => acc + (n.read_at ? 0 : 1), 0),
+    [items]
+  );
 
-  const loadNotifications = useCallback(async (page = 1) => {
-    setLoading(true);
-    try {
-      const h = await headers();
-      const res = await fetch(`/api/notifications?page=${page}&pageSize=20`, { headers: h, cache: 'no-store' });
-      if (!res.ok) throw new Error('Failed');
-      const json = await res.json();
-      setNotifications(json.data || []);
-      setUnreadCount(json.unreadCount || 0);
-    } catch (e) {
-      console.error('Failed to load notifications:', e);
-    } finally {
-      setLoading(false);
+  const refresh = useCallback(async () => {
+    if (!isSupabaseConfigured() || !supabase) {
+      setItems([]);
+      setError('Supabase not configured');
+      return;
     }
-  }, [headers]);
+    if (!userId) {
+      setItems([]);
+      setError(null);
+      return;
+    }
 
-  const markRead = useCallback(async (id: string) => {
+    setLoading(true);
+    setError(null);
+
     try {
-      const h = await headers();
-      await fetch('/api/notifications', {
-        method: 'PATCH',
-        headers: h,
-        body: JSON.stringify({ id }),
-      });
-      setNotifications(prev =>
-        prev.map(n => (n.id === id ? { ...n, read_at: new Date().toISOString() } : n))
-      );
-      setUnreadCount(prev => Math.max(0, prev - 1));
-    } catch {}
-  }, [headers]);
+      const { data, error: qErr } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (qErr) throw qErr;
+
+      if (!aliveRef.current) return;
+
+      const list = (data ?? []) as AppNotification[];
+      setItems(list);
+    } catch (e: any) {
+      if (!aliveRef.current) return;
+      setError(e?.message || 'Failed to load notifications');
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, [userId, limit]);
+
+  const markRead = useCallback(
+    async (id: string) => {
+      if (!isSupabaseConfigured() || !supabase || !userId) return;
+
+      // optimistic
+      const now = new Date().toISOString();
+      setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: now } : n)));
+
+      const { error: uErr } = await supabase
+        .from('notifications')
+        .update({ read_at: now })
+        .eq('id', id)
+        .eq('user_id', userId);
+
+      if (uErr) {
+        // revert on failure
+        setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read_at: null } : n)));
+        setError(uErr.message || 'Failed to mark as read');
+      }
+    },
+    [userId]
+  );
 
   const markAllRead = useCallback(async () => {
-    try {
-      const h = await headers();
-      await fetch('/api/notifications', {
-        method: 'PATCH',
-        headers: h,
-        body: JSON.stringify({ markAllRead: true }),
-      });
-      setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
-      setUnreadCount(0);
-    } catch {}
-  }, [headers]);
+    if (!isSupabaseConfigured() || !supabase || !userId) return;
 
-  // Poll unread count every 30s
+    const now = new Date().toISOString();
+
+    // optimistic
+    setItems((prev) => prev.map((n) => (n.read_at ? n : { ...n, read_at: now })));
+
+    const { error: uErr } = await supabase
+      .from('notifications')
+      .update({ read_at: now })
+      .eq('user_id', userId)
+      .is('read_at', null);
+
+    if (uErr) {
+      setError(uErr.message || 'Failed to mark all as read');
+      // safest: re-fetch
+      await refresh();
+    }
+  }, [userId, refresh]);
+
+  const clearLocal = useCallback(() => {
+    setItems([]);
+    setError(null);
+  }, []);
+
   useEffect(() => {
-    refreshUnreadCount();
-    intervalRef.current = setInterval(refreshUnreadCount, 30000);
+    aliveRef.current = true;
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      aliveRef.current = false;
     };
-  }, [refreshUnreadCount]);
+  }, []);
+
+  // initial load + when user changes
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // optional auto refresh
+  useEffect(() => {
+    if (!autoRefreshMs || autoRefreshMs < 1000) return;
+    const id = window.setInterval(() => refresh(), autoRefreshMs);
+    return () => window.clearInterval(id);
+  }, [autoRefreshMs, refresh]);
 
   return {
-    notifications,
+    notifications: items,
     unreadCount,
     loading,
-    loadNotifications,
+    error,
+    refresh,
     markRead,
     markAllRead,
-    refreshUnreadCount,
+    clearLocal,
   };
 }
