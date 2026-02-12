@@ -520,19 +520,18 @@ export default function StockTradingPage() {
 
       // ✅ Save to trades table for history
       if (user?.id) {
-        saveTradeToHistory({
-          userId: user.id,
-          symbol: selectedSymbol,
-          marketType: 'stocks',
-          type: 'buy',
-          side: 'long',
-          amount: effectiveShares * askPrice,
-          quantity: effectiveShares,
-          entryPrice: askPrice,
-          leverage: 1,
-          fees: commission,
-          status: 'open',
-        });
+       saveTradeToHistory({
+  userId: user.id,
+  symbol: selectedSymbol,
+  marketType: 'stocks',
+  type: 'buy',
+  side: 'buy',
+  amount: totalCost,           // includes commission already
+  quantity: effectiveShares,
+  entryPrice: askPrice,
+  leverage: 1,
+});
+
       }
 
       setNotification({
@@ -630,777 +629,765 @@ export default function StockTradingPage() {
 
   return (
     <KYCGate action="trade stocks">
-    <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
-      {/* Header */}
-      <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
-        <div className="flex items-center justify-between gap-2 sm:gap-4">
-          {/* Asset Selector */}
-          <button
-            onClick={() => setShowAssetSelector(true)}
-            className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
-          >
-            <div className="flex items-center gap-1 sm:gap-2">
-              <span className="text-lg sm:text-xl">{info.emoji}</span>
-              <div className="text-left">
-                <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedSymbol}</p>
-                <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
-              </div>
-            </div>
-            <ChevronDown className="w-4 h-4 text-cream/50 flex-shrink-0" />
-          </button>
-
-          {/* Price */}
-          <div className="flex items-center gap-3 sm:gap-6">
-            <div className="text-center">
-              <p className="text-lg sm:text-2xl font-mono font-bold text-cream">${price.toFixed(2)}</p>
-              <p className={`text-xs ${up ? 'text-profit' : 'text-loss'}`}>
-                {up ? '+' : ''}
-                {changePercent24h.toFixed(2)}%
-              </p>
-            </div>
-          </div>
-
-          {/* Live status */}
-          <div className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg ${sseState === 'live' ? 'bg-profit/10' : 'bg-white/5'}`}>
-            <span
-              className={`w-2 h-2 rounded-full ${
-                sseState === 'live' ? 'bg-profit animate-pulse' : sseState === 'connecting' ? 'bg-gold animate-pulse' : 'bg-slate-500'
-              }`}
-            />
-            <span className={`text-sm font-medium ${sseState === 'live' ? 'text-profit' : 'text-cream/70'}`}>
-              {sseState === 'live' ? 'Live' : sseState === 'connecting' ? 'Connecting' : 'Offline'}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Mobile Tabs */}
-      <div className="lg:hidden flex-shrink-0 flex border-b border-white/10 bg-obsidian">
-        {(['chart', 'trade', 'portfolio'] as MobileTab[]).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setMobileTab(tab)}
-            className={`flex-1 py-3 text-sm font-medium transition-colors ${
-              mobileTab === tab ? 'text-gold border-b-2 border-gold bg-gold/5' : 'text-cream/50'
-            }`}
-          >
-            {tab === 'chart' && 'Chart'}
-            {tab === 'trade' && 'Trade'}
-            {tab === 'portfolio' && `Portfolio (${stockPositions.length})`}
-          </button>
-        ))}
-      </div>
-
-      {/* Main */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
-        {/* Chart */}
-        <div className={`${mobileTab === 'chart' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-h-0 h-full`}>
-          {/* Controls */}
-          <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 border-b border-white/10 bg-charcoal/50">
-            <div className="flex items-center gap-1 overflow-x-auto">
-              {timeframes.map((tf) => (
-                <button
-                  key={tf}
-                  onClick={() => setChartTimeframe(tf)}
-                  className={`px-2 sm:px-3 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                    chartTimeframe === tf ? 'bg-gold text-void' : 'text-cream/50 hover:text-cream hover:bg-white/5'
-                  }`}
-                >
-                  {tf}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setChartType('candle')}
-                className={`p-1.5 rounded-lg ${
-                  chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'
-                }`}
-              >
-                <CandlestickChart className="w-4 h-4" />
-              </button>
-             <button
-  onClick={() => setChartType('line')}
-  className={`p-1.5 rounded-lg ${
-    chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'
-  }`}
->
-  <LineChartIcon className="w-4 h-4" />
-</button>
-            </div>
-          </div>
-
-          {/* Chart area */}
-          <div
-            ref={chartRef}
-            className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
-            style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
-          >
-            {loadingChart && (
-              <div className="absolute top-2 right-2 z-10 px-2 py-1 rounded-lg bg-white/5 border border-white/10">
-                <span className="text-xs text-cream/60">Loading…</span>
-              </div>
-            )}
-
-            {!candles.length && !loadingChart && (
-              <div className="absolute inset-0 flex items-center justify-center text-cream/50 text-sm">
-                No chart data
-              </div>
-            )}
-
-            <svg
-              className="w-full h-full block"
-              viewBox={`0 0 ${chart.w} ${chart.h}`}
-              preserveAspectRatio="xMidYMid meet"
-              style={{ display: 'block' }}
+      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
+        {/* Header */}
+        <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
+          <div className="flex items-center justify-between gap-2 sm:gap-4">
+            {/* Asset Selector */}
+            <button
+              onClick={() => setShowAssetSelector(true)}
+              className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
             >
-              {/* grid */}
-              {[...Array(8)].map((_, i) => (
-                <line
-                  key={`h-${i}`}
-                  x1="0"
-                  y1={i * (chart.h / 8)}
-                  x2={chart.w}
-                  y2={i * (chart.h / 8)}
-                  stroke="rgba(255,255,255,0.05)"
-                />
-              ))}
-              {[...Array(16)].map((_, i) => (
-                <line
-                  key={`v-${i}`}
-                  x1={i * (chart.w / 16)}
-                  y1="0"
-                  x2={i * (chart.w / 16)}
-                  y2={chart.h}
-                  stroke="rgba(255,255,255,0.05)"
-                />
-              ))}
-
-              {/* candles */}
-              {chartType === 'candle' &&
-                chart.items.map((c, i) => (
-                  <g key={i}>
-                    <line
-                      x1={c.x}
-                      y1={c.hY}
-                      x2={c.x}
-                      y2={c.lY}
-                      stroke={c.isUp ? '#00d9a5' : '#ef4444'}
-                      strokeWidth="1"
-                    />
-                    <rect
-                      x={c.x - c.bodyW / 2}
-                      y={Math.min(c.oY, c.cY)}
-                      width={c.bodyW}
-                      height={Math.max(1, Math.abs(c.cY - c.oY))}
-                      fill={c.isUp ? '#00d9a5' : '#ef4444'}
-                      rx="1"
-                    />
-                  </g>
-                ))}
-
-              {/* line */}
-              {chartType === 'line' && chart.linePath && (
-                <>
-                  <path d={chart.linePath} fill="none" stroke={up ? '#00d9a5' : '#ef4444'} strokeWidth="2" />
-                  <path
-                    d={`${chart.linePath} L ${chart.w - chart.pad.r} ${chart.h - chart.pad.b} L ${chart.pad.l} ${
-                      chart.h - chart.pad.b
-                    } Z`}
-                    fill={up ? 'rgba(0,217,165,0.15)' : 'rgba(239,68,68,0.15)'}
-                  />
-                </>
-              )}
-
-              {/* current price marker */}
-              {chart.max > 0 && (() => {
-                const range = chart.max - chart.min || 1;
-                const priceY = chart.pad.t + ((chart.max - price) / range) * (chart.h - chart.pad.t - chart.pad.b);
-                return (
-                  <>
-                    <line x1="0" y1={priceY} x2={chart.w} y2={priceY} stroke="#d4af37" strokeDasharray="4" />
-                    <rect x={chart.w - 65} y={priceY - 10} width="60" height="20" fill="#d4af37" rx="3" />
-                    <text
-                      x={chart.w - 35}
-                      y={priceY + 4}
-                      textAnchor="middle"
-                      fill="#0a0a0f"
-                      fontSize="10"
-                      fontFamily="monospace"
-                    >
-                      ${price.toFixed(2)}
-                    </text>
-                  </>
-                );
-              })()}
-
-              {chart.max > 0 && (
-                <>
-                  <text x={chart.w - 6} y={16} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
-                    ${chart.max.toFixed(2)}
-                  </text>
-                  <text
-                    x={chart.w - 6}
-                    y={chart.h - 8}
-                    textAnchor="end"
-                    fill="#666"
-                    fontSize="10"
-                    fontFamily="monospace"
-                  >
-                    ${chart.min.toFixed(2)}
-                  </text>
-                </>
-              )}
-            </svg>
-          </div>
-        </div>
-
-        {/* Trade panel */}
-        <div
-          className={`${
-            mobileTab === 'trade' ? 'flex' : 'hidden'
-          } lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}
-        >
-          {/* Summary */}
-          <div className="p-3 border-b border-white/10">
-            <div className="grid grid-cols-2 gap-2">
-              <div className="p-2 bg-white/5 rounded-lg">
-                <p className="text-xs text-cream/50">Cash</p>
-                <p className="text-sm font-semibold text-cream">{fmtMoney(cashBalance)}</p>
+              <div className="flex items-center gap-1 sm:gap-2">
+                <span className="text-lg sm:text-xl">{info.emoji}</span>
+                <div className="text-left">
+                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedSymbol}</p>
+                  <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
+                </div>
               </div>
-              <div className="p-2 bg-white/5 rounded-lg">
-                <p className="text-xs text-cream/50">Portfolio</p>
-                <p className="text-sm font-semibold text-profit">{fmtMoney(portfolioValue)}</p>
-              </div>
-              <div className="p-2 bg-white/5 rounded-lg">
-                <p className="text-xs text-cream/50">Total</p>
-                <p className="text-sm font-semibold text-cream">{fmtMoney(totalEquity)}</p>
-              </div>
-              <div className="p-2 bg-white/5 rounded-lg">
-                <p className="text-xs text-cream/50">P&amp;L</p>
-                <p className={`text-sm font-semibold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  {unrealizedPnL >= 0 ? '+' : ''}
-                  ${Math.abs(unrealizedPnL).toFixed(2)}
+              <ChevronDown className="w-4 h-4 text-cream/50 flex-shrink-0" />
+            </button>
+
+            {/* Price */}
+            <div className="flex items-center gap-3 sm:gap-6">
+              <div className="text-center">
+                <p className="text-lg sm:text-2xl font-mono font-bold text-cream">${price.toFixed(2)}</p>
+                <p className={`text-xs ${up ? 'text-profit' : 'text-loss'}`}>
+                  {up ? '+' : ''}
+                  {changePercent24h.toFixed(2)}%
                 </p>
               </div>
             </div>
-          </div>
 
-          {/* Mode */}
-          <div className="p-3 border-b border-white/10">
-            <div className="flex gap-2 mb-4">
-              <button
-                onClick={() => setOrderMode('shares')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  orderMode === 'shares' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
-                }`}
-              >
-                Shares
-              </button>
-              <button
-                onClick={() => setOrderMode('dollars')}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  orderMode === 'dollars' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
-                }`}
-              >
-                Dollars
-              </button>
-            </div>
-
-            {orderMode === 'shares' ? (
-              <div>
-                <label className="text-xs text-cream/50 mb-2 block">Number of Shares</label>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShareQty(Math.max(1, shareQty - 1))}
-                    className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
-                  >
-                    <Minus className="w-4 h-4 text-cream" />
-                  </button>
-                  <input
-                    type="number"
-                    value={shareQty}
-                    onChange={(e) => setShareQty(Math.max(1, parseInt(e.target.value) || 1))}
-                    min={1}
-                    className="flex-1 h-10 px-3 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
-                  />
-                  <button
-                    onClick={() => setShareQty(shareQty + 1)}
-                    className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
-                  >
-                    <Plus className="w-4 h-4 text-cream" />
-                  </button>
-                </div>
-                <div className="flex gap-1 mt-2">
-                  {[1, 5, 10, 25, 50].map((qty) => (
-                    <button
-                      key={qty}
-                      onClick={() => setShareQty(qty)}
-                      className={`flex-1 py-1 text-xs rounded-lg ${
-                        shareQty === qty ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
-                      }`}
-                    >
-                      {qty}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div>
-                <label className="text-xs text-cream/50 mb-2 block">Dollar Amount</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cream/50">$</span>
-                  <input
-                    type="number"
-                    value={dollarAmount}
-                    onChange={(e) => setDollarAmount(Math.max(1, parseFloat(e.target.value) || 1))}
-                    min={1}
-                    className="w-full h-10 pl-7 pr-3 bg-white/5 border border-white/10 rounded-lg text-cream font-mono focus:outline-none focus:border-gold"
-                  />
-                </div>
-                <div className="flex gap-1 mt-2">
-                  {[50, 100, 250, 500, 1000].map((amt) => (
-                    <button
-                      key={amt}
-                      onClick={() => setDollarAmount(amt)}
-                      className={`flex-1 py-1 text-xs rounded-lg ${
-                        dollarAmount === amt ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
-                      }`}
-                    >
-                      ${amt}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-cream/40 mt-2">≈ {effectiveShares} shares @ ${askPrice.toFixed(2)}</p>
-              </div>
-            )}
-          </div>
-
-          {/* Summary + Buy */}
-          <div className="p-3 space-y-4">
-            <div className="p-3 bg-white/5 rounded-xl space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-cream/50">Shares</span>
-                <span className="text-cream">{effectiveShares}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-cream/50">Ask</span>
-                <span className="text-cream font-mono">${askPrice.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-cream/50">Order Value</span>
-                <span className="text-cream">${orderValue.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-cream/50">Commission</span>
-                <span className="text-cream">${commission.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-sm pt-2 border-t border-white/10">
-                <span className="text-cream font-medium">Total</span>
-                <span className="text-gold font-bold">${totalCost.toFixed(2)}</span>
-              </div>
-            </div>
-
-            <button
-              onClick={handleBuy}
-              disabled={!canBuy}
-              className="w-full py-4 rounded-xl font-bold text-lg bg-profit text-void hover:bg-profit/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            {/* Live status */}
+            <div
+              className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+                sseState === 'live' ? 'bg-profit/10' : 'bg-white/5'
+              }`}
             >
-              Buy {effectiveShares} {effectiveShares === 1 ? 'Share' : 'Shares'}
-            </button>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  sseState === 'live'
+                    ? 'bg-profit animate-pulse'
+                    : sseState === 'connecting'
+                    ? 'bg-gold animate-pulse'
+                    : 'bg-slate-500'
+                }`}
+              />
+              <span className={`text-sm font-medium ${sseState === 'live' ? 'text-profit' : 'text-cream/70'}`}>
+                {sseState === 'live' ? 'Live' : sseState === 'connecting' ? 'Connecting' : 'Offline'}
+              </span>
+            </div>
+          </div>
+        </div>
 
-            {!canBuy && (
-              <div className="p-2 bg-loss/10 rounded-lg border border-loss/20">
-                {effectiveShares < 1 ? (
-                  <p className="text-xs text-loss text-center">Amount too small — shares becomes 0.</p>
-                ) : (
+        {/* Mobile Tabs */}
+        <div className="lg:hidden flex-shrink-0 flex border-b border-white/10 bg-obsidian">
+          {(['chart', 'trade', 'portfolio'] as MobileTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                mobileTab === tab ? 'text-gold border-b-2 border-gold bg-gold/5' : 'text-cream/50'
+              }`}
+            >
+              {tab === 'chart' && 'Chart'}
+              {tab === 'trade' && 'Trade'}
+              {tab === 'portfolio' && `Portfolio (${stockPositions.length})`}
+            </button>
+          ))}
+        </div>
+
+        {/* Main */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
+          {/* Chart */}
+          <div className={`${mobileTab === 'chart' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-h-0 h-full`}>
+            {/* Controls */}
+            <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 border-b border-white/10 bg-charcoal/50">
+              <div className="flex items-center gap-1 overflow-x-auto">
+                {timeframes.map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setChartTimeframe(tf)}
+                    className={`px-2 sm:px-3 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                      chartTimeframe === tf ? 'bg-gold text-void' : 'text-cream/50 hover:text-cream hover:bg-white/5'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setChartType('candle')}
+                  className={`p-1.5 rounded-lg ${chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
+                >
+                  <CandlestickChart className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setChartType('line')}
+                  className={`p-1.5 rounded-lg ${chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
+                >
+                  <LineChartIcon className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Chart area */}
+            <div
+              ref={chartRef}
+              className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
+              style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
+            >
+              {loadingChart && (
+                <div className="absolute top-2 right-2 z-10 px-2 py-1 rounded-lg bg-white/5 border border-white/10">
+                  <span className="text-xs text-cream/60">Loading…</span>
+                </div>
+              )}
+
+              {!candles.length && !loadingChart && (
+                <div className="absolute inset-0 flex items-center justify-center text-cream/50 text-sm">No chart data</div>
+              )}
+
+              <svg
+                className="w-full h-full block"
+                viewBox={`0 0 ${chart.w} ${chart.h}`}
+                preserveAspectRatio="xMidYMid meet"
+                style={{ display: 'block' }}
+              >
+                {/* grid */}
+                {[...Array(8)].map((_, i) => (
+                  <line
+                    key={`h-${i}`}
+                    x1="0"
+                    y1={i * (chart.h / 8)}
+                    x2={chart.w}
+                    y2={i * (chart.h / 8)}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
+                ))}
+                {[...Array(16)].map((_, i) => (
+                  <line
+                    key={`v-${i}`}
+                    x1={i * (chart.w / 16)}
+                    y1="0"
+                    x2={i * (chart.w / 16)}
+                    y2={chart.h}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
+                ))}
+
+                {/* candles */}
+                {chartType === 'candle' &&
+                  chart.items.map((c, i) => (
+                    <g key={i}>
+                      <line x1={c.x} y1={c.hY} x2={c.x} y2={c.lY} stroke={c.isUp ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
+                      <rect
+                        x={c.x - c.bodyW / 2}
+                        y={Math.min(c.oY, c.cY)}
+                        width={c.bodyW}
+                        height={Math.max(1, Math.abs(c.cY - c.oY))}
+                        fill={c.isUp ? '#00d9a5' : '#ef4444'}
+                        rx="1"
+                      />
+                    </g>
+                  ))}
+
+                {/* line */}
+                {chartType === 'line' && chart.linePath && (
                   <>
-                    <p className="text-xs text-loss text-center mb-1">
-                      Insufficient funds. Need ${(totalCost - cashBalance).toFixed(2)} more.
-                    </p>
-                    <Link
-                      href="/dashboard/wallet"
-                      className="flex items-center justify-center gap-1 text-xs text-gold hover:text-gold/80 font-medium"
-                    >
-                      <Wallet className="w-3 h-3" />
-                      Deposit Funds
-                    </Link>
+                    <path d={chart.linePath} fill="none" stroke={up ? '#00d9a5' : '#ef4444'} strokeWidth="2" />
+                    <path
+                      d={`${chart.linePath} L ${chart.w - chart.pad.r} ${chart.h - chart.pad.b} L ${chart.pad.l} ${
+                        chart.h - chart.pad.b
+                      } Z`}
+                      fill={up ? 'rgba(0,217,165,0.15)' : 'rgba(239,68,68,0.15)'}
+                    />
                   </>
                 )}
-              </div>
-            )}
-          </div>
-        </div>
 
-        {/* Portfolio panel (Mobile) */}
-        <div className={`${mobileTab === 'portfolio' ? 'flex' : 'hidden'} lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}>
-          <div className="p-3">
-            <h3 className="text-sm font-semibold text-cream mb-3">Your Holdings ({stockPositions.length})</h3>
-
-            {stockPositions.length === 0 ? (
-              <div className="text-center py-8 text-cream/50">
-                <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">No holdings yet</p>
-                <p className="text-xs mt-1">Buy stocks to start building your portfolio</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {stockPositions.map((pos) => {
-                  const pi = stockInfo[pos.symbol] || { emoji: '📈', sector: 'Other' };
-                  return (
-                    <div key={pos.id} className="p-3 bg-white/5 rounded-xl">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <span className="text-lg">{pi.emoji}</span>
-                          <span className="font-semibold text-cream">{pos.symbol}</span>
-                        </div>
-                        <span className={`font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                          {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-2 text-xs mb-2">
-                        <div>
-                          <p className="text-cream/50">Shares</p>
-                          <p className="text-cream">{pos.qty}</p>
-                        </div>
-                        <div>
-                          <p className="text-cream/50">Avg Entry</p>
-                          <p className="text-cream font-mono">${Number(pos.avgEntry ?? 0).toFixed(2)}</p>
-                        </div>
-                        <div>
-                          <p className="text-cream/50">Value</p>
-                          <p className="text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</p>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => {
-                          setPositionToSell(pos);
-                          setSellQty(pos.qty);
-                          setShowSellModal(true);
-                        }}
-                        className="w-full py-2 bg-loss/20 text-loss text-sm font-medium rounded-lg hover:bg-loss/30 transition-colors"
-                      >
-                        Sell
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Desktop Portfolio */}
-      <div className="hidden lg:block flex-shrink-0 h-48 border-t border-white/10 bg-obsidian overflow-y-auto">
-        <div className="p-3">
-          <h3 className="text-sm font-semibold text-cream mb-3">Holdings ({stockPositions.length})</h3>
-
-          {stockPositions.length === 0 ? (
-            <div className="text-center py-4 text-cream/50">
-              <p className="text-sm">No holdings yet</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-cream/50 text-xs">
-                    <th className="text-left pb-2">Symbol</th>
-                    <th className="text-right pb-2">Shares</th>
-                    <th className="text-right pb-2">Avg Entry</th>
-                    <th className="text-right pb-2">Current</th>
-                    <th className="text-right pb-2">Value</th>
-                    <th className="text-right pb-2">P&amp;L</th>
-                    <th className="text-right pb-2">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {stockPositions.map((pos) => {
-                    const cur = quotes[pos.symbol]?.price ?? pos.currentPrice ?? 0;
+                {/* current price marker */}
+                {chart.max > 0 &&
+                  (() => {
+                    const range = chart.max - chart.min || 1;
+                    const priceY = chart.pad.t + ((chart.max - price) / range) * (chart.h - chart.pad.t - chart.pad.b);
                     return (
-                      <tr key={pos.id} className="border-t border-white/5">
-                        <td className="py-2 text-cream font-medium">{pos.symbol}</td>
-                        <td className="py-2 text-right text-cream">{pos.qty}</td>
-                        <td className="py-2 text-right font-mono text-cream">${Number(pos.avgEntry ?? 0).toFixed(2)}</td>
-                        <td className="py-2 text-right font-mono text-cream">${Number(cur).toFixed(2)}</td>
-                        <td className="py-2 text-right text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</td>
-                        <td className={`py-2 text-right font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                          {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
-                        </td>
-                        <td className="py-2 text-right">
-                          <button
-                            onClick={() => {
-                              setPositionToSell(pos);
-                              setSellQty(pos.qty);
-                              setShowSellModal(true);
-                            }}
-                            className="px-3 py-1 bg-loss/20 text-loss text-xs font-medium rounded hover:bg-loss/30"
-                          >
-                            Sell
-                          </button>
-                        </td>
-                      </tr>
+                      <>
+                        <line x1="0" y1={priceY} x2={chart.w} y2={priceY} stroke="#d4af37" strokeDasharray="4" />
+                        <rect x={chart.w - 65} y={priceY - 10} width="60" height="20" fill="#d4af37" rx="3" />
+                        <text
+                          x={chart.w - 35}
+                          y={priceY + 4}
+                          textAnchor="middle"
+                          fill="#0a0a0f"
+                          fontSize="10"
+                          fontFamily="monospace"
+                        >
+                          ${price.toFixed(2)}
+                        </text>
+                      </>
                     );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </div>
+                  })()}
 
-      {/* Asset Selector */}
-      <AnimatePresence>
-        {showAssetSelector && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowAssetSelector(false)}
-              className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-md bg-obsidian rounded-2xl border border-white/10 z-50 flex flex-col max-h-[90vh]"
-            >
-              <div className="p-4 border-b border-white/10 flex-shrink-0">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-lg font-semibold text-cream">Select Stock</h3>
-                  <button onClick={() => setShowAssetSelector(false)}>
-                    <X className="w-5 h-5 text-cream/50" />
-                  </button>
-                </div>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/30" />
-                  <input
-                    type="text"
-                    placeholder="Search stocks..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-cream/30 focus:outline-none focus:border-gold"
-                  />
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-2">
-                {favorites.length > 0 && (
-                  <div className="mb-4">
-                    <p className="px-2 py-1 text-xs text-gold font-medium">⭐ Watchlist</p>
-                    {filteredAssets
-                      .filter((a) => favorites.includes(a.symbol))
-                      .map((asset) => {
-                        const q = quotes[asset.symbol];
-                        const p = q?.price ?? asset.price;
-                        const dp = q?.changePercent24h ?? asset.changePercent24h;
-                        const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
-                        return (
-                          <button
-                            key={asset.symbol}
-                            onClick={() => {
-                              setSelectedSymbol(asset.symbol);
-                              setShowAssetSelector(false);
-                            }}
-                            className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
-                          >
-                            <div className="flex items-center gap-3">
-                              <span className="text-xl">{ai.emoji}</span>
-                              <div className="text-left">
-                                <p className="font-medium text-cream">{asset.symbol}</p>
-                                <p className="text-xs text-cream/50">{asset.name}</p>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                              <div className="text-right">
-                                <p className="font-mono text-cream">${p.toFixed(2)}</p>
-                                <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
-                                  {dp >= 0 ? '+' : ''}
-                                  {dp.toFixed(2)}%
-                                </p>
-                              </div>
-
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleFavorite(asset.symbol);
-                                }}
-                                className="p-1"
-                              >
-                                <Star className="w-4 h-4 text-gold fill-gold" />
-                              </button>
-                            </div>
-                          </button>
-                        );
-                      })}
-                  </div>
+                {chart.max > 0 && (
+                  <>
+                    <text x={chart.w - 6} y={16} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
+                      ${chart.max.toFixed(2)}
+                    </text>
+                    <text x={chart.w - 6} y={chart.h - 8} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
+                      ${chart.min.toFixed(2)}
+                    </text>
+                  </>
                 )}
+              </svg>
+            </div>
+          </div>
 
-                <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Stocks</p>
-                {filteredAssets
-                  .filter((a) => !favorites.includes(a.symbol))
-                  .map((asset) => {
-                    const q = quotes[asset.symbol];
-                    const p = q?.price ?? asset.price;
-                    const dp = q?.changePercent24h ?? asset.changePercent24h;
-                    const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
-                    return (
-                      <button
-                        key={asset.symbol}
-                        onClick={() => {
-                          setSelectedSymbol(asset.symbol);
-                          setShowAssetSelector(false);
-                        }}
-                        className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="text-xl">{ai.emoji}</span>
-                          <div className="text-left">
-                            <p className="font-medium text-cream">{asset.symbol}</p>
-                            <p className="text-xs text-cream/50">{asset.name}</p>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <div className="text-right">
-                            <p className="font-mono text-cream">${p.toFixed(2)}</p>
-                            <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
-                              {dp >= 0 ? '+' : ''}
-                              {dp.toFixed(2)}%
-                            </p>
-                          </div>
-
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleFavorite(asset.symbol);
-                            }}
-                            className="p-1"
-                          >
-                            <StarOff className="w-4 h-4 text-cream/30 hover:text-gold" />
-                          </button>
-                        </div>
-                      </button>
-                    );
-                  })}
+          {/* Trade panel */}
+          <div
+            className={`${
+              mobileTab === 'trade' ? 'flex' : 'hidden'
+            } lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}
+          >
+            {/* Summary */}
+            <div className="p-3 border-b border-white/10">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Cash</p>
+                  <p className="text-sm font-semibold text-cream">{fmtMoney(cashBalance)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Portfolio</p>
+                  <p className="text-sm font-semibold text-profit">{fmtMoney(portfolioValue)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Total</p>
+                  <p className="text-sm font-semibold text-cream">{fmtMoney(totalEquity)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">P&amp;L</p>
+                  <p className={`text-sm font-semibold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                    {unrealizedPnL >= 0 ? '+' : ''}${Math.abs(unrealizedPnL).toFixed(2)}
+                  </p>
+                </div>
               </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+            </div>
 
-      {/* Sell Modal */}
-      <AnimatePresence>
-        {showSellModal && positionToSell && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowSellModal(false)}
-              className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-sm bg-obsidian rounded-2xl p-4 sm:p-6 border border-gold/20 z-50"
-            >
-              <h3 className="text-xl font-semibold text-cream mb-4">Sell {positionToSell.symbol}</h3>
+            {/* Mode */}
+            <div className="p-3 border-b border-white/10">
+              <div className="flex gap-2 mb-4">
+                <button
+                  onClick={() => setOrderMode('shares')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    orderMode === 'shares' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
+                  }`}
+                >
+                  Shares
+                </button>
+                <button
+                  onClick={() => setOrderMode('dollars')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    orderMode === 'dollars' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
+                  }`}
+                >
+                  Dollars
+                </button>
+              </div>
 
-              <div className="space-y-4 mb-6">
+              {orderMode === 'shares' ? (
                 <div>
-                  <label className="text-sm text-cream/50 mb-2 block">Shares to Sell</label>
+                  <label className="text-xs text-cream/50 mb-2 block">Number of Shares</label>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => setSellQty(Math.max(1, sellQty - 1))}
-                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      onClick={() => setShareQty(Math.max(1, shareQty - 1))}
+                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
                     >
                       <Minus className="w-4 h-4 text-cream" />
                     </button>
                     <input
                       type="number"
-                      value={sellQty}
-                      onChange={(e) =>
-                        setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))
-                      }
-                      className="flex-1 h-10 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
+                      value={shareQty}
+                      onChange={(e) => setShareQty(Math.max(1, parseInt(e.target.value) || 1))}
+                      min={1}
+                      className="flex-1 h-10 px-3 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
                     />
                     <button
-                      onClick={() => setSellQty(Math.min(positionToSell.qty, sellQty + 1))}
-                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      onClick={() => setShareQty(shareQty + 1)}
+                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
                     >
                       <Plus className="w-4 h-4 text-cream" />
                     </button>
                   </div>
-                  <button
-                    onClick={() => setSellQty(positionToSell.qty)}
-                    className="w-full mt-2 py-1 text-xs text-gold bg-gold/10 rounded-lg"
-                  >
-                    Sell All ({positionToSell.qty} shares)
+                  <div className="flex gap-1 mt-2">
+                    {[1, 5, 10, 25, 50].map((qty) => (
+                      <button
+                        key={qty}
+                        onClick={() => setShareQty(qty)}
+                        className={`flex-1 py-1 text-xs rounded-lg ${
+                          shareQty === qty ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
+                        }`}
+                      >
+                        {qty}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="text-xs text-cream/50 mb-2 block">Dollar Amount</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cream/50">$</span>
+                    <input
+                      type="number"
+                      value={dollarAmount}
+                      onChange={(e) => setDollarAmount(Math.max(1, parseFloat(e.target.value) || 1))}
+                      min={1}
+                      className="w-full h-10 pl-7 pr-3 bg-white/5 border border-white/10 rounded-lg text-cream font-mono focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                  <div className="flex gap-1 mt-2">
+                    {[50, 100, 250, 500, 1000].map((amt) => (
+                      <button
+                        key={amt}
+                        onClick={() => setDollarAmount(amt)}
+                        className={`flex-1 py-1 text-xs rounded-lg ${
+                          dollarAmount === amt ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
+                        }`}
+                      >
+                        ${amt}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-cream/40 mt-2">≈ {effectiveShares} shares @ ${askPrice.toFixed(2)}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Summary + Buy */}
+            <div className="p-3 space-y-4">
+              <div className="p-3 bg-white/5 rounded-xl space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Shares</span>
+                  <span className="text-cream">{effectiveShares}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Ask</span>
+                  <span className="text-cream font-mono">${askPrice.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Order Value</span>
+                  <span className="text-cream">${orderValue.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Commission</span>
+                  <span className="text-cream">${commission.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-sm pt-2 border-t border-white/10">
+                  <span className="text-cream font-medium">Total</span>
+                  <span className="text-gold font-bold">${totalCost.toFixed(2)}</span>
+                </div>
+              </div>
+
+              <button
+                onClick={handleBuy}
+                disabled={!canBuy}
+                className="w-full py-4 rounded-xl font-bold text-lg bg-profit text-void hover:bg-profit/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Buy {effectiveShares} {effectiveShares === 1 ? 'Share' : 'Shares'}
+              </button>
+
+              {!canBuy && (
+                <div className="p-2 bg-loss/10 rounded-lg border border-loss/20">
+                  {effectiveShares < 1 ? (
+                    <p className="text-xs text-loss text-center">Amount too small — shares becomes 0.</p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-loss text-center mb-1">
+                        Insufficient funds. Need ${(totalCost - cashBalance).toFixed(2)} more.
+                      </p>
+                      <Link
+                        href="/dashboard/wallet"
+                        className="flex items-center justify-center gap-1 text-xs text-gold hover:text-gold/80 font-medium"
+                      >
+                        <Wallet className="w-3 h-3" />
+                        Deposit Funds
+                      </Link>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Portfolio panel (Mobile) */}
+          <div className={`${mobileTab === 'portfolio' ? 'flex' : 'hidden'} lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}>
+            <div className="p-3">
+              <h3 className="text-sm font-semibold text-cream mb-3">Your Holdings ({stockPositions.length})</h3>
+
+              {stockPositions.length === 0 ? (
+                <div className="text-center py-8 text-cream/50">
+                  <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No holdings yet</p>
+                  <p className="text-xs mt-1">Buy stocks to start building your portfolio</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {stockPositions.map((pos) => {
+                    const pi = stockInfo[pos.symbol] || { emoji: '📈', sector: 'Other' };
+                    return (
+                      <div key={pos.id} className="p-3 bg-white/5 rounded-xl">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-lg">{pi.emoji}</span>
+                            <span className="font-semibold text-cream">{pos.symbol}</span>
+                          </div>
+                          <span className={`font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+                          <div>
+                            <p className="text-cream/50">Shares</p>
+                            <p className="text-cream">{pos.qty}</p>
+                          </div>
+                          <div>
+                            <p className="text-cream/50">Avg Entry</p>
+                            <p className="text-cream font-mono">${Number(pos.avgEntry ?? 0).toFixed(2)}</p>
+                          </div>
+                          <div>
+                            <p className="text-cream/50">Value</p>
+                            <p className="text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</p>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setPositionToSell(pos);
+                            setSellQty(pos.qty);
+                            setShowSellModal(true);
+                          }}
+                          className="w-full py-2 bg-loss/20 text-loss text-sm font-medium rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Sell
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Desktop Portfolio */}
+        <div className="hidden lg:block flex-shrink-0 h-48 border-t border-white/10 bg-obsidian overflow-y-auto">
+          <div className="p-3">
+            <h3 className="text-sm font-semibold text-cream mb-3">Holdings ({stockPositions.length})</h3>
+
+            {stockPositions.length === 0 ? (
+              <div className="text-center py-4 text-cream/50">
+                <p className="text-sm">No holdings yet</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-cream/50 text-xs">
+                      <th className="text-left pb-2">Symbol</th>
+                      <th className="text-right pb-2">Shares</th>
+                      <th className="text-right pb-2">Avg Entry</th>
+                      <th className="text-right pb-2">Current</th>
+                      <th className="text-right pb-2">Value</th>
+                      <th className="text-right pb-2">P&amp;L</th>
+                      <th className="text-right pb-2">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stockPositions.map((pos) => {
+                      const cur = quotes[pos.symbol]?.price ?? pos.currentPrice ?? 0;
+                      return (
+                        <tr key={pos.id} className="border-t border-white/5">
+                          <td className="py-2 text-cream font-medium">{pos.symbol}</td>
+                          <td className="py-2 text-right text-cream">{pos.qty}</td>
+                          <td className="py-2 text-right font-mono text-cream">${Number(pos.avgEntry ?? 0).toFixed(2)}</td>
+                          <td className="py-2 text-right font-mono text-cream">${Number(cur).toFixed(2)}</td>
+                          <td className="py-2 text-right text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</td>
+                          <td
+                            className={`py-2 text-right font-semibold ${
+                              pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'
+                            }`}
+                          >
+                            {pos.unrealizedPnL >= 0 ? '+' : ''}
+                            ${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
+                          </td>
+                          <td className="py-2 text-right">
+                            <button
+                              onClick={() => {
+                                setPositionToSell(pos);
+                                setSellQty(pos.qty);
+                                setShowSellModal(true);
+                              }}
+                              className="px-3 py-1 bg-loss/20 text-loss text-xs font-medium rounded hover:bg-loss/30"
+                            >
+                              Sell
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Asset Selector */}
+        <AnimatePresence>
+          {showAssetSelector && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowAssetSelector(false)}
+                className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-md bg-obsidian rounded-2xl border border-white/10 z-50 flex flex-col max-h-[90vh]"
+              >
+                <div className="p-4 border-b border-white/10 flex-shrink-0">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-lg font-semibold text-cream">Select Stock</h3>
+                    <button onClick={() => setShowAssetSelector(false)}>
+                      <X className="w-5 h-5 text-cream/50" />
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/30" />
+                    <input
+                      type="text"
+                      placeholder="Search stocks..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-cream/30 focus:outline-none focus:border-gold"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-2">
+                  {favorites.length > 0 && (
+                    <div className="mb-4">
+                      <p className="px-2 py-1 text-xs text-gold font-medium">⭐ Watchlist</p>
+                      {filteredAssets
+                        .filter((a) => favorites.includes(a.symbol))
+                        .map((asset) => {
+                          const q = quotes[asset.symbol];
+                          const p = q?.price ?? asset.price;
+                          const dp = q?.changePercent24h ?? asset.changePercent24h;
+                          const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
+                          return (
+                            <button
+                              key={asset.symbol}
+                              onClick={() => {
+                                setSelectedSymbol(asset.symbol);
+                                setShowAssetSelector(false);
+                              }}
+                              className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <span className="text-xl">{ai.emoji}</span>
+                                <div className="text-left">
+                                  <p className="font-medium text-cream">{asset.symbol}</p>
+                                  <p className="text-xs text-cream/50">{asset.name}</p>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <div className="text-right">
+                                  <p className="font-mono text-cream">${p.toFixed(2)}</p>
+                                  <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                    {dp >= 0 ? '+' : ''}
+                                    {dp.toFixed(2)}%
+                                  </p>
+                                </div>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleFavorite(asset.symbol);
+                                  }}
+                                  className="p-1"
+                                >
+                                  <Star className="w-4 h-4 text-gold fill-gold" />
+                                </button>
+                              </div>
+                            </button>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Stocks</p>
+                  {filteredAssets
+                    .filter((a) => !favorites.includes(a.symbol))
+                    .map((asset) => {
+                      const q = quotes[asset.symbol];
+                      const p = q?.price ?? asset.price;
+                      const dp = q?.changePercent24h ?? asset.changePercent24h;
+                      const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
+                      return (
+                        <button
+                          key={asset.symbol}
+                          onClick={() => {
+                            setSelectedSymbol(asset.symbol);
+                            setShowAssetSelector(false);
+                          }}
+                          className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-xl">{ai.emoji}</span>
+                            <div className="text-left">
+                              <p className="font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/50">{asset.name}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <div className="text-right">
+                              <p className="font-mono text-cream">${p.toFixed(2)}</p>
+                              <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                {dp >= 0 ? '+' : ''}
+                                {dp.toFixed(2)}%
+                              </p>
+                            </div>
+
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFavorite(asset.symbol);
+                              }}
+                              className="p-1"
+                            >
+                              <StarOff className="w-4 h-4 text-cream/30 hover:text-gold" />
+                            </button>
+                          </div>
+                        </button>
+                      );
+                    })}
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Sell Modal */}
+        <AnimatePresence>
+          {showSellModal && positionToSell && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowSellModal(false)}
+                className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-sm bg-obsidian rounded-2xl p-4 sm:p-6 border border-gold/20 z-50"
+              >
+                <h3 className="text-xl font-semibold text-cream mb-4">Sell {positionToSell.symbol}</h3>
+
+                <div className="space-y-4 mb-6">
+                  <div>
+                    <label className="text-sm text-cream/50 mb-2 block">Shares to Sell</label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setSellQty(Math.max(1, sellQty - 1))}
+                        className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      >
+                        <Minus className="w-4 h-4 text-cream" />
+                      </button>
+                      <input
+                        type="number"
+                        value={sellQty}
+                        onChange={(e) => setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))}
+                        className="flex-1 h-10 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
+                      />
+                      <button
+                        onClick={() => setSellQty(Math.min(positionToSell.qty, sellQty + 1))}
+                        className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      >
+                        <Plus className="w-4 h-4 text-cream" />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setSellQty(positionToSell.qty)}
+                      className="w-full mt-2 py-1 text-xs text-gold bg-gold/10 rounded-lg"
+                    >
+                      Sell All ({positionToSell.qty} shares)
+                    </button>
+                  </div>
+
+                  <div className="p-3 bg-white/5 rounded-xl space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-cream/50">Avg Entry</span>
+                      <span className="text-cream font-mono">${Number(positionToSell.avgEntry ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-cream/50">Bid</span>
+                      <span className="text-cream font-mono">${bidPrice.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between pt-2 border-t border-white/10">
+                      <span className="text-cream/50">Est. P&amp;L</span>
+                      <span
+                        className={`font-semibold ${
+                          (bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty >= 0 ? 'text-profit' : 'text-loss'
+                        }`}
+                      >
+                        {(bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty >= 0 ? '+' : ''}
+                        ${((bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty).toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button onClick={() => setShowSellModal(false)} className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10">
+                    Cancel
+                  </button>
+                  <button onClick={handleSell} className="flex-1 py-3 bg-loss text-white font-semibold rounded-xl hover:bg-loss/90">
+                    Sell {sellQty} Shares
                   </button>
                 </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
 
-                <div className="p-3 bg-white/5 rounded-xl space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-cream/50">Avg Entry</span>
-                    <span className="text-cream font-mono">${Number(positionToSell.avgEntry ?? 0).toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-cream/50">Bid</span>
-                    <span className="text-cream font-mono">${bidPrice.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between pt-2 border-t border-white/10">
-                    <span className="text-cream/50">Est. P&amp;L</span>
-                    <span
-                      className={`font-semibold ${
-                        (bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty >= 0 ? 'text-profit' : 'text-loss'
-                      }`}
-                    >
-                      {(bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty >= 0 ? '+' : ''}
-                      ${((bidPrice - Number(positionToSell.avgEntry ?? 0)) * sellQty).toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowSellModal(false)}
-                  className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10"
-                >
-                  Cancel
-                </button>
-                <button onClick={handleSell} className="flex-1 py-3 bg-loss text-white font-semibold rounded-xl hover:bg-loss/90">
-                  Sell {sellQty} Shares
-                </button>
-              </div>
+        {/* Notification */}
+        <AnimatePresence>
+          {notification && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className={`fixed bottom-4 left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-auto px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50 ${
+                notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'
+              }`}
+            >
+              {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+              <span className="font-medium text-sm sm:text-base">{notification.message}</span>
             </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-
-      {/* Notification */}
-      <AnimatePresence>
-        {notification && (
-          <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className={`fixed bottom-4 left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-auto px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50 ${
-              notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'
-            }`}
-          >
-            {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-            <span className="font-medium text-sm sm:text-base">{notification.message}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+          )}
+        </AnimatePresence>
+      </div>
     </KYCGate>
   );
 }
