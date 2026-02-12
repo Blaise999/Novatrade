@@ -517,6 +517,7 @@ export default function StockTradingPage() {
 
     if ((result as any)?.success) {
       await refreshUser?.();
+      
 
       // ✅ Save to trades table for history
       if (user?.id) {
