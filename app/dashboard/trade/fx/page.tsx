@@ -603,7 +603,6 @@ export default function FXTradingPage() {
         const pos = stateNow.marginPositions.find((p: any) => String(p.id) === String(id));
         if (!pos) return;
 
-        const side = (pos as any).side as 'long' | 'short';
         const px = Number(trigger.triggerPrice);
         if (!Number.isFinite(px)) return;
 
@@ -627,7 +626,6 @@ export default function FXTradingPage() {
             symbol: (pos as any).symbol,
             exitPrice: px,
             pnl,
-            status: 'closed',
             sessionId: (pos as any).id,
           });
           if (!(closed as any)?.success) dbg('history close failed (auto)', (closed as any)?.error);
@@ -668,18 +666,24 @@ export default function FXTradingPage() {
 
         // Use best available mid for other pairs (simple)
         const midOther = livePricesRef.current?.[sym];
-        const basePx = sym === symbolSelected ? (side === 'long' ? currentBid : currentAsk) : typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
+        const basePx =
+          sym === symbolSelected
+            ? side === 'long'
+              ? currentBid
+              : currentAsk
+            : typeof midOther === 'number'
+              ? midOther
+              : Number(pos.currentPrice ?? 0);
 
         const px = Number(basePx);
         if (!Number.isFinite(px)) continue;
 
-        // ✅ FIX: store expects (symbol, price), not (id, price)
+        // ✅ store expects (symbol, price), not (id, price)
         const hit = updateMarginPositionPrice(sym, px);
         if (Array.isArray(hit) && hit.length) triggersToHandle.push(...hit);
       }
 
       if (triggersToHandle.length) {
-        // fire & forget auto-close
         for (const tr of triggersToHandle) handleAutoClose(tr);
       }
     }, 850);
@@ -697,27 +701,24 @@ export default function FXTradingPage() {
     setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
   }, []);
 
-  const findJustOpenedPositionId = useCallback(
-    (symbol: string, qty: number, entry: number) => {
-      const st = useTradingAccountStore.getState();
-      const matches = (st.marginPositions as any[]).filter((p) => {
-        const t = p.assetType ?? p.marketType ?? p.type ?? p.market;
-        if (t !== 'forex') return false;
-        if (String(p.symbol) !== String(symbol)) return false;
-        const q = Number(p.qty ?? 0);
-        const a = Number(p.avgEntry ?? 0);
-        return Math.abs(q - qty) < 1e-6 && Math.abs(a - entry) <= Math.max(entry * 0.0002, 0.00001);
-      });
-      if (!matches.length) return undefined;
-      matches.sort((a, b) => {
-        const ta = new Date(a.openedAt ?? a.createdAt ?? 0).getTime();
-        const tb = new Date(b.openedAt ?? b.createdAt ?? 0).getTime();
-        return tb - ta;
-      });
-      return matches[0]?.id as string | undefined;
-    },
-    []
-  );
+  const findJustOpenedPositionId = useCallback((symbol: string, qty: number, entry: number) => {
+    const st = useTradingAccountStore.getState();
+    const matches = (st.marginPositions as any[]).filter((p) => {
+      const t = p.assetType ?? p.marketType ?? p.type ?? p.market;
+      if (t !== 'forex') return false;
+      if (String(p.symbol) !== String(symbol)) return false;
+      const q = Number(p.qty ?? 0);
+      const a = Number(p.avgEntry ?? 0);
+      return Math.abs(q - qty) < 1e-6 && Math.abs(a - entry) <= Math.max(entry * 0.0002, 0.00001);
+    });
+    if (!matches.length) return undefined;
+    matches.sort((a, b) => {
+      const ta = new Date(a.openedAt ?? a.createdAt ?? 0).getTime();
+      const tb = new Date(b.openedAt ?? b.createdAt ?? 0).getTime();
+      return tb - ta;
+    });
+    return matches[0]?.id as string | undefined;
+  }, []);
 
   const handleTrade = useCallback(async () => {
     if (!canTrade) {
@@ -788,11 +789,9 @@ export default function FXTradingPage() {
           entryPrice,
           leverage,
 
-          fee,
           stopLoss: stopLoss || undefined,
           takeProfit: takeProfit || undefined,
 
-          status: 'active',
           sessionId: positionId, // ✅ now links correctly
         });
 
@@ -851,7 +850,6 @@ export default function FXTradingPage() {
             symbol: (position as any).symbol,
             exitPrice,
             pnl,
-            status: 'closed',
             sessionId: (position as any).id,
           });
 
