@@ -71,23 +71,36 @@ export async function GET(req: NextRequest) {
         `
           id,
           user_id,
+          pair,
           symbol,
           asset_type,
           market_type,
           trade_type,
+          type,
           direction,
+          side,
           amount,
           quantity,
+          lot_size,
           leverage,
           entry_price,
           exit_price,
+          current_price,
+          stop_loss,
+          take_profit,
           payout_percent,
+          pnl,
+          pnl_percentage,
           profit_loss,
           duration_seconds,
+          margin_used,
+          fees,
+          source,
           status,
           opened_at,
           closed_at,
           created_at,
+          updated_at,
           user:users(id, email, first_name, last_name)
         `,
         { count: "exact" }
@@ -120,10 +133,9 @@ export async function GET(req: NextRequest) {
     if (asset_type) query = query.eq("asset_type", asset_type);
     if (market_type) query = query.eq("market_type", market_type);
 
-    // Search by symbol OR trade id (you can extend this later)
     if (q) {
       const safe = q.replace(/,/g, " "); // avoid breaking the .or string
-      query = query.or(`symbol.ilike.%${safe}%,id.ilike.%${safe}%`);
+      query = query.or(`pair.ilike.%${safe}%,symbol.ilike.%${safe}%,id.ilike.%${safe}%`);
     }
 
     const from = (page - 1) * pageSize;

@@ -68,6 +68,22 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
+      // Fetch withdrawals
+      const { data: withdrawals } = await supabase
+        .from('withdrawals')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch referrals (where user is referrer)
+      const { data: referrals } = await supabase
+        .from('referrals')
+        .select('*')
+        .eq('referrer_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
       // Normalize into unified activity items
       const items: any[] = [];
 
@@ -124,6 +140,32 @@ export default function DashboardOverview() {
         });
       });
 
+      (withdrawals || []).forEach((w: any) => {
+        items.push({
+          id: `wd-${w.id}`,
+          kind: 'withdrawal',
+          label: 'Withdrawal',
+          sublabel: `${w.method || w.network || 'Funds'} • ${w.status}`,
+          amount: Number(w.amount ?? 0),
+          pnl: -Number(w.amount ?? 0),
+          status: w.status,
+          created_at: w.created_at,
+        });
+      });
+
+      (referrals || []).forEach((r: any) => {
+        items.push({
+          id: `ref-${r.id}`,
+          kind: 'referral',
+          label: 'Referral',
+          sublabel: r.reward_paid ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}` : 'New signup',
+          amount: Number(r.reward_amount ?? 0),
+          pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
+          status: r.reward_paid ? 'completed' : 'pending',
+          created_at: r.created_at,
+        });
+      });
+
       // Sort by date descending, take top 8
       items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
       setRecentActivity(items.slice(0, 8));
@@ -132,7 +174,8 @@ export default function DashboardOverview() {
 
   const balance = user?.balance ?? 0;
   const bonus = user?.bonusBalance ?? 0;
-  const totalBalance = balance + bonus;
+  // balance_available already includes bonus credit, don't add bonus again
+  const totalBalance = balance;
 
   const activeBots = bots.filter((b) => b.status === 'running').length;
   const totalBotPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
@@ -192,12 +235,9 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
           <p className="text-4xl font-bold text-cream mb-1">{formatBal(totalBalance)}</p>
 
           <div className="flex items-center gap-4 text-sm">
-            <span className="text-cream/50">
-              Available: <span className="text-cream font-medium">{formatBal(balance)}</span>
-            </span>
             {bonus > 0 && (
               <span className="text-cream/50">
-                Bonus: <span className="text-gold font-medium">{formatBal(bonus)}</span>
+                Includes <span className="text-gold font-medium">{formatBal(bonus)}</span> bonus
               </span>
             )}
           </div>

@@ -11,7 +11,6 @@ import {
   Wallet,
   Users,
   Settings,
-  Bell,
   Search,
   Menu,
   X,
@@ -28,9 +27,10 @@ import {
   Bot
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { useUIStore, useNotificationStore } from '@/lib/store';
+import { useUIStore } from '@/lib/store';
 import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
 import SupportWidget from '@/components/SupportWidget';
+import NotificationPanel from '@/components/NotificationPanel';
 
 const navigation = [
   { 
@@ -103,14 +103,12 @@ export default function DashboardLayout({
   const router = useRouter();
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
-  const { unreadCount } = useNotificationStore();
   
   // 🔥 Initialize all trading accounts with user's balance
   const { balance, isInitialized } = useUnifiedBalance();
   
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
 
   // Redirect if not authenticated
   useEffect(() => {
@@ -405,7 +403,7 @@ export default function DashboardLayout({
               <p className="text-sm font-semibold text-cream">
                 ${balance.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 {balance.bonus > 0 && (
-                  <span className="text-profit text-xs ml-1">+${balance.bonus.toLocaleString()}</span>
+                  <span className="text-slate-400 text-[10px] ml-1">(incl. ${balance.bonus.toLocaleString()} bonus)</span>
                 )}
               </p>
             </div>
@@ -438,19 +436,7 @@ export default function DashboardLayout({
             </Link>
 
             {/* Notifications */}
-            <div className="relative">
-              <button
-                onClick={() => setShowNotifications(!showNotifications)}
-                className="relative p-2 text-slate-400 hover:text-cream transition-colors"
-              >
-                <Bell className="w-5 h-5" />
-                {unreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 w-5 h-5 bg-loss text-void text-xs font-bold rounded-full flex items-center justify-center">
-                    {unreadCount > 9 ? '9+' : unreadCount}
-                  </span>
-                )}
-              </button>
-            </div>
+            <NotificationPanel />
 
             {/* User Menu */}
             <div className="relative">

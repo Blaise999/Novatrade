@@ -195,6 +195,19 @@ export async function PATCH(request: NextRequest) {
       },
     });
 
+    // 5b. Create notification for user
+    try {
+      await auth.supabaseAdmin.from('notifications').insert({
+        user_id: userId,
+        type: 'tier_purchase',
+        title: `${tierCode} Tier Activated!`,
+        message: `Your ${tierCode} tier has been approved. $${bonusAmount.toFixed(2)} bonus credit added to your balance.`,
+        data: { tier_level: tierLevel, tier_code: tierCode, bonus_amount: bonusAmount },
+      });
+    } catch (notifErr) {
+      console.error('[Tier Approve] Notification error (non-fatal):', notifErr);
+    }
+
     // 6. Trigger referral reward if this is user's first approved tier purchase
     try {
       const { data: prevPurchases } = await auth.supabaseAdmin

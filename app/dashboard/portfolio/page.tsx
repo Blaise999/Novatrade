@@ -29,6 +29,23 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { useSpotTradingStore } from '@/lib/spot-trading-store';
 import type { SpotPosition } from '@/lib/spot-trading-types';
 
+interface OpenTrade {
+  id: string;
+  symbol: string;  // mapped from pair
+  market_type: 'fx' | 'stocks';
+  direction: string;  // mapped from type
+  amount: number;
+  quantity: number | null;
+  entry_price: number;
+  current_price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  leverage: number | null;
+  profit_loss: number;  // mapped from pnl
+  status: string;
+  created_at: string;
+}
+
 // ============================================
 // CRYPTO ASSETS DATA (for icons)
 // ============================================
@@ -215,6 +232,49 @@ export default function PortfolioPage() {
 
   const [shieldTierOk, setShieldTierOk] = useState(false);
   const [shieldMsg, setShieldMsg] = useState('');
+  const [openTrades, setOpenTrades] = useState<OpenTrade[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(true);
+
+  // Fetch open FX/stock trades from trades table
+  useEffect(() => {
+    if (!user?.id) return;
+    const loadOpenTrades = async () => {
+      try {
+        const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+        if (!isSupabaseConfigured()) { setTradesLoading(false); return; }
+        const { data } = await supabase
+          .from('trades')
+          .select('id, pair, market_type, type, amount, quantity, entry_price, current_price, stop_loss, take_profit, leverage, pnl, status, created_at')
+          .eq('user_id', user.id)
+          .in('market_type', ['fx', 'stocks'])
+          .in('status', ['open', 'active', 'pending'])
+          .order('created_at', { ascending: false });
+        // Map DB column names to component-friendly names
+        const mapped: OpenTrade[] = (data || []).map((t: any) => ({
+          id: t.id,
+          symbol: t.pair || t.symbol || 'Unknown',
+          market_type: t.market_type,
+          direction: t.type || t.direction || 'buy',
+          amount: Number(t.amount || 0),
+          quantity: t.quantity,
+          entry_price: Number(t.entry_price || 0),
+          current_price: t.current_price ? Number(t.current_price) : null,
+          stop_loss: t.stop_loss,
+          take_profit: t.take_profit,
+          leverage: t.leverage,
+          profit_loss: Number(t.pnl || t.profit_loss || 0),
+          status: t.status,
+          created_at: t.created_at,
+        }));
+        setOpenTrades(mapped);
+      } catch (e) {
+        console.error('Failed to load open trades:', e);
+      } finally {
+        setTradesLoading(false);
+      }
+    };
+    loadOpenTrades();
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -260,16 +320,31 @@ export default function PortfolioPage() {
   const totalValue = getDisplayPortfolioValue();
   const totalPnL = getTotalUnrealizedPnL();
   const cashBalance = user?.balance || 0;
-  const totalEquity = cashBalance + totalValue;
+  const fxValue = openTrades.filter(t => t.market_type === 'fx').reduce((sum, t) => sum + (t.amount || 0), 0);
+  const stocksValue = openTrades.filter(t => t.market_type === 'stocks').reduce((sum, t) => sum + (t.amount || 0), 0);
+  const tradePnL = openTrades.reduce((sum, t) => sum + (t.profit_loss || 0), 0);
+  const totalEquity = cashBalance + totalValue + fxValue + stocksValue;
   const shieldSummary = getShieldSummary();
 
   // Calculate allocation
   const allocation = [
     { 
       asset: 'Crypto', 
-      value: totalValue > 0 ? (totalValue / totalEquity) * 100 : 0, 
+      value: totalEquity > 0 ? (totalValue / totalEquity) * 100 : 0, 
       color: '#F59E0B',
       amount: totalValue
+    },
+    { 
+      asset: 'Forex', 
+      value: totalEquity > 0 ? (fxValue / totalEquity) * 100 : 0, 
+      color: '#3B82F6',
+      amount: fxValue
+    },
+    { 
+      asset: 'Stocks', 
+      value: totalEquity > 0 ? (stocksValue / totalEquity) * 100 : 0, 
+      color: '#8B5CF6',
+      amount: stocksValue
     },
     { 
       asset: 'Cash', 
@@ -297,7 +372,7 @@ export default function PortfolioPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-display font-bold text-cream">Portfolio</h1>
-          <p className="text-slate-400 mt-1">Track your crypto holdings and performance</p>
+          <p className="text-slate-400 mt-1">Track your holdings and active positions</p>
         </div>
         <div className="flex items-center gap-2">
           {/* Global Shield Toggle */}
@@ -380,16 +455,16 @@ export default function PortfolioPage() {
         >
           <div className="flex items-center justify-between mb-3">
             <p className="text-sm text-slate-400">Unrealized P&L</p>
-            {totalPnL >= 0 ? (
+            {(totalPnL + tradePnL) >= 0 ? (
               <TrendingUp className="w-5 h-5 text-profit" />
             ) : (
               <TrendingDown className="w-5 h-5 text-loss" />
             )}
           </div>
-          <p className={`text-3xl font-bold ${totalPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-            {totalPnL >= 0 ? '+' : ''}${totalPnL.toFixed(2)}
+          <p className={`text-3xl font-bold ${(totalPnL + tradePnL) >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {(totalPnL + tradePnL) >= 0 ? '+' : ''}${(totalPnL + tradePnL).toFixed(2)}
           </p>
-          <p className="text-sm text-slate-500 mt-2">All positions</p>
+          <p className="text-sm text-slate-500 mt-2">{positions.length + openTrades.length} position{(positions.length + openTrades.length) !== 1 ? 's' : ''}</p>
         </motion.div>
 
         <motion.div
@@ -488,6 +563,51 @@ export default function PortfolioPage() {
 
         {/* Allocation Chart */}
         <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
+
+          {/* Active FX/Stock Trades - compact */}
+          {openTrades.length > 0 && (
+            <div className="mb-6 pb-4 border-b border-white/10">
+              <h3 className="text-sm font-semibold text-cream mb-3 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-electric" />
+                Active Trades ({openTrades.length})
+              </h3>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {openTrades.map((trade) => {
+                  const pnl = trade.profit_loss || 0;
+                  const isProfit = pnl >= 0;
+                  return (
+                    <div key={trade.id} className="flex items-center justify-between py-1.5 px-2 rounded-lg hover:bg-white/5">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${
+                          trade.direction === 'buy' ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                        }`}>
+                          {trade.direction}
+                        </span>
+                        <span className="text-sm font-medium text-cream">{trade.symbol}</span>
+                        <span className="text-[10px] text-slate-500 uppercase">{trade.market_type}</span>
+                        {trade.leverage && <span className="text-[10px] text-slate-500">×{trade.leverage}</span>}
+                      </div>
+                      <div className="text-right">
+                        <span className={`text-xs font-medium ${isProfit ? 'text-profit' : 'text-loss'}`}>
+                          {isProfit ? '+' : ''}{pnl.toFixed(2)}
+                        </span>
+                        <span className="text-xs text-slate-500 ml-2">${trade.amount.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {tradePnL !== 0 && (
+                <div className="mt-2 pt-2 border-t border-white/5 flex items-center justify-between">
+                  <span className="text-xs text-slate-400">Unrealized P&L</span>
+                  <span className={`text-xs font-semibold ${tradePnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                    {tradePnL >= 0 ? '+' : ''}${tradePnL.toFixed(2)}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           <h2 className="text-lg font-semibold text-cream mb-4">Allocation</h2>
           
           {/* Simple pie chart representation */}

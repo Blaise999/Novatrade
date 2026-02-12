@@ -458,9 +458,9 @@ export default function HistoryPage() {
         query = query.eq('market_type', marketFilter);
       }
 
-      // Search
+      // Search (pair is the primary column, symbol is alias)
       if (debouncedQuery) {
-        query = query.ilike('symbol', `%${debouncedQuery}%`);
+        query = query.ilike('pair', `%${debouncedQuery}%`);
       }
 
       // Status filter (DB-side where reliable)
@@ -487,14 +487,14 @@ export default function HistoryPage() {
 
       const mapped: Trade[] = (data || []).map((t: any) => {
         const type = normalizeMarketTypeRow(t);
-        const direction = normalizeDirection(t.direction);
+        const direction = normalizeDirection(t.direction ?? t.type);
 
         const amount = toNum(t.amount, 0);
         const entry = toNum(t.entry_price, 0);
         const exit = t.exit_price == null ? null : toNum(t.exit_price, 0);
 
-        // Profit base
-        let profit = toNum(t.profit_loss, 0);
+        // Profit base - handle both column names
+        let profit = toNum(t.profit_loss ?? t.pnl, 0);
 
         // Binary fallback
         const tradeTypeRaw = String(t.trade_type ?? '').toLowerCase();
@@ -544,7 +544,7 @@ export default function HistoryPage() {
 
         return {
           id: String(t.id),
-          asset: String(t.symbol ?? 'Unknown'),
+          asset: String(t.symbol ?? t.pair ?? 'Unknown'),
           type,
           direction,
           amount,
@@ -666,7 +666,7 @@ export default function HistoryPage() {
       // Last 10 raw rows (AUTH ID)
       const last10Res = await supabase
         .from('trades')
-        .select('id,user_id,symbol,market_type,asset_type,status,opened_at,created_at,profit_loss,entry_price,exit_price,session_id')
+        .select('id,user_id,pair,market_type,asset_type,status,opened_at,created_at,pnl,entry_price,exit_price,type')
         .eq('user_id', probeUserId)
         .order('created_at', { ascending: false })
         .limit(10);

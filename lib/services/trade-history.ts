@@ -1,162 +1,113 @@
 // lib/services/trade-history.ts
-// ✅ Matches your existing `public.trades` table schema (symbol-based)
-// ✅ Backwards compatible: accepts `pair`, `active` status alias, and close by sessionId
-// ✅ Abortable queries + sessionStorage Supabase client
+// ✅ FULL EDIT: tolerant inputs (aliases) + stable pagination + numeric coercion
+// Accepts common caller aliases: symbol, amount, type, side, tradeType, sessionId
 
+import "client-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 export const TRADE_HISTORY_TABLE = "trades" as const;
 
-export type TradeStatus =
-  | "open"
-  | "closed"
-  | "liquidated"
-  | "cancelled"
-  | "pending"
-  // ✅ alias some older callers may still use
-  | "active";
-
+export type TradeStatus = "open" | "closed" | "liquidated" | "cancelled";
 export type TradeDirection = "buy" | "sell";
 
-// Keep broad + include aliases so TS won’t fight you; we normalize on write.
+// Keep broad so UI never breaks on new categories.
 export type TradeMarketType =
   | "fx"
+  | "forex" // alias (will be normalized to "fx")
   | "crypto"
   | "stocks"
   | "indices"
   | "commodities"
   | "options"
   | "futures"
-  | "forex" // alias -> fx
-  | "stock" // alias -> stocks
-  | "equity" // alias -> stocks
+  | "spot"
+  | "margin"
   | "other";
 
-export type TradeRow = {
+export type TradeHistoryRow = {
   id: string;
   user_id: string;
 
-  asset_id: string | null;
+  account_id?: string | null;
 
-  symbol: string;
-  asset_type: string | null;
-  trade_type: string | null;
+  market_type: TradeMarketType;
+  asset_type?: string | null;
+  pair: string;
+  direction: TradeDirection;
 
-  direction: string;
+  quantity?: number | null;
+  lot_size?: number | null;
+  leverage?: number | null;
 
-  amount: number | null;
-  quantity: number | null;
-  leverage: number | null;
+  entry_price: number;
+  stop_loss?: number | null;
+  take_profit?: number | null;
 
-  entry_price: number | null;
-  exit_price: number | null;
+  exit_price?: number | null;
+  pnl?: number | null;
+  pnl_percent?: number | null;
 
-  stop_loss: number | null;
-  take_profit: number | null;
+  status: TradeStatus;
 
-  payout_percent: number | null;
-  duration_seconds: number | null;
+  opened_at: string; // ISO
+  closed_at?: string | null; // ISO
 
-  expires_at: string | null;
+  is_simulated?: boolean | null;
+  notes?: string | null;
 
-  status: string;
-
-  profit_loss: number | null;
-  payout_amount: number | null;
-
-  fee: number | null;
-  commission: number | null;
-  swap: number | null;
-
-  session_id: string | null;
-  signal_id: string | null;
-
-  is_copy_trade: boolean | null;
-
-  idempotency_key: string | null;
-
-  opened_at: string | null;
-  closed_at: string | null;
-
-  created_at: string;
-
-  market_type: string | null;
-  current_price: number | null;
-
-  session_key: string | null;
+  created_at: string; // ISO
+  updated_at?: string | null; // ISO
 };
 
+// ✅ INPUT: supports aliases so your pages can pass amount/type/symbol without TS errors.
 export type CreateTradeHistoryInput = {
   id?: string;
 
   userId: string;
+  accountId?: string | null;
 
-  assetId?: string | null;
-
-  // ✅ prefer symbol, but allow pair (older code)
-  symbol?: string;
-  pair?: string;
-
+  // canonical fields
+  marketType: TradeMarketType;
   assetType?: string | null;
-  tradeType?: string | null;
+  pair?: string; // canonical
+  direction?: TradeDirection;
 
-  direction: TradeDirection;
-
-  amount?: number | null;
   quantity?: number | null;
+  lotSize?: number | null;
   leverage?: number | null;
 
-  entryPrice?: number | null;
+  entryPrice: number;
   stopLoss?: number | null;
   takeProfit?: number | null;
 
-  payoutPercent?: number | null;
-  durationSeconds?: number | null;
-  expiresAt?: string | null;
+  openedAt?: string;
+  isSimulated?: boolean | null;
+  notes?: string | null;
 
-  marketType?: TradeMarketType | null;
-
-  currentPrice?: number | null;
-
-  isCopyTrade?: boolean | null;
-  idempotencyKey?: string | null;
-
-  // ✅ your table has these, and your FX page is passing fee
-  fee?: number | null;
-  commission?: number | null;
-  swap?: number | null;
-
-  // ✅ allow callers to pass status, but we normalize it
-  status?: TradeStatus | null;
-
-  sessionId?: string | null;
-  signalId?: string | null;
-  sessionKey?: string | null;
-
-  openedAt?: string | null;
+  // --- aliases coming from pages (tolerated) ---
+  symbol?: string; // alias for pair
+  amount?: number | null; // alias for quantity
+  type?: string | null; // alias for assetType (commonly used in stocks page)
+  side?: TradeDirection; // alias for direction
+  tradeType?: TradeMarketType; // optional extra category, stored into assetType if assetType missing
 };
 
 export type CloseTradeHistoryInput = {
-  // ✅ allow either identifier
+  // canonical
   tradeId?: string;
-  sessionId?: string;
-
   userId: string;
 
-  exitPrice?: number | null;
-  closedAt?: string | null;
+  exitPrice: number;
+  closedAt?: string;
 
-  profitLoss?: number | null;
-  // ✅ alias many callers use
   pnl?: number | null;
+  pnlPercent?: number | null;
 
-  payoutAmount?: number | null;
+  status?: Exclude<TradeStatus, "open">;
 
-  status?: Exclude<TradeStatus, "open" | "active"> | "closed" | "liquidated" | "cancelled";
-
-  // ✅ kept ONLY so existing callers that pass `symbol` won't fail TS.
-  // We do NOT use it to identify the trade.
-  symbol?: string;
+  // --- aliases coming from pages (tolerated) ---
+  sessionId?: string; // alias for tradeId (some pages call it this)
+  symbol?: string; // tolerated but NOT used for lookup (needs an id)
 };
 
 export type FetchTradeHistoryParams = {
@@ -164,9 +115,9 @@ export type FetchTradeHistoryParams = {
 
   status?: TradeStatus | "all";
   marketType?: TradeMarketType | "all";
-  symbolQuery?: string;
+  pairQuery?: string;
 
-  page?: number;
+  page?: number; // 1-based
   pageSize?: number;
 
   orderBy?: "created_at" | "opened_at" | "closed_at";
@@ -174,16 +125,33 @@ export type FetchTradeHistoryParams = {
 };
 
 export type FetchTradeHistoryResult = {
-  items: TradeRow[];
+  items: TradeHistoryRow[];
   count: number;
 };
 
 type Opts = { signal?: AbortSignal };
 
 // -----------------------------
-// Supabase client (browser-safe)
+// Supabase client (injectable)
 // -----------------------------
 let _client: SupabaseClient | null = null;
+
+export function setTradeHistoryClient(client: SupabaseClient) {
+  _client = client;
+}
+
+function safeStorage(which: "session" | "local"): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const storage = which === "session" ? window.sessionStorage : window.localStorage;
+    const k = "__st_test__";
+    storage.setItem(k, "1");
+    storage.removeItem(k);
+    return storage;
+  } catch {
+    return undefined;
+  }
+}
 
 function getSupabaseClient(): SupabaseClient {
   if (_client) return _client;
@@ -197,8 +165,7 @@ function getSupabaseClient(): SupabaseClient {
     );
   }
 
-  const storage =
-    typeof window !== "undefined" ? window.sessionStorage : undefined;
+  const storage = safeStorage("session") ?? safeStorage("local");
 
   _client = createClient(url, anon, {
     auth: {
@@ -212,18 +179,32 @@ function getSupabaseClient(): SupabaseClient {
   return _client;
 }
 
-function withAbort(query: any, signal?: AbortSignal) {
+function withAbort(query: any, signal?: AbortSignal): any {
   if (!signal) return query;
   if (typeof query?.abortSignal === "function") return query.abortSignal(signal);
   return query;
 }
 
+// -----------------------------
+// Helpers
+// -----------------------------
 function nowIso() {
   return new Date().toISOString();
 }
 
-function asNumber(n: unknown, fallback: number | null = null) {
-  return typeof n === "number" && Number.isFinite(n) ? n : fallback;
+function toNumberOrNull(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function toNumber(v: unknown, fallback = 0): number {
+  const n = toNumberOrNull(v);
+  return n === null ? fallback : n;
 }
 
 function cleanErr(err: unknown): Error {
@@ -231,112 +212,94 @@ function cleanErr(err: unknown): Error {
   return new Error(typeof err === "string" ? err : "Unknown error");
 }
 
-function normalizeMarketType(
-  mt: TradeMarketType | string | null | undefined
-): string | null {
-  if (!mt) return null;
-  const v = String(mt).toLowerCase().trim();
+const MARKET_SET = new Set<string>([
+  "fx",
+  "forex",
+  "crypto",
+  "stocks",
+  "indices",
+  "commodities",
+  "options",
+  "futures",
+  "spot",
+  "margin",
+  "other",
+]);
 
-  if (v === "forex") return "fx";
-  if (v === "stock" || v === "equity") return "stocks";
-
-  if (
-    v === "fx" ||
-    v === "crypto" ||
-    v === "stocks" ||
-    v === "indices" ||
-    v === "commodities" ||
-    v === "options" ||
-    v === "futures"
-  ) {
-    return v;
-  }
-
+function normalizeMarketType(mt: TradeMarketType): TradeMarketType {
+  if (mt === "forex") return "fx";
+  if (MARKET_SET.has(mt)) return mt;
   return "other";
 }
 
-function normalizeStatus(s: TradeStatus | string | null | undefined): string {
-  const v = String(s ?? "open").toLowerCase().trim();
-  // ✅ caller may send "active" meaning open
-  if (v === "active") return "open";
-  if (v === "open") return "open";
-  if (v === "closed") return "closed";
-  if (v === "liquidated") return "liquidated";
-  if (v === "cancelled") return "cancelled";
-  if (v === "pending") return "pending";
-  // default safe
-  return "open";
-}
+function coerceRow(raw: any): TradeHistoryRow {
+  const r = raw ?? {};
+  return {
+    ...(r as TradeHistoryRow),
 
-function pickSymbol(input: CreateTradeHistoryInput): string {
-  const s = (input.symbol ?? input.pair ?? "").trim();
-  if (!s) throw new Error("saveTradeToHistory: missing symbol/pair");
-  return s;
+    quantity: toNumberOrNull(r.quantity),
+    lot_size: toNumberOrNull(r.lot_size),
+    leverage: toNumberOrNull(r.leverage),
+
+    entry_price: toNumber(r.entry_price, 0),
+    stop_loss: toNumberOrNull(r.stop_loss),
+    take_profit: toNumberOrNull(r.take_profit),
+
+    exit_price: toNumberOrNull(r.exit_price),
+    pnl: toNumberOrNull(r.pnl),
+    pnl_percent: toNumberOrNull(r.pnl_percent),
+  };
 }
 
 // -----------------------------
 // Public API
 // -----------------------------
-
 export async function saveTradeToHistory(
   input: CreateTradeHistoryInput,
   opts: Opts = {}
-): Promise<TradeRow> {
+): Promise<TradeHistoryRow> {
   const supabase = getSupabaseClient();
 
   if (!input.userId) throw new Error("saveTradeToHistory: missing userId");
 
-  const symbol = pickSymbol(input);
+  const pair = (input.pair ?? input.symbol ?? "").trim();
+  if (!pair) throw new Error("saveTradeToHistory: missing pair/symbol");
 
-  const row: Partial<TradeRow> = {
+  const direction = input.direction ?? input.side;
+  if (!direction) throw new Error("saveTradeToHistory: missing direction/side");
+
+  const marketType = normalizeMarketType(input.marketType);
+
+  // amount -> quantity fallback
+  const quantity = input.quantity ?? input.amount ?? null;
+
+  // type/tradeType -> assetType fallback
+  const assetType = input.assetType ?? input.type ?? (input.tradeType ? String(input.tradeType) : null);
+
+  const row: Record<string, any> = {
     ...(input.id ? { id: input.id } : {}),
     user_id: input.userId,
 
-    asset_id: input.assetId ?? null,
+    market_type: marketType,
+    asset_type: assetType,
 
-    symbol,
-    asset_type: input.assetType ?? null,
-    trade_type: input.tradeType ?? null,
+    pair,
+    symbol: pair,                // alias column for admin trades page
+    // DB column is "type" (buy/sell), not "direction"
+    type: direction,
+    direction: direction,
 
-    direction: input.direction,
+    amount: toNumber(input.amount ?? input.quantity ?? 0, 0),
+    quantity: quantity ?? null,
+    leverage: input.leverage ?? null,
 
-    amount: asNumber(input.amount),
-    quantity: asNumber(input.quantity),
-    leverage: asNumber(input.leverage),
+    entry_price: toNumber(input.entryPrice, 0),
+    stop_loss: input.stopLoss ?? null,
+    take_profit: input.takeProfit ?? null,
 
-    entry_price: asNumber(input.entryPrice),
-    stop_loss: asNumber(input.stopLoss),
-    take_profit: asNumber(input.takeProfit),
-
-    payout_percent: asNumber(input.payoutPercent),
-    duration_seconds:
-      typeof input.durationSeconds === "number" ? input.durationSeconds : null,
-
-    expires_at: input.expiresAt ?? null,
-
-    // ✅ accept status from caller but normalize (active -> open)
-    status: normalizeStatus(input.status),
-
-    profit_loss: null,
-    payout_amount: null,
-
-    // ✅ fee/commission/swap supported
-    fee: asNumber(input.fee),
-    commission: asNumber(input.commission),
-    swap: asNumber(input.swap),
-
-    is_copy_trade: input.isCopyTrade ?? null,
-
-    idempotency_key: input.idempotencyKey ?? null,
-
+    status: "open",
     opened_at: input.openedAt ?? nowIso(),
-
-    market_type: normalizeMarketType(input.marketType),
-    current_price: asNumber(input.currentPrice),
-
-    session_id: input.sessionId ?? null,
-    signal_id: input.signalId ?? null,
-    session_key: input.sessionKey ?? null,
+    updated_at: nowIso(),
   };
 
   try {
@@ -350,7 +313,7 @@ export async function saveTradeToHistory(
     if (error) throw error;
     if (!data) throw new Error("saveTradeToHistory: no data returned");
 
-    return data as TradeRow;
+    return coerceRow(data);
   } catch (e) {
     throw cleanErr(e);
   }
@@ -359,80 +322,40 @@ export async function saveTradeToHistory(
 export async function closeTradeInHistory(
   input: CloseTradeHistoryInput,
   opts: Opts = {}
-): Promise<TradeRow> {
+): Promise<TradeHistoryRow> {
   const supabase = getSupabaseClient();
 
+  const tradeId = (input.tradeId ?? input.sessionId ?? "").trim();
+  if (!tradeId) throw new Error("closeTradeInHistory: missing tradeId/sessionId");
   if (!input.userId) throw new Error("closeTradeInHistory: missing userId");
-  if (!input.tradeId && !input.sessionId) {
-    throw new Error("closeTradeInHistory: missing tradeId or sessionId");
-  }
 
-  const profitLoss = asNumber(input.profitLoss ?? input.pnl);
-
-  const patch: Partial<TradeRow> = {
-    exit_price: asNumber(input.exitPrice),
+  const patch: Record<string, any> = {
+    exit_price: toNumber(input.exitPrice, 0),
     closed_at: input.closedAt ?? nowIso(),
-    profit_loss: profitLoss,
-    payout_amount: asNumber(input.payoutAmount),
-    status: normalizeStatus(input.status ?? "closed"),
+    pnl: input.pnl ?? null,
+    profit_loss: input.pnl ?? null,       // alias column for admin trades page
+    pnl_percentage: input.pnlPercent ?? null,
+    status: input.status ?? "closed",
+    updated_at: nowIso(),
   };
 
   try {
-    // ✅ If tradeId is given, update directly.
-    if (input.tradeId) {
-      const q = withAbort(
-        supabase
-          .from(TRADE_HISTORY_TABLE)
-          .update(patch)
-          .eq("id", input.tradeId)
-          .eq("user_id", input.userId)
-          .select("*")
-          .single(),
-        opts.signal
-      );
-
-      const { data, error } = await q;
-      if (error) throw error;
-      if (!data) throw new Error("closeTradeInHistory: no data returned");
-
-      return data as TradeRow;
-    }
-
-    // ✅ Otherwise resolve the latest trade by session_id, then update by id.
-    const sid = String(input.sessionId);
-
-    const findQ = withAbort(
-      supabase
-        .from(TRADE_HISTORY_TABLE)
-        .select("id")
-        .eq("user_id", input.userId)
-        .eq("session_id", sid)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle(),
-      opts.signal
-    );
-
-    const { data: found, error: findErr } = await findQ;
-    if (findErr) throw findErr;
-    if (!found?.id) throw new Error("closeTradeInHistory: trade not found for sessionId");
-
-    const q2 = withAbort(
+    const q = withAbort(
       supabase
         .from(TRADE_HISTORY_TABLE)
         .update(patch)
-        .eq("id", found.id)
+        .eq("id", tradeId)
         .eq("user_id", input.userId)
         .select("*")
         .single(),
       opts.signal
     );
 
-    const { data, error } = await q2;
+    const { data, error } = await q;
     if (error) throw error;
     if (!data) throw new Error("closeTradeInHistory: no data returned");
 
-    return data as TradeRow;
+    return coerceRow(data);
   } catch (e) {
     throw cleanErr(e);
   }
@@ -453,7 +376,7 @@ export async function fetchTradeHistory(
   const marketType = params.marketType ?? "all";
   const orderBy = params.orderBy ?? "created_at";
   const order = params.order ?? "desc";
-  const symbolQuery = (params.symbolQuery ?? "").trim();
+  const pairQuery = (params.pairQuery ?? "").trim();
 
   if (!params.userId) throw new Error("fetchTradeHistory: missing userId");
 
@@ -462,26 +385,51 @@ export async function fetchTradeHistory(
       .from(TRADE_HISTORY_TABLE)
       .select("*", { count: "exact" })
       .eq("user_id", params.userId)
-      .order(orderBy, { ascending: order === "asc" })
-      .range(from, to);
+      .order(orderBy, { ascending: order === "asc", nullsFirst: order === "asc" });
 
-    if (status !== "all") q = q.eq("status", normalizeStatus(status));
-
-    if (marketType !== "all") {
-      q = q.eq("market_type", normalizeMarketType(marketType));
+    if (orderBy !== "created_at") {
+      q = q.order("created_at", { ascending: false });
     }
+    q = q.order("id", { ascending: false });
 
-    if (symbolQuery) q = q.ilike("symbol", `%${symbolQuery}%`);
+    q = q.range(from, to);
+
+    if (status !== "all") q = q.eq("status", status);
+    if (marketType !== "all") q = q.eq("market_type", marketType);
+
+    if (pairQuery) q = q.ilike("pair", `%${pairQuery}%`);
 
     q = withAbort(q, opts.signal);
 
     const { data, error, count } = await q;
     if (error) throw error;
 
-    return {
-      items: (data ?? []) as TradeRow[],
-      count: typeof count === "number" ? count : 0,
-    };
+    const items = Array.isArray(data) ? data.map(coerceRow) : [];
+
+    return { items, count: typeof count === "number" ? count : 0 };
+  } catch (e) {
+    throw cleanErr(e);
+  }
+}
+
+export async function deleteTradeHistoryRow(
+  tradeId: string,
+  userId: string,
+  opts: Opts = {}
+): Promise<void> {
+  const supabase = getSupabaseClient();
+
+  if (!tradeId) throw new Error("deleteTradeHistoryRow: missing tradeId");
+  if (!userId) throw new Error("deleteTradeHistoryRow: missing userId");
+
+  try {
+    const q = withAbort(
+      supabase.from(TRADE_HISTORY_TABLE).delete().eq("id", tradeId).eq("user_id", userId),
+      opts.signal
+    );
+
+    const { error } = await q;
+    if (error) throw error;
   } catch (e) {
     throw cleanErr(e);
   }

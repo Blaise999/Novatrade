@@ -29,7 +29,8 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
-  Zap
+  Zap,
+  RefreshCw
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useWalletStore } from '@/lib/store';
@@ -106,14 +107,71 @@ function WalletContent() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [dismissedBanner, setDismissedBanner] = useState(false);
   const [expandedHistory, setExpandedHistory] = useState<string | null>(null);
+  const [userTierActive, setUserTierActive] = useState<boolean | null>(null); // null = loading
+
+  // Check if user has active tier
+  useEffect(() => {
+    if (!user?.id) return;
+    const checkTier = async () => {
+      try {
+        const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+        if (!isSupabaseConfigured()) { setUserTierActive(true); return; }
+        const { data } = await supabase
+          .from('users')
+          .select('tier_level, tier_active')
+          .eq('id', user.id)
+          .maybeSingle();
+        setUserTierActive(Boolean(data?.tier_active) && Number(data?.tier_level ?? 0) >= 1);
+      } catch { setUserTierActive(true); }
+    };
+    checkTier();
+  }, [user?.id]);
 
   // Get enabled payment methods
   const enabledCrypto = getEnabledCryptoWallets();
   const enabledBanks = getEnabledBankAccounts();
   const enabledProcessors = getEnabledPaymentProcessors();
 
-  // User's deposit history
-  const userDeposits = user ? getUserDeposits(user.id) : [];
+  // User's deposit history — fetch from Supabase so admin approval status syncs
+  const [dbDeposits, setDbDeposits] = useState<any[]>([]);
+  const [depositsLoading, setDepositsLoading] = useState(false);
+
+  const loadDepositsFromDB = async () => {
+    if (!user?.id) return;
+    setDepositsLoading(true);
+    try {
+      const { supabase: sb, isSupabaseConfigured: isc } = await import('@/lib/supabase/client');
+      if (!isc()) { setDepositsLoading(false); return; }
+      const { data } = await sb
+        .from('deposits')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      setDbDeposits(data || []);
+    } catch { /* fallback: keep empty */ }
+    setDepositsLoading(false);
+  };
+
+  useEffect(() => {
+    if (user?.id) loadDepositsFromDB();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Merge: prefer DB deposits, fallback to local store
+  const localDeposits = user ? getUserDeposits(user.id) : [];
+  const userDeposits = dbDeposits.length > 0
+    ? dbDeposits.map((d: any) => ({
+        id: d.id,
+        amount: Number(d.amount ?? 0),
+        methodName: d.method_name || d.method || d.network || 'Crypto',
+        status: d.status || 'pending',
+        createdAt: d.created_at,
+        rejectionReason: d.rejection_reason || null,
+        adminNote: d.admin_note || null,
+        txHash: d.tx_hash || d.transaction_ref || null,
+      }))
+    : localDeposits;
 
   // Get context info
   const selectedPlan = planId ? investmentPlans[planId] : null;
@@ -181,27 +239,46 @@ function WalletContent() {
       methodName = selectedProcessor.name;
     }
 
-    // ✅ FIX: oderId -> orderId
-await submitDeposit({
-  amount: parseFloat(amount),
-  method: selectedMethodType!,
-  methodId,
-  methodName,
-  transactionRef,
-  proofImage: proofImage || undefined,
-  userId: user.id,
-  userEmail: user.email,
-});
+    // Save to local store (legacy)
+    submitDeposit({
+      amount: parseFloat(amount),
+      method: selectedMethodType!,
+      methodId,
+      methodName,
+      transactionRef,
+      proofImage: proofImage || undefined,
+      userId: user.id,
+      userEmail: user.email,
+    });
 
-
-
-
+    // Save to Supabase deposits table for admin approval
+    try {
+      const { supabase, isSupabaseConfigured } = await import('@/lib/supabase/client');
+      if (isSupabaseConfigured()) {
+        await supabase.from('deposits').insert({
+          user_id: user.id,
+          amount: parseFloat(amount),
+          currency: 'USD',
+          method: selectedMethodType || 'crypto',
+          method_name: methodName || 'Crypto',
+          network: selectedMethodType === 'crypto' ? (selectedCrypto?.network || '') : null,
+          transaction_ref: transactionRef || null,
+          tx_hash: transactionRef || null,
+          proof_url: proofImage || null,
+          status: 'pending',
+        });
+      }
+    } catch (e) {
+      console.error('Failed to save deposit to DB:', e);
+    }
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
 
     setIsSubmitting(false);
     setDepositStep('submitted');
     setShowSuccess(true);
+    // Reload deposits from DB so history tab updates
+    await loadDepositsFromDB();
   };
 
   const resetDeposit = () => {
@@ -233,6 +310,28 @@ await submitDeposit({
         <h1 className="text-2xl font-display font-bold text-cream">Wallet</h1>
         <p className="text-slate-400 mt-1">Manage your funds and transactions</p>
       </div>
+
+      {/* Tier Activation Banner */}
+      {userTierActive === false && (
+        <div className="mb-6 p-4 bg-gold/5 border border-gold/20 rounded-2xl flex items-start gap-4">
+          <div className="w-10 h-10 bg-gold/10 rounded-xl flex items-center justify-center flex-shrink-0">
+            <Shield className="w-5 h-5 text-gold" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-semibold text-gold">Activate a Tier to Start Trading</h3>
+            <p className="text-xs text-slate-400 mt-1">
+              You need an active tier plan to trade and access platform features. 
+              Deposit funds and purchase a tier to get started.
+            </p>
+          </div>
+          <Link 
+            href="/dashboard/tier" 
+            className="px-4 py-2 bg-gold/10 text-gold text-sm font-medium rounded-lg hover:bg-gold/20 transition-colors whitespace-nowrap"
+          >
+            View Tiers
+          </Link>
+        </div>
+      )}
 
       {/* Context Banner */}
       <AnimatePresence>
@@ -319,6 +418,7 @@ await submitDeposit({
             onClick={() => {
               setActiveTab(tab);
               if (tab === 'deposit') resetDeposit();
+              if (tab === 'history') loadDepositsFromDB();
             }}
             className={`px-5 py-2.5 rounded-xl font-medium transition-all capitalize whitespace-nowrap ${
               activeTab === tab
@@ -1056,9 +1156,22 @@ await submitDeposit({
           {/* History Tab */}
           {activeTab === 'history' && (
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
-              <h2 className="text-lg font-semibold text-cream mb-4">Transaction History</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-cream">Transaction History</h2>
+                <button
+                  onClick={loadDepositsFromDB}
+                  className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-cream/40 transition-colors"
+                >
+                  <RefreshCw className={`w-4 h-4 ${depositsLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
 
-              {userDeposits.length === 0 ? (
+              {depositsLoading && userDeposits.length === 0 ? (
+                <div className="text-center py-12">
+                  <Loader2 className="w-8 h-8 text-gold animate-spin mx-auto mb-4" />
+                  <p className="text-cream/60">Loading transactions...</p>
+                </div>
+              ) : userDeposits.length === 0 ? (
                 <div className="text-center py-12">
                   <Clock className="w-12 h-12 text-cream/20 mx-auto mb-4" />
                   <h3 className="text-lg font-semibold text-cream mb-2">No Transactions Yet</h3>
@@ -1066,20 +1179,20 @@ await submitDeposit({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {userDeposits.map((deposit) => (
+                  {userDeposits.map((deposit: any) => (
                     <div key={deposit.id} className="p-4 bg-white/5 rounded-xl border border-white/5">
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           <div
                             className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                              deposit.status === 'confirmed'
+                              deposit.status === 'confirmed' || deposit.status === 'approved'
                                 ? 'bg-profit/10'
                                 : deposit.status === 'rejected'
                                 ? 'bg-loss/10'
                                 : 'bg-yellow-500/10'
                             }`}
                           >
-                            {deposit.status === 'confirmed' ? (
+                            {deposit.status === 'confirmed' || deposit.status === 'approved' ? (
                               <CheckCircle2 className="w-5 h-5 text-profit" />
                             ) : deposit.status === 'rejected' ? (
                               <XCircle className="w-5 h-5 text-loss" />
@@ -1088,27 +1201,39 @@ await submitDeposit({
                             )}
                           </div>
                           <div>
-                            <p className="font-medium text-cream">${deposit.amount.toLocaleString()}</p>
+                            <p className="font-medium text-cream">${Number(deposit.amount).toLocaleString()}</p>
                             <p className="text-xs text-cream/50">{deposit.methodName}</p>
                           </div>
                         </div>
                         <div className="text-right">
                           <span
                             className={`text-xs font-medium px-2 py-1 rounded-full ${
-                              deposit.status === 'confirmed'
+                              deposit.status === 'confirmed' || deposit.status === 'approved'
                                 ? 'bg-profit/10 text-profit'
                                 : deposit.status === 'rejected'
                                 ? 'bg-loss/10 text-loss'
                                 : 'bg-yellow-500/10 text-yellow-500'
                             }`}
                           >
-                            {deposit.status}
+                            {deposit.status === 'confirmed' ? 'Confirmed' : deposit.status === 'approved' ? 'Approved' : deposit.status}
                           </span>
                           <p className="text-xs text-cream/40 mt-1">
                             {new Date(deposit.createdAt).toLocaleDateString()}
                           </p>
                         </div>
                       </div>
+                      {/* Show rejection reason */}
+                      {deposit.status === 'rejected' && deposit.rejectionReason && (
+                        <div className="mt-2 p-2 bg-loss/5 border border-loss/10 rounded-lg">
+                          <p className="text-xs text-loss">{deposit.rejectionReason}</p>
+                        </div>
+                      )}
+                      {/* Show tx hash */}
+                      {deposit.txHash && (
+                        <p className="mt-1 text-[10px] text-cream/30 font-mono truncate">
+                          TX: {deposit.txHash}
+                        </p>
+                      )}
                     </div>
                   ))}
                 </div>

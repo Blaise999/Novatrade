@@ -53,12 +53,7 @@ export default function DashboardBotsPage() {
     if (!user?.id) return;
     setAccessLoading(true);
     try {
-      // Check activation keys
-      const res = await fetch(`/api/bots/keys?action=check&userId=${user.id}`);
-      const data = await res.json();
-      if (data.success) setBotAccess(data.access);
-
-      // Check tier level from Supabase
+      // Check tier level from Supabase (purely tier-based access)
       if (isSupabaseConfigured()) {
         const { data: userData } = await supabase
           .from('users')
@@ -70,6 +65,8 @@ export default function DashboardBotsPage() {
         const ta = Boolean(userData?.tier_active);
         setTierLevel(tl);
         setTierActive(ta);
+        // Set bot access based on tier only
+        setBotAccess({ dca: ta && tl >= 2, grid: ta && tl >= 3 });
       }
     } catch {}
     setAccessLoading(false);
@@ -79,9 +76,9 @@ export default function DashboardBotsPage() {
   const dcaTierOk = tierActive && tierLevel >= 2;
   const gridTierOk = tierActive && tierLevel >= 3;
 
-  // Access = tier check AND (activation key OR tier grants it automatically)
-  const dcaAllowed = dcaTierOk && botAccess.dca;
-  const gridAllowed = gridTierOk && botAccess.grid;
+  // Access is purely tier-based
+  const dcaAllowed = dcaTierOk;
+  const gridAllowed = gridTierOk;
 
   const hasAnyAccess = dcaAllowed || gridAllowed;
   const activeBots = bots.filter(b => b.status === 'running').length;
