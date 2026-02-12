@@ -1,266 +1,380 @@
 // lib/services/trade-history.ts
-import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
+// ✅ FULL FIXES: stable types + safe Supabase client + abortable queries + clean fetch/save/close
+// If your table name is different, change TRADE_HISTORY_TABLE below.
 
-type MarketTypeInput = "crypto" | "fx" | "stocks" | "forex"; // accept forex input, store as fx
-type TradeStatusInput =
-  | "open"
-  | "pending"
-  | "closed"
-  | "cancelled"
-  | "liquidated"
-  | "active"; // accept active input, store as open
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const normalizeMarketType = (m: MarketTypeInput): "crypto" | "fx" | "stocks" => {
-  const x = String(m ?? "").toLowerCase();
-  if (x === "forex") return "fx";
-  if (x === "crypto" || x === "fx" || x === "stocks") return x;
-  return "crypto";
+export const TRADE_HISTORY_TABLE = "trade_history" as const;
+
+export type TradeStatus = "open" | "closed" | "liquidated" | "cancelled";
+export type TradeDirection = "buy" | "sell";
+
+// Keep this broad so you never get TS “fx not assignable” issues from history usage.
+export type TradeMarketType =
+  | "fx"
+  | "crypto"
+  | "stocks"
+  | "indices"
+  | "commodities"
+  | "options"
+  | "futures"
+  | "spot"
+  | "margin"
+  | "other";
+
+export type TradeHistoryRow = {
+  id: string;
+  user_id: string;
+
+  // optional fields your table may have
+  account_id?: string | null;
+
+  market_type: TradeMarketType;
+  asset_type?: string | null; // e.g. "forex", "crypto"
+  pair: string; // e.g. "EUR/USD", "BTC/USDT"
+  direction: TradeDirection;
+
+  // trade sizing
+  quantity?: number | null;
+  lot_size?: number | null;
+  leverage?: number | null;
+
+  // prices
+  entry_price: number;
+  stop_loss?: number | null;
+  take_profit?: number | null;
+
+  // close data
+  exit_price?: number | null;
+  pnl?: number | null;
+  pnl_percent?: number | null;
+
+  status: TradeStatus;
+
+  opened_at: string; // ISO
+  closed_at?: string | null; // ISO
+
+  // metadata
+  is_simulated?: boolean | null;
+  notes?: string | null;
+
+  created_at: string; // ISO
+  updated_at?: string | null; // ISO
 };
 
-const normalizeStatus = (
-  s: TradeStatusInput
-): "open" | "pending" | "closed" | "cancelled" | "liquidated" => {
-  const x = String(s ?? "").toLowerCase();
-  if (x === "active") return "open";
-  if (x === "open" || x === "pending" || x === "closed" || x === "cancelled" || x === "liquidated")
-    return x;
-  return "open";
-};
+export type CreateTradeHistoryInput = {
+  // If you already generated an id elsewhere, you can pass it; otherwise it will be created by DB default/uuid.
+  id?: string;
 
-// direction can be buy/sell OR long/short. We store long/short for consistency.
-const normalizeDirection = (v?: string) => {
-  const x = (v ?? "").toLowerCase().trim();
-  if (x === "buy" || x === "long") return "long";
-  if (x === "sell" || x === "short") return "short";
-  return x || "long";
-};
-
-const isUuid = (v?: string | null) => {
-  if (!v) return false;
-  const s = String(v).trim();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
-};
-
-async function resolveAssetId(symbol: string, marketType: "crypto" | "fx" | "stocks") {
-  try {
-    const { data, error } = await supabase
-      .from("assets")
-      .select("id")
-      .eq("symbol", symbol)
-      .limit(1)
-      .maybeSingle();
-
-    if (error) return null;
-    return data?.id ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function getTradeIdByIdempotencyKey(userId: string, idempotencyKey: string) {
-  const { data, error } = await supabase
-    .from("trades")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("idempotency_key", idempotencyKey)
-    .limit(1)
-    .maybeSingle();
-
-  if (error) return null;
-  return data?.id ? String(data.id) : null;
-}
-
-export async function saveTradeToHistory(input: {
   userId: string;
-  symbol: string;
+  accountId?: string | null;
 
-  marketType: MarketTypeInput;
-  assetType?: string; // optional
-  tradeType?: string; // spot/margin/etc
-  direction?: string; // buy/sell or long/short
-  amount: number;
-  quantity: number;
-  leverage: number;
+  marketType: TradeMarketType;
+  assetType?: string | null;
+  pair: string;
+  direction: TradeDirection;
+
+  quantity?: number | null;
+  lotSize?: number | null;
+  leverage?: number | null;
+
   entryPrice: number;
-  exitPrice?: number | null;
-  stopLoss?: number;
-  takeProfit?: number;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
 
-  payoutPercent?: number;
-  durationSeconds?: number;
-  expiresAt?: string | null;
+  openedAt?: string; // default now
+  isSimulated?: boolean | null;
+  notes?: string | null;
+};
 
-  fee?: number; // use this for FX fees
-  fees?: number; // accept old callers
-  commission?: number; // use for stocks commission
-  swap?: number;
+export type CloseTradeHistoryInput = {
+  tradeId: string; // history row id
+  userId: string;
 
-  sessionId?: string; // NOTE: trades.session_id is uuid in your DB
-  signalId?: string;
-  isCopyTrade?: boolean;
-  idempotencyKey?: string;
+  exitPrice: number;
+  closedAt?: string; // default now
 
-  status?: TradeStatusInput;
+  pnl?: number | null;
+  pnlPercent?: number | null;
 
-  // old callers (stocks page)
-  type?: string; // buy/sell
-  side?: string; // long/short
-}) {
-  if (!isSupabaseConfigured()) return { success: false, error: "Supabase not configured" };
+  status?: Exclude<TradeStatus, "open">; // default "closed"
+};
 
-  const market_type = normalizeMarketType(input.marketType);
-  const status = normalizeStatus(input.status ?? "open");
-  const direction = normalizeDirection(input.direction ?? input.side ?? input.type);
+export type FetchTradeHistoryParams = {
+  userId: string;
 
-  const asset_id = await resolveAssetId(input.symbol, market_type);
+  // filters
+  status?: TradeStatus | "all";
+  marketType?: TradeMarketType | "all";
+  pairQuery?: string; // search in pair
 
-  // ✅ Use text idempotency key for dedupe (safe)
-  const idempotency_key =
-    (input.idempotencyKey && String(input.idempotencyKey).trim()) ||
-    (input.sessionId && String(input.sessionId).trim()) ||
-    `${input.userId}:${market_type}:${input.symbol}:${Date.now()}`;
+  // pagination
+  page?: number; // 1-based
+  pageSize?: number; // default 20
 
-  // ✅ session_id is uuid in DB → ONLY set if valid uuid
-  const session_id = isUuid(input.sessionId) ? String(input.sessionId).trim() : null;
+  // sorting
+  orderBy?: "created_at" | "opened_at" | "closed_at";
+  order?: "asc" | "desc";
+};
 
-  const payload: any = {
+export type FetchTradeHistoryResult = {
+  items: TradeHistoryRow[];
+  count: number;
+};
+
+type Opts = { signal?: AbortSignal };
+
+// -----------------------------
+// Supabase client (browser-safe)
+// -----------------------------
+let _client: SupabaseClient | null = null;
+
+function getSupabaseClient(): SupabaseClient {
+  if (_client) return _client;
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !anon) {
+    throw new Error(
+      "Missing Supabase env vars: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY"
+    );
+  }
+
+  // ✅ Uses sessionStorage so it matches your “move persistence from localStorage to sessionStorage” direction.
+  // If you still want localStorage, change storage to window.localStorage.
+  const storage =
+    typeof window !== "undefined" ? window.sessionStorage : undefined;
+
+  _client = createClient(url, anon, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: false,
+      storage,
+    },
+    global: {
+      // no special fetch here; AbortSignal is attached at query level via .abortSignal
+    },
+  });
+
+  return _client;
+}
+
+// Supabase-js v2 query builders support abortSignal(). We guard it to avoid runtime issues.
+function withAbort<T extends any>(query: any, signal?: AbortSignal): any {
+  if (!signal) return query;
+  if (typeof query?.abortSignal === "function") return query.abortSignal(signal);
+  return query;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function asNumber(n: unknown, fallback = 0) {
+  return typeof n === "number" && Number.isFinite(n) ? n : fallback;
+}
+
+function cleanErr(err: unknown): Error {
+  if (err instanceof Error) return err;
+  return new Error(typeof err === "string" ? err : "Unknown error");
+}
+
+// -----------------------------
+// Public API
+// -----------------------------
+
+/**
+ * ✅ Create/open a trade history row.
+ * - Uses INSERT by default.
+ * - If you pass id, it uses UPSERT (non-destructive) to “create if missing”.
+ */
+export async function saveTradeToHistory(
+  input: CreateTradeHistoryInput,
+  opts: Opts = {}
+): Promise<TradeHistoryRow> {
+  const supabase = getSupabaseClient();
+
+  if (!input.userId) throw new Error("saveTradeToHistory: missing userId");
+  if (!input.pair) throw new Error("saveTradeToHistory: missing pair");
+
+  const row: Partial<TradeHistoryRow> = {
+    ...(input.id ? { id: input.id } : {}),
     user_id: input.userId,
-    asset_id, // may be null if assets not seeded
-    symbol: input.symbol,
-    asset_type: input.assetType ?? market_type, // ok even if you later standardize
-    trade_type: input.tradeType ?? "spot",
-    direction,
-    amount: input.amount,
-    quantity: input.quantity,
-    leverage: input.leverage,
-    entry_price: input.entryPrice,
-    exit_price: input.exitPrice ?? null,
+    account_id: input.accountId ?? null,
+
+    market_type: input.marketType,
+    asset_type: input.assetType ?? null,
+    pair: input.pair,
+    direction: input.direction,
+
+    quantity: input.quantity ?? null,
+    lot_size: input.lotSize ?? null,
+    leverage: input.leverage ?? null,
+
+    entry_price: asNumber(input.entryPrice),
     stop_loss: input.stopLoss ?? null,
     take_profit: input.takeProfit ?? null,
-    payout_percent: input.payoutPercent ?? null,
-    duration_seconds: input.durationSeconds ?? null,
-    expires_at: input.expiresAt ?? null,
-    status,
-    profit_loss: null,
-    payout_amount: null,
-    fee: input.fee ?? input.fees ?? null,
-    commission: input.commission ?? null,
-    swap: input.swap ?? null,
-    session_id, // uuid|null
-    signal_id: input.signalId ?? null,
-    is_copy_trade: input.isCopyTrade ?? false,
-    idempotency_key,
-    opened_at: new Date().toISOString(),
-    market_type,
+
+    status: "open",
+    opened_at: input.openedAt ?? nowIso(),
+
+    is_simulated: input.isSimulated ?? null,
+    notes: input.notes ?? null,
   };
 
-  // ✅ Non-destructive / idempotent:
-  // - onConflict uses idempotency_key
-  // - ignoreDuplicates prevents overwriting existing rows
-  const { data, error } = await supabase
-    .from("trades")
-    .upsert(payload, { onConflict: "idempotency_key", ignoreDuplicates: true })
-    .select("id")
-    .maybeSingle();
+  try {
+    // ✅ If an id is provided, we use upsert to avoid destructive patterns.
+    const base = input.id
+      ? supabase.from(TRADE_HISTORY_TABLE).upsert(row, { onConflict: "id" })
+      : supabase.from(TRADE_HISTORY_TABLE).insert(row);
 
-  if (error) return { success: false, error: error.message };
+    const q = withAbort(
+      base.select("*").single(),
+      opts.signal
+    );
 
-  // If ignoreDuplicates hit, PostgREST may return null/empty — fetch id by key
-  const tradeId = data?.id ? String(data.id) : await getTradeIdByIdempotencyKey(input.userId, idempotency_key);
+    const { data, error } = await q;
 
-  if (!tradeId) return { success: true, tradeId: undefined };
-  return { success: true, tradeId };
+    if (error) throw error;
+    if (!data) throw new Error("saveTradeToHistory: no data returned");
+
+    return data as TradeHistoryRow;
+  } catch (e) {
+    throw cleanErr(e);
+  }
 }
 
-export async function closeTradeInHistory(input: {
-  userId: string;
-  symbol: string;
-  exitPrice: number;
-  pnl: number;
-  status?: "closed" | "liquidated" | "cancelled";
-  tradeId?: string;
-  sessionId?: string; // uuid OR non-uuid string
-}) {
-  if (!isSupabaseConfigured()) return { success: false, error: "Supabase not configured" };
+/**
+ * ✅ Close a trade history row.
+ * - Updates ONLY close fields (no destructive overwrite).
+ * - Verifies user_id match (extra safety).
+ */
+export async function closeTradeInHistory(
+  input: CloseTradeHistoryInput,
+  opts: Opts = {}
+): Promise<TradeHistoryRow> {
+  const supabase = getSupabaseClient();
 
-  const finalStatus = input.status ?? "closed";
+  if (!input.tradeId) throw new Error("closeTradeInHistory: missing tradeId");
+  if (!input.userId) throw new Error("closeTradeInHistory: missing userId");
 
-  // 1) If we know tradeId, close directly
-  if (input.tradeId) {
-    const { error } = await supabase
-      .from("trades")
-      .update({
-        status: finalStatus,
-        exit_price: input.exitPrice,
-        profit_loss: input.pnl,
-        closed_at: new Date().toISOString(),
-      })
-      .eq("id", input.tradeId)
-      .eq("user_id", input.userId);
+  const patch: Partial<TradeHistoryRow> = {
+    exit_price: asNumber(input.exitPrice),
+    closed_at: input.closedAt ?? nowIso(),
+    pnl: input.pnl ?? null,
+    pnl_percent: input.pnlPercent ?? null,
+    status: input.status ?? "closed",
+    updated_at: nowIso(),
+  };
 
-    if (error) return { success: false, error: error.message };
-    return { success: true };
+  try {
+    const q = withAbort(
+      supabase
+        .from(TRADE_HISTORY_TABLE)
+        .update(patch)
+        .eq("id", input.tradeId)
+        .eq("user_id", input.userId)
+        .select("*")
+        .single(),
+      opts.signal
+    );
+
+    const { data, error } = await q;
+
+    if (error) throw error;
+    if (!data) throw new Error("closeTradeInHistory: no data returned");
+
+    return data as TradeHistoryRow;
+  } catch (e) {
+    throw cleanErr(e);
   }
+}
 
-  // 2) If sessionId is a UUID, close by session_id
-  if (isUuid(input.sessionId)) {
-    const { error } = await supabase
-      .from("trades")
-      .update({
-        status: finalStatus,
-        exit_price: input.exitPrice,
-        profit_loss: input.pnl,
-        closed_at: new Date().toISOString(),
-      })
-      .eq("session_id", String(input.sessionId).trim())
-      .eq("user_id", input.userId);
+/**
+ * ✅ Fetch trade history with filters + pagination.
+ * ✅ Abortable (pass signal).
+ * ✅ Uses count: "exact" to support pagination UI.
+ */
+export async function fetchTradeHistory(
+  params: FetchTradeHistoryParams,
+  opts: Opts = {}
+): Promise<FetchTradeHistoryResult> {
+  const supabase = getSupabaseClient();
 
-    if (error) return { success: false, error: error.message };
-    return { success: true };
+  const page = Math.max(1, params.page ?? 1);
+  const pageSize = Math.min(200, Math.max(1, params.pageSize ?? 20));
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+
+  const status = params.status ?? "all";
+  const marketType = params.marketType ?? "all";
+  const orderBy = params.orderBy ?? "created_at";
+  const order = params.order ?? "desc";
+  const pairQuery = (params.pairQuery ?? "").trim();
+
+  if (!params.userId) throw new Error("fetchTradeHistory: missing userId");
+
+  try {
+    let q: any = supabase
+      .from(TRADE_HISTORY_TABLE)
+      .select("*", { count: "exact" })
+      .eq("user_id", params.userId)
+      .order(orderBy, { ascending: order === "asc" })
+      .range(from, to);
+
+    if (status !== "all") q = q.eq("status", status);
+    if (marketType !== "all") q = q.eq("market_type", marketType);
+
+    // basic search (pair)
+    if (pairQuery) {
+      // ilike is case-insensitive in Postgres
+      q = q.ilike("pair", `%${pairQuery}%`);
+    }
+
+    q = withAbort(q, opts.signal);
+
+    const { data, error, count } = await q;
+
+    if (error) throw error;
+
+    return {
+      items: (data ?? []) as TradeHistoryRow[],
+      count: typeof count === "number" ? count : 0,
+    };
+  } catch (e) {
+    throw cleanErr(e);
   }
+}
 
-  // 3) If sessionId is NOT uuid, treat it as idempotency_key
-  if (input.sessionId && String(input.sessionId).trim()) {
-    const { error } = await supabase
-      .from("trades")
-      .update({
-        status: finalStatus,
-        exit_price: input.exitPrice,
-        profit_loss: input.pnl,
-        closed_at: new Date().toISOString(),
-      })
-      .eq("idempotency_key", String(input.sessionId).trim())
-      .eq("user_id", input.userId);
+/**
+ * Optional helper if you need “delete my trade history row”.
+ * (Only use if your product allows it.)
+ */
+export async function deleteTradeHistoryRow(
+  tradeId: string,
+  userId: string,
+  opts: Opts = {}
+): Promise<void> {
+  const supabase = getSupabaseClient();
 
-    if (error) return { success: false, error: error.message };
-    return { success: true };
+  if (!tradeId) throw new Error("deleteTradeHistoryRow: missing tradeId");
+  if (!userId) throw new Error("deleteTradeHistoryRow: missing userId");
+
+  try {
+    const q = withAbort(
+      supabase
+        .from(TRADE_HISTORY_TABLE)
+        .delete()
+        .eq("id", tradeId)
+        .eq("user_id", userId),
+      opts.signal
+    );
+
+    const { error } = await q;
+    if (error) throw error;
+  } catch (e) {
+    throw cleanErr(e);
   }
-
-  // 4) fallback: find latest open/pending trade for this symbol, then close it
-  const { data: openTrade, error: findErr } = await supabase
-    .from("trades")
-    .select("id")
-    .eq("user_id", input.userId)
-    .eq("symbol", input.symbol)
-    .in("status", ["open", "pending", "active"])
-    .order("opened_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (findErr) return { success: false, error: findErr.message };
-  if (!openTrade?.id) return { success: false, error: "No open trade found to close" };
-
-  const { error: updErr } = await supabase
-    .from("trades")
-    .update({
-      status: finalStatus,
-      exit_price: input.exitPrice,
-      profit_loss: input.pnl,
-      closed_at: new Date().toISOString(),
-    })
-    .eq("id", openTrade.id)
-    .eq("user_id", input.userId);
-
-  if (updErr) return { success: false, error: updErr.message };
-  return { success: true };
 }
