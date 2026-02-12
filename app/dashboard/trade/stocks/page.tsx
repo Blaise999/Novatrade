@@ -519,19 +519,22 @@ export default function StockTradingPage() {
       await refreshUser?.();
       
       // ✅ Save to trades table for history
-      if (user?.id) {
-       saveTradeToHistory({
-  userId: user.id,
-  symbol: selectedSymbol,
-  marketType: 'stocks',
-  type: 'buy',
-  side: 'buy',
-  amount: totalCost,           // includes commission already
-  quantity: effectiveShares,
-  entryPrice: askPrice,
-  leverage: 1,
-});
+     if (user?.id) {
+  await saveTradeToHistory({
+    userId: user.id,
+    symbol: selectedSymbol,
 
+    marketType: "stocks",
+    assetType: "stocks",
+    tradeType: "spot",
+
+    direction: "buy",
+
+    amount: totalCost, // includes commission already
+    quantity: effectiveShares,
+    entryPrice: askPrice,
+    leverage: 1,
+  });
       }
 
       setNotification({
