@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 // Crypto wallet configuration
 export interface CryptoWallet {
@@ -60,7 +61,7 @@ export interface PendingDeposit {
   methodName: string;
 
   transactionRef?: string; // User provided reference / tx hash
-  proofImage?: string; // Base64 screenshot
+  proofImage?: string; // URL (or Base64 before upload)
 
   userId: string;
   userEmail: string;
@@ -128,7 +129,7 @@ interface DepositSettingsStore extends DepositSettings {
   togglePaymentProcessor: (id: string) => void;
 
   // Deposit management
-  submitDeposit: (deposit: SubmitDepositInput) => string;
+  submitDeposit: (deposit: SubmitDepositInput) => Promise<string>;
   confirmDeposit: (depositId: string, adminId: string, note?: string) => PendingDeposit | null;
   rejectDeposit: (depositId: string, adminId: string, note?: string) => PendingDeposit | null;
 
@@ -154,6 +155,8 @@ interface DepositSettingsStore extends DepositSettings {
   getPendingDeposits: () => PendingDeposit[];
   getUserDeposits: (userId: string) => PendingDeposit[];
 }
+
+// -------------------- Defaults --------------------
 
 // Default crypto wallets (admin should update these)
 const defaultCryptoWallets: CryptoWallet[] = [
@@ -259,6 +262,8 @@ const defaultPaymentProcessors: PaymentProcessor[] = [
   }
 ];
 
+// -------------------- Helpers --------------------
+
 const generateId = () => {
   const c = (globalThis as any).crypto;
   if (c && typeof c.randomUUID === 'function') return c.randomUUID();
@@ -270,6 +275,61 @@ const generateOrderId = () => {
   const rnd = Math.random().toString(36).slice(2, 7).toUpperCase();
   return `DEP-${ts}-${rnd}`;
 };
+
+let _supabase: SupabaseClient | null = null;
+function getSupabase(): SupabaseClient {
+  if (_supabase) return _supabase;
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anon) {
+    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY');
+  }
+
+  _supabase = createClient(url, anon);
+  return _supabase;
+}
+
+function dataUrlToBlob(dataUrl: string): { blob: Blob; mime: string; ext: string } {
+  const [meta, base64] = dataUrl.split(',');
+  const mimeMatch = meta.match(/data:(.*?);base64/);
+  const mime = mimeMatch?.[1] || 'image/png';
+  const ext = mime.includes('jpeg') ? 'jpg' : mime.includes('png') ? 'png' : 'bin';
+
+  const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+  return { blob: new Blob([bytes], { type: mime }), mime, ext };
+}
+
+async function uploadDepositProof(params: {
+  userId: string;
+  orderId: string;
+  proofImage: string; // data url
+}): Promise<string> {
+  const supabase = getSupabase();
+
+  // Create this bucket in Supabase Storage (Dashboard): deposit_proofs
+  const BUCKET = 'deposit_proofs';
+
+  const { blob, mime, ext } = dataUrlToBlob(params.proofImage);
+  const path = `deposits/${params.userId}/${params.orderId}.${ext}`;
+
+  const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, blob, {
+    contentType: mime,
+    upsert: true
+  });
+
+  if (upErr) {
+    throw new Error(
+      `Proof upload failed. Create a Storage bucket named "${BUCKET}" (or fix its policies). Error: ${upErr.message}`
+    );
+  }
+
+  // If bucket is public, this works immediately. If not, store the path and create signed URLs in admin.
+  const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+  return data.publicUrl || path;
+}
+
+// -------------------- Store --------------------
 
 export const useDepositSettingsStore = create<DepositSettingsStore>()(
   persist(
@@ -352,27 +412,106 @@ export const useDepositSettingsStore = create<DepositSettingsStore>()(
           paymentProcessors: state.paymentProcessors.map((p) => (p.id === id ? { ...p, enabled: !p.enabled } : p))
         })),
 
-      // Deposit management
-      submitDeposit: (deposit) => {
-        const id = generateId();
+      // ✅ Deposit management (NOW SAVES TO SUPABASE)
+      submitDeposit: async (deposit) => {
+        const supabase = getSupabase();
+
         const orderId = generateOrderId();
 
+        const isCrypto = deposit.method === 'crypto';
+
+        const state = get();
+        const cryptoCfg = isCrypto ? state.cryptoWallets.find((w) => w.id === deposit.methodId) : null;
+        const bankCfg = deposit.method === 'bank' ? state.bankAccounts.find((b) => b.id === deposit.methodId) : null;
+
+        const currency =
+          (isCrypto ? cryptoCfg?.symbol : bankCfg?.currency) || 'USD';
+
+        // Upload proof if provided (recommended)
+        let proofUrl: string | null = null;
+        if (deposit.proofImage) {
+          // proofImage comes as base64 data url from UI
+          proofUrl = await uploadDepositProof({
+            userId: deposit.userId,
+            orderId,
+            proofImage: deposit.proofImage
+          });
+        }
+
+        // ✅ Correct DB column names (NO network, NO tx_hash)
+        const row = {
+          user_id: deposit.userId,
+          amount: deposit.amount,
+          currency,
+
+          method: deposit.method, // 'crypto' | 'bank' | 'processor'
+          status: 'pending',
+
+          // platform-friendly id
+          payment_reference: orderId,
+
+          // crypto-only (blockchain hash)
+          transaction_hash: isCrypto ? (deposit.transactionRef || null) : null,
+
+          // crypto-only (the deposit address user sent to)
+          wallet_address: isCrypto ? (cryptoCfg?.address || null) : null,
+
+          // proof url
+          payment_proof_url: proofUrl,
+
+          // store UI-friendly details here
+          sender_info: {
+            userEmail: deposit.userEmail,
+            methodId: deposit.methodId,
+            methodName: deposit.methodName,
+            network: cryptoCfg?.network || null,
+            user_reference: !isCrypto ? (deposit.transactionRef || null) : null
+          }
+        };
+
+        const { data, error } = await supabase
+          .from('deposits')
+          .insert(row)
+          .select('id, status, created_at, processed_at, processed_by, rejection_reason, notes, payment_reference')
+          .single();
+
+        if (error) {
+          throw new Error(error.message);
+        }
+
+        const saved: PendingDeposit = {
+          id: data.id,
+          orderId: data.payment_reference || orderId,
+
+          amount: deposit.amount,
+          method: deposit.method,
+
+          methodId: deposit.methodId,
+          methodName: deposit.methodName,
+
+          transactionRef: deposit.transactionRef,
+          proofImage: proofUrl || undefined,
+
+          userId: deposit.userId,
+          userEmail: deposit.userEmail,
+
+          status: (data.status as any) || 'pending',
+
+          createdAt: data.created_at ? new Date(data.created_at).toISOString() : new Date().toISOString(),
+          processedAt: data.processed_at ? new Date(data.processed_at).toISOString() : undefined,
+          processedBy: data.processed_by || undefined,
+          note: data.notes || data.rejection_reason || undefined
+        };
+
         set((state) => ({
-          pendingDeposits: [
-            ...state.pendingDeposits,
-            {
-              ...deposit,
-              id,
-              orderId,
-              status: 'pending',
-              createdAt: new Date().toISOString()
-            }
-          ]
+          pendingDeposits: saved.status === 'pending' ? [saved, ...state.pendingDeposits] : state.pendingDeposits,
+          confirmedDeposits: saved.status !== 'pending' ? [saved, ...state.confirmedDeposits] : state.confirmedDeposits
         }));
 
-        return id;
+        return saved.id;
       },
 
+      // (Still local for now — admin confirmation should update DB server-side)
       confirmDeposit: (depositId, adminId, note) => {
         const state = get();
         const deposit = state.pendingDeposits.find((d) => d.id === depositId);
@@ -430,12 +569,14 @@ export const useDepositSettingsStore = create<DepositSettingsStore>()(
       getPendingDeposits: () => get().pendingDeposits,
 
       getUserDeposits: (userId) =>
-        [...get().pendingDeposits.filter((d) => d.userId === userId), ...get().confirmedDeposits.filter((d) => d.userId === userId)].sort(
-          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        )
+        [
+          ...get().pendingDeposits.filter((d) => d.userId === userId),
+          ...get().confirmedDeposits.filter((d) => d.userId === userId)
+        ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     }),
     {
-      name: 'deposit-settings-storage'
+      name: 'deposit-settings-storage',
+      storage: createJSONStorage(() => localStorage)
     }
   )
 );
