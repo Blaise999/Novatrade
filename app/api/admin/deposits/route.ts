@@ -1,6 +1,7 @@
 // app/api/admin/deposits/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -13,23 +14,16 @@ const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
 });
 
 function getToken(req: NextRequest) {
-  const h =
-    req.headers.get('authorization') ||
-    req.headers.get('Authorization') ||
-    '';
-
+  const h = req.headers.get('authorization') || req.headers.get('Authorization') || '';
   const m = h.match(/^bearer\s+(.+)$/i);
   if (m?.[1]) return m[1].trim();
-
-  // fallback (optional)
-  const c = req.cookies.get('novatrade_admin_token')?.value;
-  return c || null;
+  return req.cookies.get('novatrade_admin_token')?.value || null;
 }
 
-/**
- * ✅ OPAQUE admin session auth (64-hex token)
- * Expects a table: public.admin_sessions(token, admin_id, expires_at, revoked_at)
- */
+function sha256Hex(value: string) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 async function requireAdmin(req: NextRequest) {
   if (!SUPABASE_URL || !SERVICE_KEY) {
     return { ok: false as const, status: 500, message: 'Server misconfigured (missing Supabase env)' };
@@ -38,14 +32,34 @@ async function requireAdmin(req: NextRequest) {
   const token = getToken(req);
   if (!token) return { ok: false as const, status: 401, message: 'Missing admin token' };
 
-  // Validate token against admin_sessions (NOT supabase auth)
-  const { data: session, error: sessErr } = await supabaseAdmin
+  // ✅ Accept either raw token OR token_hash
+  const tokenHash = sha256Hex(token);
+
+  // Try raw token first
+  let session:
+    | { admin_id: string; expires_at: string | null; revoked_at: string | null }
+    | null = null;
+
+  const { data: s1, error: e1 } = await supabaseAdmin
     .from('admin_sessions')
     .select('admin_id, expires_at, revoked_at')
     .eq('token', token)
     .maybeSingle();
 
-  if (sessErr || !session?.admin_id) {
+  if (!e1 && s1?.admin_id) session = s1 as any;
+
+  // Fallback: token_hash
+  if (!session) {
+    const { data: s2, error: e2 } = await supabaseAdmin
+      .from('admin_sessions')
+      .select('admin_id, expires_at, revoked_at')
+      .eq('token_hash', tokenHash)
+      .maybeSingle();
+
+    if (!e2 && s2?.admin_id) session = s2 as any;
+  }
+
+  if (!session?.admin_id) {
     return { ok: false as const, status: 401, message: 'Invalid token' };
   }
 
@@ -81,9 +95,7 @@ async function requireAdmin(req: NextRequest) {
 // ─────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const gate = await requireAdmin(req);
-  if (!gate.ok) {
-    return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
-  }
+  if (!gate.ok) return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
 
   const url = new URL(req.url);
   const status = url.searchParams.get('status');
@@ -117,9 +129,7 @@ export async function GET(req: NextRequest) {
       .order('created_at', { ascending: false })
       .limit(200);
 
-    if (status && status !== 'all') {
-      query = query.eq('status', status);
-    }
+    if (status && status !== 'all') query = query.eq('status', status);
 
     const { data, error } = await query;
     if (error) throw error;
@@ -132,13 +142,12 @@ export async function GET(req: NextRequest) {
 }
 
 // ─────────────────────────────────────────────
-// PATCH /api/admin/deposits  { depositId, action: 'approve'|'reject', note?, rejectedReason? }
+// PATCH /api/admin/deposits
+// body: { depositId, action:'approve'|'reject', note?, rejectedReason? }
 // ─────────────────────────────────────────────
 export async function PATCH(req: NextRequest) {
   const gate = await requireAdmin(req);
-  if (!gate.ok) {
-    return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
-  }
+  if (!gate.ok) return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -151,7 +160,6 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    // 1) Get deposit
     const { data: deposit, error: fetchErr } = await supabaseAdmin
       .from('deposits')
       .select('*')
@@ -174,7 +182,6 @@ export async function PATCH(req: NextRequest) {
     const amount = Number(deposit.amount || 0);
 
     if (action === 'approve') {
-      // 2a) Update deposit status
       const { error: upErr } = await supabaseAdmin
         .from('deposits')
         .update({
@@ -186,20 +193,15 @@ export async function PATCH(req: NextRequest) {
         })
         .eq('id', depositId);
 
-      if (upErr) {
-        return NextResponse.json({ success: false, error: upErr.message }, { status: 500 });
-      }
+      if (upErr) return NextResponse.json({ success: false, error: upErr.message }, { status: 500 });
 
-      // 2b) Credit user balance
       const { data: userRow, error: uErr } = await supabaseAdmin
         .from('users')
         .select('balance_available')
         .eq('id', userId)
         .single();
 
-      if (uErr) {
-        return NextResponse.json({ success: false, error: uErr.message }, { status: 500 });
-      }
+      if (uErr) return NextResponse.json({ success: false, error: uErr.message }, { status: 500 });
 
       const currentBalance = Number(userRow?.balance_available ?? 0);
       const newBalance = currentBalance + amount;
@@ -209,11 +211,9 @@ export async function PATCH(req: NextRequest) {
         .update({ balance_available: newBalance })
         .eq('id', userId);
 
-      if (balErr) {
-        return NextResponse.json({ success: false, error: balErr.message }, { status: 500 });
-      }
+      if (balErr) return NextResponse.json({ success: false, error: balErr.message }, { status: 500 });
 
-      // 2c) Log transaction (safe)
+      // optional logs (safe)
       try {
         await supabaseAdmin.from('transactions').insert({
           user_id: userId,
@@ -229,7 +229,6 @@ export async function PATCH(req: NextRequest) {
         });
       } catch {}
 
-      // 2d) Notify user (safe)
       try {
         await supabaseAdmin.from('notifications').insert({
           user_id: userId,
@@ -247,7 +246,7 @@ export async function PATCH(req: NextRequest) {
       });
     }
 
-    // REJECT
+    // reject
     const { error: rejErr } = await supabaseAdmin
       .from('deposits')
       .update({
@@ -260,19 +259,14 @@ export async function PATCH(req: NextRequest) {
       })
       .eq('id', depositId);
 
-    if (rejErr) {
-      return NextResponse.json({ success: false, error: rejErr.message }, { status: 500 });
-    }
+    if (rejErr) return NextResponse.json({ success: false, error: rejErr.message }, { status: 500 });
 
-    // Notify user (safe)
     try {
       await supabaseAdmin.from('notifications').insert({
         user_id: userId,
         type: 'alert',
         title: 'Deposit Rejected',
-        message: `Your $${amount.toFixed(2)} deposit was rejected. ${
-          rejectedReason || 'Contact support for details.'
-        }`,
+        message: `Your $${amount.toFixed(2)} deposit was rejected. ${rejectedReason || 'Contact support for details.'}`,
         data: { deposit_id: depositId, reason: rejectedReason },
       });
     } catch {}
