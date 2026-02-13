@@ -103,6 +103,8 @@ export async function POST(request: NextRequest) {
         method_name: methodName || `Crypto Deposit (${network || 'default'})`,
         network: network || null,
         tx_hash: txHash || null,
+        payment_asset: paymentAsset || null,
+        address_shown: addressShown || null,
         status: 'pending',
         created_at: new Date().toISOString(),
       })

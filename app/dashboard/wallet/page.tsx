@@ -263,6 +263,8 @@ function WalletContent() {
           methodName: methodName || 'Crypto',
           network: selectedMethodType === 'crypto' ? (selectedCrypto?.network || '') : undefined,
           txHash: transactionRef || undefined,
+          paymentAsset: selectedMethodType === 'crypto' ? (selectedCrypto?.symbol || 'crypto') : undefined,
+          addressShown: selectedMethodType === 'crypto' ? (selectedCrypto?.address || '') : undefined,
         }),
       });
       const data = await res.json();
