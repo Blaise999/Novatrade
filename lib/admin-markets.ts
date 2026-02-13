@@ -3,6 +3,8 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { safeSessionStorage } from '@/lib/zustandStorage';
+
 
 export type TimestampInput = number | Date | string | null | undefined;
 
@@ -397,7 +399,7 @@ export const useAdminMarketStore = create<AdminMarketStore>()(
     }),
     {
       name: 'novatrade_admin_markets_v1',
-      storage: createJSONStorage(() => localStorage),
+storage: safeSessionStorage(),
       version: 1,
       partialize: (s) => ({
         customPairs: s.customPairs,
