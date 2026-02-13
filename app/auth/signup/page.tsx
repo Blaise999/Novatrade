@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -156,10 +156,31 @@ function PasswordStrength({ password }: { password: string }) {
   );
 }
 
-// ============================================
-// SIGNUP PAGE COMPONENT
-// ============================================
+/**
+ * ✅ IMPORTANT:
+ * Wrap the component that uses useSearchParams() in Suspense.
+ */
 export default function SignupPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-[60vh] flex items-center justify-center">
+          <div className="flex items-center gap-2 text-slate-400">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span>Loading…</span>
+          </div>
+        </div>
+      }
+    >
+      <SignupInner />
+    </Suspense>
+  );
+}
+
+// ============================================
+// SIGNUP PAGE INNER (safe to use useSearchParams here)
+// ============================================
+function SignupInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const refFromUrl = (searchParams.get('ref') || '').trim();
@@ -177,6 +198,7 @@ export default function SignupPage() {
     handleSubmit,
     formState: { errors, isValid },
     watch,
+    setValue,
   } = useForm<SignupForm>({
     resolver: zodResolver(signupSchema) as unknown as Resolver<SignupForm>,
     mode: 'onChange',
@@ -191,6 +213,11 @@ export default function SignupPage() {
     },
   });
 
+  // If ref arrives from URL on first load, ensure RHF gets it (safe)
+  useEffect(() => {
+    if (refFromUrl) setValue('referralCode', refFromUrl);
+  }, [refFromUrl, setValue]);
+
   const password = watch('password', '');
 
   const onSubmit: SubmitHandler<SignupForm> = async (data) => {
@@ -203,9 +230,11 @@ export default function SignupPage() {
       setOtpPassword(data.password);
       setRedirectUrl('/kyc');
 
+      // If your hook supports purpose, keep it consistent with verify page:
       const otpResult = await sendOTP(
         data.email.toLowerCase(),
-        `${data.firstName} ${data.lastName}`
+        `${data.firstName} ${data.lastName}`,
+        'email_verification'
       );
 
       if (!otpResult.success) {
