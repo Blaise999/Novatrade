@@ -1,17 +1,22 @@
-import type { Metadata } from 'next';
 import './globals.css';
 import { Providers } from './providers';
 
-export const metadata: Metadata = {
-  title: 'NovaTrade',
-  description: 'NovaTrade trading platform',
+export const metadata = {
+  title: 'NOVATrADE — AI Statistics-Powered Trading Platform',
+  description: 'Trade crypto, forex, and stocks with AI statistic-powered signals, advanced analytics, and institutional-grade tools.',
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className="bg-void text-cream">
-        <Providers>{children}</Providers>
+    <html lang="en" className="dark">
+      <body className="bg-void text-cream font-body antialiased">
+        <Providers>
+          {children}
+        </Providers>
       </body>
     </html>
   );
