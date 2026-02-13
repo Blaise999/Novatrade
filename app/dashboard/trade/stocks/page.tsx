@@ -487,7 +487,8 @@ export default function StockTradingPage() {
   const commission = Math.max(0.99, orderValue * 0.001);
   const totalCost = orderValue + commission;
 
-  const userBalance = Number(user?.balance ?? 0) + Number(user?.bonusBalance ?? 0);
+  // ✅ FIX: balance_available already includes bonus. Do NOT add bonusBalance again.
+  const userBalance = Number(user?.balance ?? 0);
   const cashBalance =
     (spotAccount as any)?.availableToTrade ??
     (spotAccount as any)?.cash ??
@@ -520,8 +521,14 @@ export default function StockTradingPage() {
       await refreshUser?.();
 
       // ✅ Save to trades table for history
+      // Find the just-created position to get its UUID
       if (user?.id) {
+        const currentPositions = useTradingAccountStore.getState().stockPositions;
+        const justOpened = currentPositions.find((p) => p.symbol === selectedSymbol);
+        const posId = justOpened?.id;
+
         await saveTradeToHistory({
+          id: posId || undefined,
           userId: user.id,
           pair: selectedSymbol,
           symbol: selectedSymbol,
@@ -532,7 +539,7 @@ export default function StockTradingPage() {
           quantity: effectiveShares,
           entryPrice: askPrice,
           leverage: 1,
-        }).catch(() => {}); // don't block trade on history save failure
+        }).catch((e) => { console.error('[Stocks] Trade history save failed:', e); });
       }
 
       setNotification({
@@ -555,15 +562,16 @@ export default function StockTradingPage() {
       const pnl = Number((result as any)?.realizedPnL ?? 0);
       await refreshUser?.();
 
-      // ✅ Save sell/close to trades table for history
+      // ✅ FIX: Close trade in history using position ID as tradeId
       if (user?.id) {
         closeTradeInHistory({
+          tradeId: positionToSell.id,
           userId: user.id,
-          symbol: positionToSell.symbol,
           exitPrice: bidPrice,
           pnl,
           status: 'closed',
-        });
+          closedAt: new Date().toISOString(),
+        }).catch((e) => { console.error('[Stocks] Trade history close failed:', e); });
       }
 
       setNotification({

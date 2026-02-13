@@ -29,6 +29,22 @@ import {
   syncFXTrade,
   notifyBalanceUpdate,
 } from '@/lib/services/balance-sync';
+import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
+
+// ==========================================
+// UUID GENERATOR (safe for DB uuid columns)
+// ==========================================
+function generateTradeUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback v4 UUID
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 // ==========================================
 // SUPABASE BALANCE SYNC HELPER
@@ -511,7 +527,7 @@ export const useTradingAccountStore = create<TradingAccountState>()(
         } else {
           const avgEntryWithFee = (qty * price + fee) / qty;
           const newPosition: StockPosition = {
-            id: `stock_${Date.now()}`,
+            id: generateTradeUUID(),
             accountId: account.id,
             symbol,
             name,
@@ -712,9 +728,10 @@ export const useTradingAccountStore = create<TradingAccountState>()(
 
         const newBalance = account.balance - fee;
         const now = new Date();
+        const positionUUID = generateTradeUUID();
 
         const newPosition: MarginPosition = {
-          id: `margin_${Date.now()}`,
+          id: positionUUID,
           accountId: account.id,
           symbol,
           name,
@@ -791,7 +808,38 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           );
         }
 
-        return { success: true };
+        // ✅ CENTRALIZED: Save trade to DB inside the margin engine
+        const userId = account.userId;
+        if (userId) {
+          const lots = qty > 0 ? qty / 100000 : null;
+          saveTradeToHistory({
+            id: positionUUID,
+            userId,
+            accountId: account.id,
+            marketType: type === 'forex' ? 'fx' : type === 'crypto' ? 'crypto' : 'stocks',
+            assetType: String(type),
+            pair: symbol,
+            direction: side === 'long' ? 'buy' : 'sell',
+            quantity: qty,
+            lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
+            leverage: leverage > 0 ? leverage : null,
+            entryPrice: price,
+            stopLoss: stopLoss ?? null,
+            takeProfit: takeProfit ?? null,
+            openedAt: now.toISOString(),
+            isSimulated: true,
+            notes: JSON.stringify({
+              positionId: positionUUID,
+              tradeType: 'margin',
+              notional,
+              fee,
+            }),
+          }).catch((e) => {
+            console.error('[TradingStore] Failed to save trade to DB:', e);
+          });
+        }
+
+        return { success: true, positionId: positionUUID };
       },
 
       closeMarginPosition: (positionId, price, fee) => {
@@ -847,6 +895,54 @@ export const useTradingAccountStore = create<TradingAccountState>()(
           realizedPnL - fee,
           `FX Close: ${position.symbol} ${position.side.toUpperCase()}`
         );
+
+        // ✅ CENTRALIZED: Close trade in DB inside the margin engine
+        const userId = account.userId;
+        if (userId) {
+          closeTradeInHistory({
+            tradeId: positionId,
+            userId,
+            exitPrice: price,
+            pnl: realizedPnL,
+            pnlPercent: position.requiredMargin > 0
+              ? (realizedPnL / position.requiredMargin) * 100
+              : null,
+            status: 'closed',
+            closedAt: new Date().toISOString(),
+          }).catch(async (e) => {
+            // If the DB row doesn't exist (missed open insert), repair it
+            console.error('[TradingStore] closeTradeInHistory failed, attempting repair:', e);
+            try {
+              const lots = position.qty > 0 ? position.qty / 100000 : null;
+              await saveTradeToHistory({
+                id: positionId,
+                userId,
+                accountId: account.id,
+                marketType: position.type === 'forex' ? 'fx' : position.type === 'crypto' ? 'crypto' : 'stocks',
+                assetType: String(position.type),
+                pair: position.symbol,
+                direction: position.side === 'long' ? 'buy' : 'sell',
+                quantity: position.qty,
+                lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
+                leverage: position.leverage > 0 ? position.leverage : null,
+                entryPrice: position.avgEntry,
+                openedAt: position.openedAt?.toISOString?.() || new Date().toISOString(),
+                isSimulated: true,
+                notes: JSON.stringify({ repaired: true, reason: 'close-repair' }),
+              });
+              await closeTradeInHistory({
+                tradeId: positionId,
+                userId,
+                exitPrice: price,
+                pnl: realizedPnL,
+                status: 'closed',
+                closedAt: new Date().toISOString(),
+              });
+            } catch (e2) {
+              console.error('[TradingStore] DB repair also failed:', e2);
+            }
+          });
+        }
 
         return { success: true, realizedPnL };
       },

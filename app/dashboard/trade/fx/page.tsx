@@ -28,7 +28,6 @@ import { useTradingAccountStore } from '@/lib/trading-store';
 import { useAdminSessionStore } from '@/lib/admin-store';
 import { useStore } from '@/lib/supabase/store-supabase';
 import KYCGate from '@/components/KYCGate';
-import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 import { useAdminMarketStore, isAdminControlledPair, getMarketData } from '@/lib/admin-markets';
 import { useMembershipStore, TIER_CONFIG, canPerformAction } from '@/lib/membership-tiers';
 import { marketAssets } from '@/lib/data';
@@ -316,7 +315,8 @@ export default function FXTradingPage() {
   }, [livePrices]);
 
   // User balance (account currency)
-  const userBalance = Number((user as any)?.balance ?? 0) + Number((user as any)?.bonusBalance ?? 0);
+  // ✅ FIX: balance_available already includes bonus. Do NOT add bonusBalance again.
+  const userBalance = Number((user as any)?.balance ?? 0);
 
   // Tier gating: tier-based OR if admin has set a balance
   const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
@@ -622,62 +622,7 @@ export default function FXTradingPage() {
 
         await refreshUser?.();
 
-        // ✅ FIX: closeTradeInHistory requires tradeId + no extra props
-        const userId = (user as any)?.id as string | undefined;
-        if (userId) {
-          const tradeId = String((pos as any).id);
-          try {
-            await closeTradeInHistory({
-              tradeId,
-              userId,
-              exitPrice: px,
-              pnl,
-              status: 'closed',
-              closedAt: new Date().toISOString(),
-            });
-          } catch (e) {
-            // If history row doesn't exist (e.g., missed open insert), repair by creating then closing.
-            try {
-              const sym = String((pos as any).symbol ?? trigger.symbol);
-              const entry = Number((pos as any).avgEntry ?? (pos as any).entryPrice ?? 0);
-              const lev = Number((pos as any).leverage ?? 0);
-              const openedAt = String((pos as any).openedAt ?? (pos as any).createdAt ?? new Date().toISOString());
-              const lots = qty ? qty / 100000 : null;
-
-              await saveTradeToHistory({
-                id: tradeId,
-                userId,
-                accountId: (marginAccount as any)?.id ?? null,
-                marketType: 'fx',
-                assetType: 'forex',
-                pair: sym,
-                direction: side === 'long' ? 'buy' : 'sell',
-                quantity: qty || null,
-                lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
-                leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
-                entryPrice: Number.isFinite(entry) ? entry : px,
-                openedAt,
-                isSimulated: true,
-                notes: JSON.stringify({
-                  repaired: true,
-                  reason: 'auto-close',
-                  trigger: trigger.reason,
-                }),
-              });
-
-              await closeTradeInHistory({
-                tradeId,
-                userId,
-                exitPrice: px,
-                pnl,
-                status: 'closed',
-                closedAt: new Date().toISOString(),
-              });
-            } catch (e2) {
-              dbg('history close failed (auto)', e2);
-            }
-          }
-        }
+        // ✅ DB close is now handled centrally inside closeMarginPosition in the store
 
         setNotification({
           type: 'success',
@@ -691,7 +636,7 @@ export default function FXTradingPage() {
         setTimeout(() => autoClosingIdsRef.current.delete(id), 2000);
       }
     },
-    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, user, dbg, formatMoney, marginAccount]
+    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, formatMoney]
   );
 
   useEffect(() => {
@@ -707,34 +652,40 @@ export default function FXTradingPage() {
       const all = positionsRef.current || [];
       const triggersToHandle: any[] = [];
 
+      // ✅ FIX: Deduplicate per symbol, call updateMarginPositionPrice ONCE per symbol
+      const symbolsProcessed = new Set<string>();
+
       for (const pos of all as any[]) {
         const t = pos.assetType ?? pos.marketType ?? pos.type ?? pos.market;
         if (t !== 'forex') continue;
 
         const sym = String(pos.symbol);
-        const side = String(pos.side);
+        if (symbolsProcessed.has(sym)) continue;
+        symbolsProcessed.add(sym);
 
-        // Use best available mid for other pairs (simple)
-        const midOther = livePricesRef.current?.[sym];
-        const basePx =
-          sym === symbolSelected
-            ? side === 'long'
-              ? currentBid
-              : currentAsk
-            : typeof midOther === 'number'
-            ? midOther
-            : Number(pos.currentPrice ?? 0);
+        // ✅ FIX: For selected symbol, use real bid for longs, ask for shorts.
+        // For other symbols use mid price.
+        // updateMarginPositionPrice receives a single price; the SL/TP checks inside
+        // will use this price. For accurate SL/TP we pass the appropriate price.
+        let priceForUpdate: number;
+        if (sym === symbolSelected) {
+          // Use mid for the general update (PnL calc), SL/TP checks inside store
+          // already compare against the price we pass. For longs, SL triggers when
+          // price drops (bid), for shorts SL triggers when price rises (ask).
+          // Using bid as the baseline is more conservative for both.
+          priceForUpdate = currentBid;
+        } else {
+          const midOther = livePricesRef.current?.[sym];
+          priceForUpdate = typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
+        }
 
-        const px = Number(basePx);
-        if (!Number.isFinite(px)) continue;
+        if (!Number.isFinite(priceForUpdate)) continue;
 
-        // ✅ FIX: store expects (symbol, price), not (id, price)
-        const hit = updateMarginPositionPrice(sym, px);
+        const hit = updateMarginPositionPrice(sym, priceForUpdate);
         if (Array.isArray(hit) && hit.length) triggersToHandle.push(...hit);
       }
 
       if (triggersToHandle.length) {
-        // fire & forget auto-close
         for (const tr of triggersToHandle) handleAutoClose(tr);
       }
     }, 850);
@@ -826,53 +777,8 @@ export default function FXTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // sessionId for history linking (best case: store returns positionId; fallback: infer)
-      const positionId =
-        (result as any)?.positionId ??
-        (result as any)?.id ??
-        findJustOpenedPositionId(selectedAsset.symbol, qty, entryPrice);
-
-      // ✅ FIX: saveTradeToHistory input shape (no amount/fee/tradeType/status/sessionId/symbol)
-      const userId = (user as any)?.id as string | undefined;
-      if (userId && positionId) {
-        try {
-          await saveTradeToHistory({
-            id: String(positionId), // ✅ use positionId as history id so close can use tradeId = positionId
-            userId,
-            accountId: (marginAccount as any)?.id ?? null,
-
-            marketType: 'fx',
-            assetType: 'forex',
-            pair: selectedAsset.symbol,
-            direction: tradeDirection,
-
-            quantity: qty,
-            lotSize: effLotSize,
-            leverage,
-
-            entryPrice,
-            stopLoss: stopLoss ?? null,
-            takeProfit: takeProfit ?? null,
-
-            openedAt: new Date().toISOString(),
-            isSimulated: true,
-
-            // stash extra values safely
-            notes: JSON.stringify({
-              positionId,
-              tradeType: 'margin',
-              notional,
-              fee,
-              tier: currentTier,
-              side: tradeDirection === 'buy' ? 'long' : 'short',
-            }),
-          });
-        } catch (e) {
-          dbg('history insert failed', e);
-        }
-      } else {
-        dbg('history insert skipped (missing userId or positionId)', { userId, positionId });
-      }
+      // ✅ DB save is now handled centrally inside openMarginPosition in the store
+      // No need to call saveTradeToHistory here
 
       setNotification({
         type: 'success',
@@ -901,12 +807,7 @@ export default function FXTradingPage() {
     stopLoss,
     takeProfit,
     refreshUser,
-    user,
     formatPrice,
-    findJustOpenedPositionId,
-    dbg,
-    marginAccount,
-    currentTier,
   ]);
 
   // ✅ Alias for button onClick
@@ -926,61 +827,7 @@ export default function FXTradingPage() {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        // ✅ FIX: closeTradeInHistory requires tradeId + no extra props
-        const userId = (user as any)?.id as string | undefined;
-        if (userId) {
-          const tradeId = String((position as any).id);
-          try {
-            await closeTradeInHistory({
-              tradeId,
-              userId,
-              exitPrice,
-              pnl,
-              status: 'closed',
-              closedAt: new Date().toISOString(),
-            });
-          } catch (e) {
-            // repair by creating then closing
-            try {
-              const sym = String((position as any).symbol);
-              const entry = Number((position as any).avgEntry ?? (position as any).entryPrice ?? 0);
-              const lev = Number((position as any).leverage ?? 0);
-              const openedAt = String((position as any).openedAt ?? (position as any).createdAt ?? new Date().toISOString());
-              const lots = qty ? qty / 100000 : null;
-
-              await saveTradeToHistory({
-                id: tradeId,
-                userId,
-                accountId: (marginAccount as any)?.id ?? null,
-                marketType: 'fx',
-                assetType: 'forex',
-                pair: sym,
-                direction: side === 'long' ? 'buy' : 'sell',
-                quantity: qty || null,
-                lotSize: typeof lots === 'number' && Number.isFinite(lots) ? lots : null,
-                leverage: Number.isFinite(lev) && lev > 0 ? lev : null,
-                entryPrice: Number.isFinite(entry) ? entry : exitPrice,
-                openedAt,
-                isSimulated: true,
-                notes: JSON.stringify({
-                  repaired: true,
-                  reason: 'manual-close',
-                }),
-              });
-
-              await closeTradeInHistory({
-                tradeId,
-                userId,
-                exitPrice,
-                pnl,
-                status: 'closed',
-                closedAt: new Date().toISOString(),
-              });
-            } catch (e2) {
-              dbg('history close failed', e2);
-            }
-          }
-        }
+        // ✅ DB close is now handled centrally inside closeMarginPosition in the store
 
         setNotification({
           type: 'success',
@@ -994,7 +841,7 @@ export default function FXTradingPage() {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, user, dbg, formatMoney, marginAccount]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, formatMoney]
   );
 
   const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;
@@ -1657,9 +1504,314 @@ export default function FXTradingPage() {
             </div>
           </div>
 
-          {/* Positions Panel + Modals + Toast */}
-          {/* (unchanged below) */}
+          {/* Positions Panel */}
+          <div className={`${mobileTab === 'positions' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}>
+            <div className="px-3 py-3 border-b border-white/10">
+              <h3 className="text-sm font-semibold text-cream">Open Positions ({forexPositions.length})</h3>
+            </div>
+
+            {forexPositions.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center p-6">
+                <div className="text-center">
+                  <Activity className="w-8 h-8 text-cream/20 mx-auto mb-2" />
+                  <p className="text-sm text-cream/40">No open FX positions</p>
+                  <p className="text-xs text-cream/30 mt-1">Open a trade to see it here</p>
+                </div>
+              </div>
+            ) : (
+              <div className="divide-y divide-white/5">
+                {forexPositions.map((pos: any) => {
+                  const side = String(pos.side ?? 'long');
+                  const isLong = side === 'long';
+                  const entry = Number(pos.avgEntry ?? pos.entryPrice ?? 0);
+                  const current = Number(pos.currentPrice ?? 0);
+                  const pnl = Number(pos.unrealizedPnL ?? 0);
+                  const pnlPct = Number(pos.unrealizedPnLPercent ?? 0);
+                  const lots = Number(pos.qty ?? 0) / 100000;
+                  const lev = Number(pos.leverage ?? 0);
+                  const openTime = pos.openedAt ? new Date(pos.openedAt) : null;
+
+                  return (
+                    <div key={pos.id} className="p-3 hover:bg-white/5 transition-colors">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
+                            {isLong ? 'BUY' : 'SELL'}
+                          </span>
+                          <span className="text-sm font-semibold text-cream">{pos.symbol}</span>
+                          {lev > 0 && <span className="text-[10px] text-electric">x{lev}</span>}
+                        </div>
+                        <button
+                          onClick={() => {
+                            setPositionToClose(pos);
+                            setShowCloseModal(true);
+                          }}
+                          className="text-xs px-2 py-1 bg-loss/20 text-loss rounded hover:bg-loss/30 transition-colors"
+                        >
+                          Close
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                        <div className="flex justify-between">
+                          <span className="text-cream/40">Entry</span>
+                          <span className="text-cream font-mono">{formatPrice(entry)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-cream/40">Current</span>
+                          <span className="text-cream font-mono">{formatPrice(current)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-cream/40">Lots</span>
+                          <span className="text-cream">{lots.toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-cream/40">P&L</span>
+                          <span className={`font-semibold ${pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pnl >= 0 ? '+' : ''}{formatMoney(pnl)}
+                          </span>
+                        </div>
+                        {pos.stopLoss != null && (
+                          <div className="flex justify-between">
+                            <span className="text-cream/40">SL</span>
+                            <span className="text-loss font-mono">{formatPrice(pos.stopLoss)}</span>
+                          </div>
+                        )}
+                        {pos.takeProfit != null && (
+                          <div className="flex justify-between">
+                            <span className="text-cream/40">TP</span>
+                            <span className="text-profit font-mono">{formatPrice(pos.takeProfit)}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {openTime && (
+                        <p className="text-[10px] text-cream/30 mt-1.5">
+                          Opened {openTime.toLocaleDateString()} {openTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Close Position Modal */}
+        <AnimatePresence>
+          {showCloseModal && positionToClose && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-void/80 backdrop-blur-sm p-4"
+              onClick={() => { setShowCloseModal(false); setPositionToClose(null); }}
+            >
+              <motion.div
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-obsidian border border-white/10 rounded-2xl p-6 max-w-sm w-full"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-cream">Close Position</h3>
+                  <button onClick={() => { setShowCloseModal(false); setPositionToClose(null); }} className="text-cream/40 hover:text-cream">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="space-y-3 mb-6">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Symbol</span>
+                    <span className="text-cream font-semibold">{(positionToClose as any).symbol}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Side</span>
+                    <span className={`font-semibold ${(positionToClose as any).side === 'long' ? 'text-profit' : 'text-loss'}`}>
+                      {(positionToClose as any).side === 'long' ? 'BUY' : 'SELL'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Entry Price</span>
+                    <span className="text-cream font-mono">{formatPrice(Number((positionToClose as any).avgEntry ?? 0))}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Close Price</span>
+                    <span className="text-cream font-mono">
+                      {formatPrice((positionToClose as any).side === 'long' ? bidPrice : askPrice)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-cream/50">Unrealized P&L</span>
+                    <span className={`font-semibold ${Number((positionToClose as any).unrealizedPnL ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {formatMoney(Number((positionToClose as any).unrealizedPnL ?? 0))}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => { setShowCloseModal(false); setPositionToClose(null); }}
+                    className="flex-1 py-2.5 bg-white/10 text-cream rounded-xl font-medium hover:bg-white/15 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleClosePosition(positionToClose)}
+                    className="flex-1 py-2.5 bg-loss text-white rounded-xl font-bold hover:brightness-110 transition-all"
+                  >
+                    Close Position
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Asset Selector Modal */}
+        <AnimatePresence>
+          {showAssetSelector && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-void/80 backdrop-blur-sm"
+              onClick={() => setShowAssetSelector(false)}
+            >
+              <motion.div
+                initial={{ y: 50, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 50, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-obsidian border border-white/10 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[70vh] overflow-hidden"
+              >
+                <div className="p-4 border-b border-white/10">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-lg font-semibold text-cream">Select Pair</h3>
+                    <button onClick={() => setShowAssetSelector(false)} className="text-cream/40 hover:text-cream">
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/40" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search pairs..."
+                      className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-cream text-sm focus:border-gold/50 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="overflow-y-auto max-h-[50vh] divide-y divide-white/5">
+                  {filteredFavorites.length > 0 && (
+                    <div className="p-2">
+                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">Favorites</p>
+                      {filteredFavorites.map((asset) => (
+                        <button
+                          key={asset.symbol}
+                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
+                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
+                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                            <div className="text-left">
+                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/40">{asset.name}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {filteredRare.length > 0 && (
+                    <div className="p-2">
+                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">Exotic Pairs</p>
+                      {filteredRare.map((asset) => (
+                        <button
+                          key={asset.symbol}
+                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
+                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
+                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                            <div className="text-left">
+                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/40">{asset.name}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {filteredAll.length > 0 && (
+                    <div className="p-2">
+                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">All Pairs</p>
+                      {filteredAll.map((asset) => (
+                        <button
+                          key={asset.symbol}
+                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
+                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
+                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
+                            <div className="text-left">
+                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/40">{asset.name}</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Notification Toast */}
+        <AnimatePresence>
+          {notification && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl shadow-lg border flex items-center gap-2 ${
+                notification.type === 'success'
+                  ? 'bg-profit/20 border-profit/30 text-profit'
+                  : 'bg-loss/20 border-loss/30 text-loss'
+              }`}
+            >
+              {notification.type === 'success' ? (
+                <CheckCircle className="w-4 h-4" />
+              ) : (
+                <AlertCircle className="w-4 h-4" />
+              )}
+              <span className="text-sm font-medium">{notification.message}</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </KYCGate>
   );
