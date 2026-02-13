@@ -19,8 +19,14 @@ const supabaseAdmin = createClient(
 // ============================================
 export async function GET(request: NextRequest) {
   try {
-    const userId = request.headers.get('x-user-id') || request.nextUrl.searchParams.get('userId');
+    // Try multiple ways to get userId
+    const userId = 
+      request.headers.get('x-user-id') || 
+      request.nextUrl.searchParams.get('userId') ||
+      request.nextUrl.searchParams.get('user_id');
+    
     if (!userId) {
+      console.error('[Deposits GET] No user ID provided');
       return NextResponse.json({ success: false, error: 'User ID required' }, { status: 401 });
     }
 
@@ -31,10 +37,14 @@ export async function GET(request: NextRequest) {
       .order('created_at', { ascending: false })
       .limit(100);
 
-    if (error) throw error;
+    if (error) {
+      console.error('[Deposits GET] DB error:', error);
+      throw error;
+    }
 
     return NextResponse.json({ success: true, deposits: data || [] });
   } catch (err: any) {
+    console.error('[Deposits GET] Error:', err);
     return NextResponse.json(
       { success: false, error: 'Could not load deposits. Please try again.' },
       { status: 500 }
@@ -70,7 +80,14 @@ export async function POST(request: NextRequest) {
       addressShown?: string;
     };
 
-    if (!userId || !amount || amount <= 0) {
+    if (!userId) {
+      return NextResponse.json(
+        { success: false, error: 'User ID is required.' },
+        { status: 400 }
+      );
+    }
+
+    if (!amount || amount <= 0) {
       return NextResponse.json(
         { success: false, error: 'Please enter a valid amount.' },
         { status: 400 }
@@ -93,35 +110,63 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data, error } = await supabaseAdmin
+    // Build insert object - only include fields that exist in the table
+    // Base fields that definitely exist
+    const insertData: Record<string, any> = {
+      user_id: userId,
+      amount: Number(amount),
+      currency: currency || 'USD',
+      method: method || 'crypto',
+      method_name: methodName || `Crypto Deposit (${network || 'default'})`,
+      network: network || null,
+      tx_hash: txHash || null,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+    };
+
+    // Try to insert with new columns first
+    let result = await supabaseAdmin
       .from('deposits')
       .insert({
-        user_id: userId,
-        amount: Number(amount),
-        currency: currency || 'USD',
-        method: method || 'crypto',
-        method_name: methodName || `Crypto Deposit (${network || 'default'})`,
-        network: network || null,
-        tx_hash: txHash || null,
+        ...insertData,
         payment_asset: paymentAsset || null,
         address_shown: addressShown || null,
-        status: 'pending',
-        created_at: new Date().toISOString(),
       })
       .select()
       .single();
 
-    if (error) throw error;
+    // If column error, try without the new columns
+    if (result.error && (
+      result.error.message?.includes('column') || 
+      result.error.code === '42703' ||
+      result.error.message?.includes('payment_asset') ||
+      result.error.message?.includes('address_shown')
+    )) {
+      console.log('[Deposits POST] Column missing, using basic insert');
+      result = await supabaseAdmin
+        .from('deposits')
+        .insert(insertData)
+        .select()
+        .single();
+    }
+
+    if (result.error) {
+      console.error('[Deposits POST] Insert error:', result.error);
+      return NextResponse.json(
+        { success: false, error: result.error.message || 'Database error' },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      deposit: data,
+      deposit: result.data,
       message: `Deposit of $${Number(amount).toFixed(2)} submitted! It will be reviewed within 1-24 hours.`,
     });
   } catch (err: any) {
-    console.error('[Deposits POST]', err);
+    console.error('[Deposits POST] Error:', err?.message || err);
     return NextResponse.json(
-      { success: false, error: 'Something went wrong submitting your deposit. Please try again.' },
+      { success: false, error: err?.message || 'Something went wrong submitting your deposit. Please try again.' },
       { status: 500 }
     );
   }

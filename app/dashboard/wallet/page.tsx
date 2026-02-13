@@ -220,7 +220,10 @@ function WalletContent() {
   };
 
   const handleSubmitDeposit = async () => {
-    if (!user) return;
+    if (!user?.id) {
+      console.error('No user ID available');
+      return;
+    }
 
     setIsSubmitting(true);
 
@@ -251,6 +254,7 @@ function WalletContent() {
     });
 
     // Submit via API route (service key, bypasses RLS)
+    let apiSuccess = false;
     try {
       const res = await fetch('/api/deposits', {
         method: 'POST',
@@ -270,12 +274,15 @@ function WalletContent() {
       const data = await res.json();
       if (!res.ok || !data.success) {
         console.error('Deposit API error:', data.error);
+      } else {
+        apiSuccess = true;
       }
-    } catch {
+    } catch (err) {
+      console.error('Deposit network error:', err);
       // Network error — local store has the fallback
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, apiSuccess ? 500 : 1500));
 
     setIsSubmitting(false);
     setDepositStep('submitted');
