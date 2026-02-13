@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { Suspense, useEffect, useRef, useState, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -33,7 +33,29 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Default export MUST wrap the component that calls useSearchParams() in Suspense
+ * to avoid Next build "missing-suspense-with-csr-bailout".
+ */
 export default function VerifyOTPPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-[60vh] flex items-center justify-center">
+          <div className="flex items-center gap-2 text-slate-400">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span>Loading…</span>
+          </div>
+        </div>
+      }
+    >
+      <VerifyOTPInner />
+    </Suspense>
+  );
+}
+
+function VerifyOTPInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -61,8 +83,8 @@ export default function VerifyOTPPage() {
     } catch {}
   }, [searchParams]);
 
- const { otpEmail, otpName, otpPassword, redirectUrl, clearOtp, signup } = useStore();
-
+  // ✅ use clearOtp instead of setOtpPassword(null)
+  const { otpEmail, otpName, otpPassword, redirectUrl, clearOtp, signup } = useStore();
   const { sendOTP, verifyOTP, sendWelcome } = useEmail();
 
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
@@ -260,7 +282,6 @@ export default function VerifyOTPPage() {
 
       pushLog('signup start', { email: otpEmail, firstName, lastName });
 
-      // ✅ FIX: DO NOT pass referral as 5th arg (store signup is 2-4 args)
       const signupResult = await withTimeout(
         signup(otpEmail, otpPassword, firstName, lastName),
         25000,
@@ -293,8 +314,8 @@ export default function VerifyOTPPage() {
         pushLog('sendWelcome failed (ignored)', e?.message || e);
       }
 
-     clearOtp();
-
+      // ✅ FIX: don't do setOtpPassword(null)
+      clearOtp();
 
       setTimeout(() => {
         const destination = redirectUrl || '/kyc';
