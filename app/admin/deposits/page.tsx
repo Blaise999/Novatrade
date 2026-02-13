@@ -2,7 +2,15 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Wallet, CheckCircle, Clock, DollarSign, Search, RefreshCw, Eye } from 'lucide-react';
+import {
+  Wallet,
+  CheckCircle,
+  Clock,
+  DollarSign,
+  Search,
+  RefreshCw,
+  Eye,
+} from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 
 interface Deposit {
@@ -43,15 +51,17 @@ const STATUS_STYLES: Record<string, string> = {
 
 type FilterStatus = 'all' | 'pending' | 'confirmed' | 'rejected';
 
-/** ✅ same token strategy as AdminUsers (sessionStorage first, migrate localStorage) */
 function getStorageToken(): string | null {
   if (typeof window === 'undefined') return null;
 
+  // prefer sessionStorage
   const ss =
     window.sessionStorage.getItem('novatrade_admin_token') ||
     window.sessionStorage.getItem('admin_token');
+
   if (ss) return ss;
 
+  // fallback to localStorage (migrate)
   const ls =
     window.localStorage.getItem('novatrade_admin_token') ||
     window.localStorage.getItem('admin_token');
@@ -69,7 +79,7 @@ function getStorageToken(): string | null {
 function getAdminToken(admin: any, sessionToken?: string | null): string | null {
   if (sessionToken) return sessionToken;
 
-  const fromAdmin =
+  const fromStore =
     admin?.sessionToken ||
     admin?.session_token ||
     admin?.token ||
@@ -77,15 +87,12 @@ function getAdminToken(admin: any, sessionToken?: string | null): string | null 
     admin?.accessToken ||
     null;
 
-  if (fromAdmin) return fromAdmin;
-
-  return getStorageToken();
+  return fromStore || getStorageToken();
 }
 
 export default function AdminDepositsPage() {
   const store: any = useAdminAuthStore();
-  const admin = store?.admin;
-  const isAuthenticated = store?.isAuthenticated;
+  const { admin, isAuthenticated } = store;
   const sessionToken: string | null = store?.sessionToken ?? store?.token ?? null;
 
   const token = useMemo(() => getAdminToken(admin, sessionToken), [admin, sessionToken]);
@@ -100,7 +107,7 @@ export default function AdminDepositsPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [showDetailModal, setShowDetailModal] = useState<Deposit | null>(null);
 
-  // ✅ keep token in sessionStorage so refresh/navigation doesn't break admin calls
+  // keep token in sessionStorage for refresh/navigation
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!token) return;
@@ -118,29 +125,32 @@ export default function AdminDepositsPage() {
         ...(init?.headers as any),
       };
 
-      if (init?.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      if (init?.body && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
 
-      const res = await fetch(path, {
-        ...init,
-        headers,
-        cache: 'no-store',
-      });
-
+      const res = await fetch(path, { ...init, headers, cache: 'no-store' });
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || json?.message || `Request failed (${res.status})`);
+
+      if (!res.ok) {
+        throw new Error(json?.error || `Request failed (${res.status})`);
+      }
+
       return json;
     },
     [token]
   );
 
   const loadDeposits = useCallback(async () => {
-    if (!token) return; // ✅ don’t fire request until token is ready
+    if (!token) return; // wait for token to hydrate
     setLoading(true);
     setMessage('');
 
     try {
       const url =
-        filter === 'all' ? '/api/admin/deposits' : `/api/admin/deposits?status=${filter}`;
+        filter === 'all'
+          ? '/api/admin/deposits'
+          : `/api/admin/deposits?status=${filter}`;
 
       const data = await apiFetch(url);
 
@@ -153,12 +163,11 @@ export default function AdminDepositsPage() {
     } finally {
       setLoading(false);
     }
-  }, [filter, apiFetch, token]);
+  }, [apiFetch, filter, token]);
 
   useEffect(() => {
-    if (!token) return;
     void loadDeposits();
-  }, [token, loadDeposits]);
+  }, [loadDeposits]);
 
   async function handleApprove(depositId: string) {
     setActionLoading(true);
@@ -168,8 +177,8 @@ export default function AdminDepositsPage() {
         method: 'PATCH',
         body: JSON.stringify({ depositId, action: 'approve' }),
       });
-      setMessage(data?.message || (data?.success ? 'Approved!' : data?.error || 'Approve failed'));
-      if (data?.success) await loadDeposits();
+      setMessage(data.message || 'Approved!');
+      await loadDeposits();
     } catch (e: any) {
       setMessage(e?.message || 'Failed to approve');
     } finally {
@@ -181,26 +190,18 @@ export default function AdminDepositsPage() {
     setActionLoading(true);
     setMessage('');
     try {
-      // ✅ send multiple keys so it matches whatever your API expects
-      const reason = rejectReason || 'Rejected by admin';
-
       const data = await apiFetch('/api/admin/deposits', {
         method: 'PATCH',
         body: JSON.stringify({
           depositId,
           action: 'reject',
-          rejectedReason: reason,
-          rejection_reason: reason,
-          reason,
+          rejectedReason: rejectReason || 'Rejected by admin',
         }),
       });
-
-      setMessage(data?.message || (data?.success ? 'Rejected' : data?.error || 'Reject failed'));
-      if (data?.success) {
-        setShowRejectModal(null);
-        setRejectReason('');
-        await loadDeposits();
-      }
+      setMessage(data.message || 'Rejected');
+      setShowRejectModal(null);
+      setRejectReason('');
+      await loadDeposits();
     } catch (e: any) {
       setMessage(e?.message || 'Failed to reject');
     } finally {
@@ -230,7 +231,7 @@ export default function AdminDepositsPage() {
     return { name, email: u.email };
   }
 
-  if (isAuthenticated === false || admin === null) {
+  if (!isAuthenticated || !admin) {
     return (
       <div className="flex items-center justify-center h-full">
         <p className="text-slate-400">Please log in to access this page.</p>
@@ -251,10 +252,10 @@ export default function AdminDepositsPage() {
             Review and process user deposit requests. Approved deposits credit user balances.
           </p>
         </div>
+
         <button
           onClick={loadDeposits}
           className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 transition-colors"
-          title="Refresh"
         >
           <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
         </button>
@@ -321,7 +322,9 @@ export default function AdminDepositsPage() {
               key={f}
               onClick={() => setFilter(f)}
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                filter === f ? 'bg-gold/20 text-gold' : 'bg-white/5 text-slate-400 hover:bg-white/10'
+                filter === f
+                  ? 'bg-gold/20 text-gold'
+                  : 'bg-white/5 text-slate-400 hover:bg-white/10'
               }`}
             >
               {f.charAt(0).toUpperCase() + f.slice(1)}
@@ -363,27 +366,13 @@ export default function AdminDepositsPage() {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-white/5">
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    User
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    Amount
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    Method
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    TX Ref
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    Status
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    Date
-                  </th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">
-                    Actions
-                  </th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">User</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">Amount</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">Method</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">TX Ref</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">Status</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">Date</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase">Actions</th>
                 </tr>
               </thead>
 
@@ -391,6 +380,7 @@ export default function AdminDepositsPage() {
                 {filtered.map((d) => {
                   const u = getUserDisplay(d);
                   const txRef = d.transaction_ref || d.tx_hash || '';
+
                   return (
                     <tr key={d.id} className="border-b border-white/5 hover:bg-white/[0.02]">
                       <td className="px-4 py-3">
@@ -432,9 +422,7 @@ export default function AdminDepositsPage() {
                       <td className="px-4 py-3 text-xs text-slate-500">
                         {new Date(d.created_at).toLocaleDateString()}
                         <br />
-                        <span className="text-[10px]">
-                          {new Date(d.created_at).toLocaleTimeString()}
-                        </span>
+                        <span className="text-[10px]">{new Date(d.created_at).toLocaleTimeString()}</span>
                       </td>
 
                       <td className="px-4 py-3">
@@ -447,7 +435,6 @@ export default function AdminDepositsPage() {
                             >
                               Approve
                             </button>
-
                             <button
                               onClick={() => setShowRejectModal(d.id)}
                               disabled={actionLoading}
@@ -455,25 +442,20 @@ export default function AdminDepositsPage() {
                             >
                               Reject
                             </button>
-
                             <button
                               onClick={() => setShowDetailModal(d)}
                               className="px-2 py-1.5 bg-white/5 text-slate-400 text-xs rounded-lg hover:bg-white/10"
-                              title="View"
                             >
                               <Eye className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         ) : (
-                          <div className="flex gap-2 items-center">
-                            <button
-                              onClick={() => setShowDetailModal(d)}
-                              className="px-2 py-1.5 bg-white/5 text-slate-400 text-xs rounded-lg hover:bg-white/10"
-                              title="View"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                          <button
+                            onClick={() => setShowDetailModal(d)}
+                            className="px-2 py-1.5 bg-white/5 text-slate-400 text-xs rounded-lg hover:bg-white/10"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
                         )}
                       </td>
                     </tr>
@@ -499,11 +481,10 @@ export default function AdminDepositsPage() {
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              onClick={(e: React.MouseEvent) => e.stopPropagation()}
+              onClick={(e: any) => e.stopPropagation()}
               className="bg-charcoal border border-white/10 rounded-2xl p-6 max-w-md w-full mx-4"
             >
               <h3 className="text-lg font-bold text-cream mb-4">Reject Deposit</h3>
-
               <textarea
                 value={rejectReason}
                 onChange={(e) => setRejectReason(e.target.value)}
@@ -511,7 +492,6 @@ export default function AdminDepositsPage() {
                 rows={3}
                 className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:border-loss/40 focus:outline-none text-sm"
               />
-
               <div className="flex gap-3 mt-4">
                 <button
                   onClick={() => setShowRejectModal(null)}
@@ -519,7 +499,6 @@ export default function AdminDepositsPage() {
                 >
                   Cancel
                 </button>
-
                 <button
                   onClick={() => handleReject(showRejectModal)}
                   disabled={actionLoading}
@@ -547,27 +526,15 @@ export default function AdminDepositsPage() {
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              onClick={(e: React.MouseEvent) => e.stopPropagation()}
+              onClick={(e: any) => e.stopPropagation()}
               className="bg-charcoal border border-white/10 rounded-2xl p-6 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto"
             >
               <h3 className="text-lg font-bold text-cream mb-4">Deposit Details</h3>
 
               <div className="space-y-3 text-sm">
-                <Row
-                  label="User"
-                  value={`${getUserDisplay(showDetailModal).name} (${getUserDisplay(showDetailModal).email})`}
-                />
-                <Row
-                  label="Amount"
-                  value={`$${Number(showDetailModal.amount).toLocaleString()} ${
-                    showDetailModal.currency || 'USD'
-                  }`}
-                  bold
-                />
-                <Row
-                  label="Method"
-                  value={showDetailModal.method_name || showDetailModal.method || 'Crypto'}
-                />
+                <Row label="User" value={`${getUserDisplay(showDetailModal).name} (${getUserDisplay(showDetailModal).email})`} />
+                <Row label="Amount" value={`$${Number(showDetailModal.amount).toLocaleString()} ${showDetailModal.currency || 'USD'}`} bold />
+                <Row label="Method" value={showDetailModal.method_name || showDetailModal.method || 'Crypto'} />
                 {showDetailModal.network && <Row label="Network" value={showDetailModal.network} />}
 
                 {(showDetailModal.transaction_ref || showDetailModal.tx_hash) && (
@@ -581,68 +548,37 @@ export default function AdminDepositsPage() {
 
                 <div className="flex justify-between">
                   <span className="text-slate-400">Status</span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-xs font-medium ${
-                      STATUS_STYLES[showDetailModal.status] || ''
-                    }`}
-                  >
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[showDetailModal.status] || ''}`}>
                     {showDetailModal.status}
                   </span>
                 </div>
 
                 <Row label="Submitted" value={new Date(showDetailModal.created_at).toLocaleString()} />
-
-                {showDetailModal.processed_at && (
-                  <Row label="Processed" value={new Date(showDetailModal.processed_at).toLocaleString()} />
-                )}
+                {showDetailModal.processed_at && <Row label="Processed" value={new Date(showDetailModal.processed_at).toLocaleString()} />}
 
                 {showDetailModal.proof_url && (
                   <div>
                     <span className="text-slate-400 block mb-2">Payment Proof</span>
-                    <img
-                      src={showDetailModal.proof_url}
-                      alt="Proof"
-                      className="max-w-full rounded-xl border border-white/10"
-                    />
+                    <img src={showDetailModal.proof_url} alt="Proof" className="max-w-full rounded-xl border border-white/10" />
                   </div>
                 )}
 
                 {(showDetailModal.rejection_reason || showDetailModal.note) && (
-                  <Row
-                    label="Reason"
-                    value={showDetailModal.rejection_reason || showDetailModal.note || ''}
-                    loss
-                  />
-                )}
-
-                {showDetailModal.admin_note && <Row label="Admin Note" value={showDetailModal.admin_note} />}
-
-                {showDetailModal.users?.balance_available != null && (
-                  <Row
-                    label="User Balance"
-                    value={`$${Number(showDetailModal.users.balance_available).toLocaleString()}`}
-                  />
+                  <Row label="Reason" value={showDetailModal.rejection_reason || showDetailModal.note || ''} loss />
                 )}
               </div>
 
               {(showDetailModal.status === 'pending' || showDetailModal.status === 'processing') && (
                 <div className="flex gap-3 mt-5">
                   <button
-                    onClick={() => {
-                      void handleApprove(showDetailModal.id);
-                      setShowDetailModal(null);
-                    }}
+                    onClick={() => { void handleApprove(showDetailModal.id); setShowDetailModal(null); }}
                     disabled={actionLoading}
                     className="flex-1 py-2 bg-profit/20 text-profit font-semibold rounded-xl hover:bg-profit/30 disabled:opacity-50"
                   >
                     Approve
                   </button>
-
                   <button
-                    onClick={() => {
-                      setShowRejectModal(showDetailModal.id);
-                      setShowDetailModal(null);
-                    }}
+                    onClick={() => { setShowRejectModal(showDetailModal.id); setShowDetailModal(null); }}
                     className="flex-1 py-2 bg-loss/20 text-loss font-semibold rounded-xl hover:bg-loss/30"
                   >
                     Reject
@@ -664,17 +600,7 @@ export default function AdminDepositsPage() {
   );
 }
 
-function Row({
-  label,
-  value,
-  bold,
-  loss,
-}: {
-  label: string;
-  value: string;
-  bold?: boolean;
-  loss?: boolean;
-}) {
+function Row({ label, value, bold, loss }: { label: string; value: string; bold?: boolean; loss?: boolean }) {
   return (
     <div className="flex justify-between">
       <span className="text-slate-400">{label}</span>
