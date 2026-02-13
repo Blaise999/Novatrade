@@ -1,16 +1,10 @@
 'use client';
 
 /**
- * ✅ NOVATRADE SINGLE STORE ENTRYPOINT (FULL BACK-COMPAT)
+ * AUTH + ADMIN STORE (single source of truth)
  *
- * This file MUST be at: /lib/store.ts
- * Your imports:
- *   import { useAuthStore, useUIStore, useWalletStore, useKYCStore, useNotificationStore } from "@/lib/store";
- *
- * This provides:
- * - useAuthStore (alias of useStore)
- * - useUIStore, useNotificationStore, useWalletStore, useKYCStore, useTradingStore, useAdminStore
- * - legacy fields: otpEmail/otpName/otpPassword/redirectUrl, unreadCount, mobileMenuOpen, isConnected, etc.
+ * - useStore(): user auth + user actions
+ * - useAdminStore(): admin actions
  */
 
 import { create } from 'zustand';
@@ -27,7 +21,7 @@ async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
 }
 
 // ============================================
-// TYPES (WIDENED FOR BACK-COMPAT)
+// TYPES
 // ============================================
 export type RegistrationStatus =
   | 'pending_verification'
@@ -46,61 +40,26 @@ export type KycStatus =
   | 'declined'
   | string;
 
-export type Balance = {
-  available?: number;
-  bonus?: number;
-  total?: number;
-  currency?: string;
-  [key: string]: any;
-};
 
 export interface User {
   id: string;
   email: string;
-
-  // legacy variants
-  firstName?: string;
-  lastName?: string;
-  name?: string;
-
-  emailVerified?: boolean;
-  phoneVerified?: boolean;
-
-  kycStatus?: KycStatus;
-  kycLevel?: number;
-
-  walletConnected?: boolean;
-  walletAddress?: string;
-
-  twoFactorEnabled?: boolean;
-  currency?: string;
-
-  role?: 'user' | 'admin' | string;
-  tier?: 'basic' | 'starter' | 'pro' | 'elite' | 'vip' | string;
-
-  // common profile fields some pages use
+  firstName: string;
+  lastName: string;
   phone?: string;
   avatarUrl?: string;
-
-  /**
-   * Some pages expect numeric user.balance,
-   * others used an object. We store:
-   * - user.balance as number (available)
-   * - user.balanceDetails as object
-   */
-  balance?: any; // number or object accepted
-  balanceDetails?: Balance;
-
-  bonusBalance?: number;
-  totalDeposited?: number;
-
-  registrationStatus?: RegistrationStatus | string;
-  isActive?: boolean;
-
-  createdAt?: string | Date;
-
-  // allow unknown props (prevents TS2353 in UI)
-  [key: string]: any;
+  role: 'user' | 'admin';
+  tier: 'basic' | 'starter' | 'trader' | 'professional' | 'elite' | 'pro' | 'vip';
+  tierLevel: number;
+  tierActive: boolean;
+  balance: number;
+  bonusBalance: number;
+  totalDeposited: number;
+  kycStatus: KycStatus;
+  registrationStatus: RegistrationStatus;
+  walletAddress?: string;
+  isActive: boolean;
+  createdAt: string;
 }
 
 export interface Deposit {
@@ -151,6 +110,29 @@ export interface PaymentMethod {
 // ============================================
 // HELPERS
 // ============================================
+function dbRowToUser(row: any): User {
+  return {
+    id: row.id,
+    email: row.email || '',
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    phone: row.phone || undefined,
+    avatarUrl: row.avatar_url || undefined,
+    role: row.role || 'user',
+    tier: row.tier_code || row.tier || 'basic',
+    tierLevel: Number(row.tier_level ?? 0),
+    tierActive: Boolean(row.tier_active),
+    balance: Number(row.balance_available ?? 0) || 0,
+    bonusBalance: Number(row.balance_bonus ?? 0) || 0,
+    totalDeposited: Number(row.total_deposited ?? 0) || 0,
+    kycStatus: row.kyc_status || 'none',
+    registrationStatus: row.registration_status || 'complete',
+    walletAddress: row.wallet_address || undefined,
+    isActive: row.is_active !== false,
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
 export function getRegistrationRedirect(status: RegistrationStatus): string {
   switch (status) {
     case 'pending_verification':
@@ -177,109 +159,6 @@ export function getRegistrationMessage(status: RegistrationStatus): string {
   }
 }
 
-function normalizeBalance(input: any): Balance {
-  if (typeof input === 'number') return { available: input, bonus: 0 };
-
-  if (input && typeof input === 'object') {
-    return {
-      available: Number(input.available ?? input.balance_available ?? 0) || 0,
-      bonus: Number(input.bonus ?? input.bonusBalance ?? input.balance_bonus ?? 0) || 0,
-      total: input.total != null ? Number(input.total) : undefined,
-      currency: input.currency ?? undefined,
-      ...input,
-    };
-  }
-
-  return { available: 0, bonus: 0 };
-}
-
-function normalizeUser(input: any): User {
-  const u = (input ?? {}) as any;
-
-  const email = String(u.email ?? '').toLowerCase();
-  const firstName = u.firstName ?? u.first_name ?? undefined;
-  const lastName = u.lastName ?? u.last_name ?? undefined;
-
-  const name =
-    u.name ??
-    (firstName || lastName ? `${firstName ?? ''} ${lastName ?? ''}`.trim() : undefined);
-
-  const details = normalizeBalance(u.balanceDetails ?? u.balance ?? u.balance_available ?? 0);
-  const availableNum = Number(details.available ?? 0) || 0;
-
-  const bonusBalance =
-    u.bonusBalance != null
-      ? Number(u.bonusBalance) || 0
-      : Number(details.bonus ?? u.balance_bonus ?? 0) || 0;
-
-  return {
-    // keep any unknown props first (legacy)
-    ...u,
-
-    id: String(u.id ?? ''),
-    email,
-
-    firstName,
-    lastName,
-    name,
-
-    emailVerified: u.emailVerified ?? u.email_verified ?? false,
-    phoneVerified: u.phoneVerified ?? u.phone_verified ?? false,
-
-    kycStatus: u.kycStatus ?? u.kyc_status ?? 'not_started',
-    kycLevel: u.kycLevel ?? u.kyc_level ?? 0,
-
-    walletConnected:
-      u.walletConnected ??
-      u.wallet_connected ??
-      Boolean(u.walletAddress ?? u.wallet_address),
-
-    walletAddress: u.walletAddress ?? u.wallet_address ?? undefined,
-
-    twoFactorEnabled: u.twoFactorEnabled ?? u.two_factor_enabled ?? false,
-    currency: u.currency ?? details.currency ?? 'USD',
-
-    role: u.role ?? 'user',
-    tier: u.tier ?? 'basic',
-
-    // ✅ stable numeric balance for app
-    balance: availableNum,
-    // ✅ keep object too
-    balanceDetails: details,
-
-    bonusBalance,
-    totalDeposited: Number(u.totalDeposited ?? u.total_deposited ?? 0) || 0,
-
-    registrationStatus: u.registrationStatus ?? u.registration_status ?? 'complete',
-    isActive: u.isActive ?? u.is_active ?? true,
-
-    createdAt: u.createdAt ?? u.created_at ?? new Date().toISOString(),
-  };
-}
-
-function dbRowToUser(row: any): User {
-  return normalizeUser({
-    ...row,
-    id: row.id,
-    email: row.email,
-    first_name: row.first_name,
-    last_name: row.last_name,
-    role: row.role,
-    tier: row.tier,
-    balanceDetails: {
-      available: Number(row.balance_available ?? 0) || 0,
-      bonus: Number(row.balance_bonus ?? 0) || 0,
-    },
-    bonusBalance: Number(row.balance_bonus ?? 0) || 0,
-    totalDeposited: Number(row.total_deposited ?? 0) || 0,
-    kycStatus: row.kyc_status,
-    registrationStatus: row.registration_status,
-    walletAddress: row.wallet_address,
-    isActive: row.is_active !== false,
-    createdAt: row.created_at,
-  });
-}
-
 // ============================================
 // AUTH STORE INTERFACE
 // ============================================
@@ -289,19 +168,6 @@ interface AuthStore {
   isLoading: boolean;
   error: string | null;
 
-  // legacy OTP temp fields
-  otpEmail: string;
-  otpName: string;
-  otpPassword: string;
-  redirectUrl: string;
-
-  setOtpEmail: (email: string | null) => void;
-  setOtpName: (name: string | null) => void;
-  setOtpPassword: (password: string | null) => void;
-  setRedirectUrl: (url: string | null) => void;
-
-  setUser: (user: any) => void;
-
   deposits: Deposit[];
   trades: Trade[];
   paymentMethods: PaymentMethod[];
@@ -310,14 +176,12 @@ interface AuthStore {
     email: string,
     password: string
   ) => Promise<{ success: boolean; redirect?: string; error?: string }>;
-
   signup: (
     email: string,
     password: string,
     firstName?: string,
     lastName?: string
   ) => Promise<{ success: boolean; error?: string }>;
-
   logout: () => Promise<void>;
   checkSession: () => Promise<void>;
 
@@ -330,7 +194,6 @@ interface AuthStore {
   loadDeposits: () => Promise<void>;
   loadTrades: () => Promise<void>;
   loadPaymentMethods: () => Promise<void>;
-
   submitDeposit: (deposit: {
     amount: number;
     method: string;
@@ -349,24 +212,8 @@ interface AuthStore {
 export const useStore = create<AuthStore>((set, get) => ({
   user: null,
   isAuthenticated: false,
-  isLoading: false,
+  isLoading: true,  // ✅ Start true — prevents redirect before checkSession runs
   error: null,
-
-  otpEmail: '',
-  otpName: '',
-  otpPassword: '',
-  redirectUrl: '',
-
-  setOtpEmail: (email) => set({ otpEmail: email ?? '' }),
-  setOtpName: (name) => set({ otpName: name ?? '' }),
-  setOtpPassword: (password) => set({ otpPassword: password ?? '' }),
-  setRedirectUrl: (url) => set({ redirectUrl: url ?? '' }),
-
-  setUser: (user) =>
-    set({
-      user: user ? normalizeUser(user) : null,
-      isAuthenticated: !!user,
-    }),
 
   deposits: [],
   trades: [],
@@ -386,8 +233,11 @@ export const useStore = create<AuthStore>((set, get) => ({
         const { password: _pw, ...userWithoutPw } = found;
         localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
-        set({ user: normalizeUser(userWithoutPw), isAuthenticated: true });
-        return { success: true, redirect: '/dashboard' };
+        set({ user: userWithoutPw, isAuthenticated: true });
+        
+        // ✅ Respect registration status for proper redirect
+        const status = (userWithoutPw.registrationStatus as RegistrationStatus) || 'complete';
+        return { success: true, redirect: getRegistrationRedirect(status) };
       }
 
       const authRes = await withTimeout(
@@ -436,7 +286,9 @@ export const useStore = create<AuthStore>((set, get) => ({
               first_name: authData.user.user_metadata?.first_name || '',
               last_name: authData.user.user_metadata?.last_name || '',
               role: 'user',
-              tier: 'basic',
+              tier_code: 'basic',
+              tier_level: 0,
+              tier_active: false,
               balance_available: 0,
               balance_bonus: 0,
               total_deposited: 0,
@@ -469,9 +321,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       const user = dbRowToUser(profile);
       set({ user, isAuthenticated: true });
-
-      const status = (user.registrationStatus as RegistrationStatus) || 'complete';
-      return { success: true, redirect: getRegistrationRedirect(status) };
+      return { success: true, redirect: getRegistrationRedirect(user.registrationStatus) };
     } catch (err: any) {
       const msg = err?.message || 'Login failed. Please try again.';
       set({ error: msg });
@@ -492,21 +342,23 @@ export const useStore = create<AuthStore>((set, get) => ({
           return { success: false, error: 'Email already registered' };
         }
 
-        const newUser = normalizeUser({
+        const newUser: User = {
           id: `demo_${Date.now()}`,
           email: email.toLowerCase(),
           firstName: firstName || '',
           lastName: lastName || '',
           role: 'user',
           tier: 'basic',
+          tierLevel: 0,
+          tierActive: false,
           balance: 0,
           bonusBalance: 0,
           totalDeposited: 0,
           kycStatus: 'none',
-          registrationStatus: 'complete',
+          registrationStatus: 'pending_kyc',
           isActive: true,
           createdAt: new Date().toISOString(),
-        });
+        };
 
         users.push({ ...newUser, password });
         localStorage.setItem('novatrade_users', JSON.stringify(users));
@@ -573,10 +425,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         trades: [],
         paymentMethods: [],
         error: null,
-        otpEmail: '',
-        otpName: '',
-        otpPassword: '',
-        redirectUrl: '',
       });
     }
   },
@@ -587,7 +435,7 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const session = sessionStorage.getItem('novatrade_session');
-        if (session) set({ user: normalizeUser(JSON.parse(session)), isAuthenticated: true });
+        if (session) set({ user: JSON.parse(session), isAuthenticated: true });
         else set({ user: null, isAuthenticated: false });
         return;
       }
@@ -628,9 +476,18 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const updated = normalizeUser({ ...user, ...updates });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
-        set({ user: updated });
+        const updatedUser = { ...user, ...updates };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        // ✅ Also update the users array so changes survive re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+          const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
+          if (idx >= 0) {
+            users[idx] = { ...users[idx], ...updates };
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
+          }
+        } catch {}
+        set({ user: updatedUser });
         return true;
       }
 
@@ -647,16 +504,12 @@ export const useStore = create<AuthStore>((set, get) => ({
       );
 
       const error = (res as any).error;
-      const data = (res as any).data;
-
       if (error) {
         set({ error: error.message || 'Failed to update profile' });
         return false;
       }
 
-      if (data) set({ user: dbRowToUser(data) });
-      else set({ user: normalizeUser({ ...user, ...updates }) });
-
+      set({ user: { ...user, ...updates } });
       return true;
     } catch {
       return false;
@@ -669,9 +522,18 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       if (!isSupabaseConfigured()) {
-        const updated = normalizeUser({ ...user, registrationStatus: status });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
-        set({ user: updated });
+        const updatedUser = { ...user, registrationStatus: status };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        // ✅ Also update the users array so status survives re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
+          const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
+          if (idx >= 0) {
+            users[idx] = { ...users[idx], registrationStatus: status };
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
+          }
+        } catch {}
+        set({ user: updatedUser });
         return true;
       }
 
@@ -694,8 +556,7 @@ export const useStore = create<AuthStore>((set, get) => ({
       }
 
       if (data) set({ user: dbRowToUser(data) });
-      else set({ user: normalizeUser({ ...user, registrationStatus: status }) });
-
+      else set({ user: { ...user, registrationStatus: status } });
       return true;
     } catch (e: any) {
       set({ error: e?.message || 'Failed to update registration status' });
@@ -703,25 +564,27 @@ export const useStore = create<AuthStore>((set, get) => ({
     }
   },
 
+  // ✅ THIS IS THE ONE YOUR SCREENSHOT IS COMPLAINING ABOUT
   updateKycStatus: async (status) => {
     const { user } = get();
     if (!user) return false;
 
     try {
-      const currentReg = (user.registrationStatus as RegistrationStatus) || 'complete';
-      const nextRegistrationStatus: RegistrationStatus =
-        (status === 'verified' || status === 'approved') && currentReg === 'pending_kyc'
-          ? 'pending_wallet'
-          : currentReg;
+    const isPassed = status === 'verified' || status === 'approved';
+
+const nextRegistrationStatus: RegistrationStatus =
+  isPassed && user.registrationStatus === 'pending_kyc'
+    ? 'pending_wallet'
+    : user.registrationStatus;
 
       if (!isSupabaseConfigured()) {
-        const updated = normalizeUser({
+        const updatedUser: User = {
           ...user,
           kycStatus: status,
           registrationStatus: nextRegistrationStatus,
-        });
-        localStorage.setItem('novatrade_session', JSON.stringify(updated));
-        set({ user: updated });
+        };
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        set({ user: updatedUser });
         return true;
       }
 
@@ -748,15 +611,7 @@ export const useStore = create<AuthStore>((set, get) => ({
       }
 
       if (data) set({ user: dbRowToUser(data) });
-      else {
-        set({
-          user: normalizeUser({
-            ...user,
-            kycStatus: status,
-            registrationStatus: nextRegistrationStatus,
-          }),
-        });
-      }
+      else set({ user: { ...user, kycStatus: status, registrationStatus: nextRegistrationStatus } });
 
       return true;
     } catch (e: any) {
@@ -843,14 +698,7 @@ export const useStore = create<AuthStore>((set, get) => ({
         createdAt: t.created_at,
         closedAt: t.closed_at || undefined,
       }));
-
       set({ trades });
-
-      // keep trading legacy arrays in sync
-      useTradingStore.setState({
-        tradeHistory: trades,
-        activeTrades: trades.filter((x) => x.status === 'open'),
-      });
     }
   },
 
@@ -913,12 +761,8 @@ export const useStore = create<AuthStore>((set, get) => ({
   },
 
   getBalance: () => {
-    const user = get().user;
-    const details = normalizeBalance(user?.balanceDetails ?? user?.balance);
-    return {
-      available: Number(details.available ?? user?.balance ?? 0) || 0,
-      bonus: Number(details.bonus ?? user?.bonusBalance ?? 0) || 0,
-    };
+    const { user } = get();
+    return { available: user?.balance || 0, bonus: user?.bonusBalance || 0 };
   },
 
   clearError: () => set({ error: null }),
@@ -1097,331 +941,6 @@ export const useAdminStore = create<AdminStore>((set, get) => ({
 }));
 
 // ============================================
-// UI STORE
-// ============================================
-type ThemeMode = 'light' | 'dark' | 'system';
-
-interface UIStore {
-  sidebarOpen: boolean;
-
-  mobileMenuOpen: boolean; // legacy
-  toggleMobileMenu: () => void;
-
-  mobileNavOpen: boolean;
-  toggleMobileNav: () => void;
-
-  theme: ThemeMode;
-  setTheme: (theme: ThemeMode) => void;
-
-  setSidebarOpen: (open: boolean) => void;
-  toggleSidebar: () => void;
-
-  setMobileMenuOpen: (open: boolean) => void;
-  setMobileNavOpen: (open: boolean) => void;
-}
-
-export const useUIStore = create<UIStore>((set, get) => ({
-  sidebarOpen: true,
-
-  mobileMenuOpen: false,
-  mobileNavOpen: false,
-
-  toggleMobileMenu: () => {
-    const next = !get().mobileMenuOpen;
-    set({ mobileMenuOpen: next, mobileNavOpen: next });
-  },
-
-  toggleMobileNav: () => {
-    const next = !get().mobileNavOpen;
-    set({ mobileNavOpen: next, mobileMenuOpen: next });
-  },
-
-  theme: 'system',
-  setTheme: (theme) => set({ theme }),
-
-  setSidebarOpen: (open) => set({ sidebarOpen: open }),
-  toggleSidebar: () => set({ sidebarOpen: !get().sidebarOpen }),
-
-  setMobileMenuOpen: (open) => set({ mobileMenuOpen: open, mobileNavOpen: open }),
-  setMobileNavOpen: (open) => set({ mobileNavOpen: open, mobileMenuOpen: open }),
-}));
-
-// ============================================
-// NOTIFICATION STORE
-// ============================================
-export type AppNotificationType = 'info' | 'success' | 'warning' | 'error';
-
-export interface AppNotification {
-  id: string;
-  type: AppNotificationType;
-  title?: string;
-  message: string;
-  createdAt: string;
-  read: boolean;
-}
-
-interface NotificationStore {
-  notifications: AppNotification[];
-  unreadCount: number;
-
-  addNotification: (
-    n: Omit<AppNotification, 'id' | 'createdAt' | 'read'> & Partial<Pick<AppNotification, 'read'>>
-  ) => string;
-
-  markRead: (id: string) => void;
-  removeNotification: (id: string) => void;
-  clearAll: () => void;
-}
-
-function calcUnread(list: AppNotification[]) {
-  return list.reduce((acc, n) => acc + (n.read ? 0 : 1), 0);
-}
-
-export const useNotificationStore = create<NotificationStore>((set, get) => ({
-  notifications: [],
-  unreadCount: 0,
-
-  addNotification: (n) => {
-    const id = `ntf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const next: AppNotification = {
-      id,
-      type: n.type,
-      title: n.title,
-      message: n.message,
-      createdAt: new Date().toISOString(),
-      read: n.read ?? false,
-    };
-    const list = [next, ...get().notifications];
-    set({ notifications: list, unreadCount: calcUnread(list) });
-    return id;
-  },
-
-  markRead: (id) => {
-    const list = get().notifications.map((x) => (x.id === id ? { ...x, read: true } : x));
-    set({ notifications: list, unreadCount: calcUnread(list) });
-  },
-
-  removeNotification: (id) => {
-    const list = get().notifications.filter((x) => x.id !== id);
-    set({ notifications: list, unreadCount: calcUnread(list) });
-  },
-
-  clearAll: () => set({ notifications: [], unreadCount: 0 }),
-}));
-
-// ============================================
-// WALLET STORE
-// ============================================
-interface WalletStore {
-  connected: boolean;
-  isConnected: boolean; // legacy
-  address: string | null;
-  chainId: number | null;
-
-  setWallet: (payload: {
-    connected?: boolean;
-    isConnected?: boolean;
-    address?: string | null;
-    chainId?: number | null;
-  }) => void;
-
-  disconnect: () => void;
-}
-
-export const useWalletStore = create<WalletStore>((set, get) => ({
-  connected: false,
-  isConnected: false,
-  address: null,
-  chainId: null,
-
-  setWallet: (payload) => {
-    const nextConnected = payload.connected ?? payload.isConnected ?? get().connected ?? false;
-    set({
-      connected: nextConnected,
-      isConnected: nextConnected,
-      address: payload.address ?? get().address ?? null,
-      chainId: payload.chainId ?? get().chainId ?? null,
-    });
-  },
-
-  disconnect: () => set({ connected: false, isConnected: false, address: null, chainId: null }),
-}));
-
-// ============================================
-// KYC STORE
-// ============================================
-export interface KycFormData {
-  firstName?: string;
-  lastName?: string;
-  dateOfBirth?: string;
-
-  country?: string;
-  nationality?: string;
-
-  city?: string;
-  state?: string;
-
-  address?: string;
-  addressLine1?: string;
-  addressLine2?: string;
-
-  postalCode?: string;  // ✅ add (page uses this)
-
-  idType?: 'passport' | 'drivers_license' | 'national_id' | 'other'; // ✅ add (alias)
-  idNumber?: string;    // ✅ add (alias)
-
-  documentType?: 'passport' | 'drivers_license' | 'national_id' | 'other';
-  documentNumber?: string;
-
-  documentFrontUrl?: string;
-  documentBackUrl?: string;
-  selfieUrl?: string;
-
-  // optional safety net so builds don’t break again when UI adds fields
-  [key: string]: any;
-}
-
-
-interface KYCStore {
-  step: number;
-  currentStep: number; // legacy
-  data: KycFormData;
-
-  submitting: boolean;
-  isSubmitting: boolean; // legacy
-  setSubmitting: (v: boolean) => void; // legacy
-
-  setStep: (step: number) => void;
-  updateData: (patch: Partial<KycFormData>) => void;
-  reset: () => void;
-
-  submitKyc: () => Promise<boolean>;
-}
-
-export const useKYCStore = create<KYCStore>((set, get) => ({
-  step: 1,
-  currentStep: 1,
-  data: {},
-
-  submitting: false,
-  isSubmitting: false,
-
-  setSubmitting: (v) => set({ submitting: v, isSubmitting: v }),
-
-  setStep: (step) => set({ step, currentStep: step }),
-  updateData: (patch) => set({ data: { ...get().data, ...patch } }),
-  reset: () =>
-    set({
-      step: 1,
-      currentStep: 1,
-      data: {},
-      submitting: false,
-      isSubmitting: false,
-    }),
-
-  submitKyc: async () => {
-    set({ submitting: true, isSubmitting: true });
-    try {
-      const ok = await useStore.getState().updateKycStatus('pending');
-      return ok;
-    } finally {
-      set({ submitting: false, isSubmitting: false });
-    }
-  },
-}));
-
-// ============================================
-// TRADING STORE
-// ============================================
-type MarketType = 'fx' | 'crypto' | 'stocks';
-
-export interface PortfolioPosition {
-  id: string;
-  symbol: string;
-  market: MarketType;
-  quantity: number;
-  avgPrice: number;
-  currentPrice: number;
-  pnl: number;
-}
-
-interface TradingStore {
-  market: MarketType;
-  selectedSymbol: string | null;
-
-  positions: PortfolioPosition[];
-  loading: boolean;
-
-  tradeHistory: Trade[]; // legacy
-  activeTrades: Trade[]; // legacy
-
-  setMarket: (m: MarketType) => void;
-  setSelectedSymbol: (s: string | null) => void;
-
-  setTradeHistory: (t: Trade[]) => void;
-  setActiveTrades: (t: Trade[]) => void;
-
-  loadPositions: () => Promise<void>;
-  clear: () => void;
-}
-
-export const useTradingStore = create<TradingStore>((set, get) => ({
-  market: 'crypto',
-  selectedSymbol: null,
-
-  positions: [],
-  loading: false,
-
-  tradeHistory: [],
-  activeTrades: [],
-
-  setMarket: (m) => set({ market: m }),
-  setSelectedSymbol: (s) => set({ selectedSymbol: s }),
-
-  setTradeHistory: (t) => set({ tradeHistory: t }),
-  setActiveTrades: (t) => set({ activeTrades: t }),
-
-  loadPositions: async () => {
-    const auth = useStore.getState().user;
-    if (!auth || !isSupabaseConfigured()) return;
-
-    set({ loading: true });
-    try {
-      const res = await withTimeout(
-        supabase.from('positions' as any).select('*').eq('user_id', auth.id),
-        8000
-      );
-      const data = (res as any).data;
-      if (Array.isArray(data)) {
-        const mapped: PortfolioPosition[] = data.map((p: any) => ({
-          id: p.id,
-          symbol: p.symbol,
-          market: (p.market as MarketType) || 'crypto',
-          quantity: Number(p.quantity ?? 0) || 0,
-          avgPrice: Number(p.avg_price ?? 0) || 0,
-          currentPrice: Number(p.current_price ?? p.avg_price ?? 0) || 0,
-          pnl: Number(p.pnl ?? 0) || 0,
-        }));
-        set({ positions: mapped });
-      }
-    } catch {
-      // ignore
-    } finally {
-      set({ loading: false });
-    }
-  },
-
-  clear: () =>
-    set({
-      positions: [],
-      selectedSymbol: null,
-      loading: false,
-      tradeHistory: [],
-      activeTrades: [],
-    }),
-}));
-
-// ============================================
 // AUTH STATE LISTENER (only once)
 // ============================================
 if (typeof window !== 'undefined' && isSupabaseConfigured()) {
@@ -1439,32 +958,11 @@ if (typeof window !== 'undefined' && isSupabaseConfigured()) {
           trades: [],
           paymentMethods: [],
           error: null,
-          otpEmail: '',
-          otpName: '',
-          otpPassword: '',
-          redirectUrl: '',
-        });
-
-        useWalletStore.setState({ connected: false, isConnected: false, address: null, chainId: null });
-        useTradingStore.setState({
-          market: 'crypto',
-          selectedSymbol: null,
-          positions: [],
-          loading: false,
-          tradeHistory: [],
-          activeTrades: [],
         });
       }
     });
   }
 }
 
-// ============================================
-// ✅ REQUIRED EXPORTS FOR YOUR APP IMPORTS
-// ============================================
-
-// main auth store alias
-export const useAuthStore = useStore;
-
-// also export supabase helpers (some files expect these from store)
+// Back-compat exports
 export { supabase, isSupabaseConfigured };

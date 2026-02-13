@@ -25,7 +25,7 @@ import {
   Clock,
   Gift,
 } from 'lucide-react';
-import { useKYCStore } from '@/lib/store';
+import { useKYCStore } from '@/lib/kyc-store';
 import { useStore } from '@/lib/supabase/store-supabase';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 

@@ -20,7 +20,7 @@ import {
   ShieldCheck,
   Check,
 } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
+import { useStore } from '@/lib/auth/store';
 import { useEmail } from '@/hooks/useEmail';
 
 // ============================================
@@ -164,7 +164,7 @@ export default function SignupPage() {
   const searchParams = useSearchParams();
   const refFromUrl = (searchParams.get('ref') || '').trim();
 
-  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useAuthStore();
+  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useStore();
   const { sendOTP } = useEmail();
 
   const [showPassword, setShowPassword] = useState(false);

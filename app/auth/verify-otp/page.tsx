@@ -6,8 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from 'lucide-react';
-import { useAuthStore } from '@/lib/store';
-import { useStore } from '@/lib/supabase/store-supabase';
+import { useStore } from '@/lib/auth/store';
 import { useEmail } from '@/hooks/useEmail';
 
 const REF_KEY = 'novatrade_signup_ref';
@@ -62,8 +61,8 @@ export default function VerifyOTPPage() {
     } catch {}
   }, [searchParams]);
 
-  const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useAuthStore();
-  const { signup } = useStore(); // ✅ store signup accepts 2-4 args (no referral arg)
+ const { otpEmail, otpName, otpPassword, redirectUrl, clearOtp, signup } = useStore();
+
   const { sendOTP, verifyOTP, sendWelcome } = useEmail();
 
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
@@ -294,7 +293,8 @@ export default function VerifyOTPPage() {
         pushLog('sendWelcome failed (ignored)', e?.message || e);
       }
 
-      setOtpPassword(null);
+     clearOtp();
+
 
       setTimeout(() => {
         const destination = redirectUrl || '/kyc';

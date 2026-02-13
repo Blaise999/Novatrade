@@ -375,6 +375,10 @@ const PortfolioCard = ({
 // ============================================
 
 export default function CryptoTradingPage() {
+  // ✅ HYDRATION FIX: zustand/persist rehydrates from localStorage on client
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => { setHasMounted(true); }, []);
+
   // Get real user data from store
   const { user, refreshUser, loadTrades } = useStore();
 
@@ -749,6 +753,15 @@ export default function CryptoTradingPage() {
 
   // Get current position for selected asset
   const currentPosition = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
+
+  // ✅ HYDRATION FIX: render loading until client has mounted
+  if (!hasMounted) {
+    return (
+      <div className="min-h-screen bg-void flex items-center justify-center">
+        <div className="animate-pulse text-slate-500 text-sm">Loading crypto trading…</div>
+      </div>
+    );
+  }
 
   return (
     <KYCGate action="trade cryptocurrency">

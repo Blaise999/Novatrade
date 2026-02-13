@@ -33,7 +33,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { useWalletStore } from '@/lib/store';
+import { useWalletStore } from '@/lib/wallet-store';
 import { useMembershipStore, TIER_CONFIG, MembershipTier } from '@/lib/membership-tiers';
 import { useDepositSettingsStore, CryptoWallet, BankAccount, PaymentProcessor } from '@/lib/deposit-settings';
 import KYCGate from '@/components/KYCGate';

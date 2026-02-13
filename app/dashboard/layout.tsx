@@ -27,7 +27,7 @@ import {
   Bot
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { useUIStore } from '@/lib/store';
+import { useUIStore } from '@/lib/ui-store';
 import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
 import SupportWidget from '@/components/SupportWidget';
 import NotificationPanel from '@/components/NotificationPanel';
