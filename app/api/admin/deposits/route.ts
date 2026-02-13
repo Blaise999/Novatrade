@@ -24,6 +24,14 @@ function sha256Hex(value: string) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function isHex64(v: string) {
+  return /^[0-9a-f]{64}$/i.test(v);
+}
+
+/**
+ * ✅ OPAQUE admin session auth
+ * Expects: public.admin_sessions(token?, token_hash?, admin_id, expires_at, revoked_at)
+ */
 async function requireAdmin(req: NextRequest) {
   if (!SUPABASE_URL || !SERVICE_KEY) {
     return { ok: false as const, status: 500, message: 'Server misconfigured (missing Supabase env)' };
@@ -32,32 +40,52 @@ async function requireAdmin(req: NextRequest) {
   const token = getToken(req);
   if (!token) return { ok: false as const, status: 401, message: 'Missing admin token' };
 
-  // ✅ Accept either raw token OR token_hash
+  // We’ll try multiple lookup styles because projects often evolve:
+  // - raw token stored in token
+  // - raw token stored as token_hash
+  // - token_hash stored as sha256(raw)
+  // - client might already store hashed token (64-hex)
   const tokenHash = sha256Hex(token);
 
-  // Try raw token first
   let session:
     | { admin_id: string; expires_at: string | null; revoked_at: string | null }
     | null = null;
 
-  const { data: s1, error: e1 } = await supabaseAdmin
-    .from('admin_sessions')
-    .select('admin_id, expires_at, revoked_at')
-    .eq('token', token)
-    .maybeSingle();
+  // 1) token column = token
+  {
+    const { data, error } = await supabaseAdmin
+      .from('admin_sessions')
+      .select('admin_id, expires_at, revoked_at')
+      .eq('token', token)
+      .maybeSingle();
 
-  if (!e1 && s1?.admin_id) session = s1 as any;
+    if (!error && data?.admin_id) session = data as any;
+  }
 
-  // Fallback: token_hash
+  // 2) token_hash column = token  (if token is already stored hashed in client)
   if (!session) {
-    const { data: s2, error: e2 } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
+      .from('admin_sessions')
+      .select('admin_id, expires_at, revoked_at')
+      .eq('token_hash', token)
+      .maybeSingle();
+
+    if (!error && data?.admin_id) session = data as any;
+  }
+
+  // 3) token_hash column = sha256(token) (if DB stores sha256(raw))
+  if (!session) {
+    const { data, error } = await supabaseAdmin
       .from('admin_sessions')
       .select('admin_id, expires_at, revoked_at')
       .eq('token_hash', tokenHash)
       .maybeSingle();
 
-    if (!e2 && s2?.admin_id) session = s2 as any;
+    if (!error && data?.admin_id) session = data as any;
   }
+
+  // Optional: if token is hex64, also try sha256Hex(token) is already above.
+  // (kept as is; the 3 tries cover most real-world setups)
 
   if (!session?.admin_id) {
     return { ok: false as const, status: 401, message: 'Invalid token' };
@@ -71,7 +99,7 @@ async function requireAdmin(req: NextRequest) {
     return { ok: false as const, status: 401, message: 'Token expired' };
   }
 
-  // Role check
+  // Role check (users table)
   const { data: profile, error: profErr } = await supabaseAdmin
     .from('users')
     .select('id, role')
@@ -92,6 +120,8 @@ async function requireAdmin(req: NextRequest) {
 
 // ─────────────────────────────────────────────
 // GET /api/admin/deposits?status=pending
+// Allowed statuses (per your constraint):
+// pending, processing, completed, failed, cancelled, expired
 // ─────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const gate = await requireAdmin(req);
@@ -105,26 +135,25 @@ export async function GET(req: NextRequest) {
       .from('deposits')
       .select(
         `
-        id,
-        user_id,
-        amount,
-        currency,
-        method,
-        method_name,
-        network,
-        transaction_ref,
-        tx_hash,
-        proof_url,
-        status,
-        admin_note,
-        rejection_reason,
-        note,
-        processed_at,
-        created_at,
-        users:user_id (
-          id, email, first_name, last_name, tier_level, balance_available
-        )
-      `
+          id,
+          user_id,
+          amount,
+          currency,
+          method,
+          method_name,
+          network,
+          transaction_ref,
+          tx_hash,
+          proof_url,
+          status,
+          admin_note,
+          rejection_reason,
+          processed_at,
+          created_at,
+          users:user_id (
+            id, email, first_name, last_name, tier_level, balance_available
+          )
+        `
       )
       .order('created_at', { ascending: false })
       .limit(200);
@@ -182,19 +211,20 @@ export async function PATCH(req: NextRequest) {
     const amount = Number(deposit.amount || 0);
 
     if (action === 'approve') {
+      // ✅ must be allowed by check constraint
       const { error: upErr } = await supabaseAdmin
         .from('deposits')
         .update({
-          status: 'confirmed',
+          status: 'completed', // ✅ allowed
           processed_by: gate.adminId,
           processed_at: now,
           admin_note: note || null,
-          updated_at: now,
         })
         .eq('id', depositId);
 
       if (upErr) return NextResponse.json({ success: false, error: upErr.message }, { status: 500 });
 
+      // credit user
       const { data: userRow, error: uErr } = await supabaseAdmin
         .from('users')
         .select('balance_available')
@@ -213,7 +243,7 @@ export async function PATCH(req: NextRequest) {
 
       if (balErr) return NextResponse.json({ success: false, error: balErr.message }, { status: 500 });
 
-      // optional logs (safe)
+      // logs (safe)
       try {
         await supabaseAdmin.from('transactions').insert({
           user_id: userId,
@@ -233,8 +263,8 @@ export async function PATCH(req: NextRequest) {
         await supabaseAdmin.from('notifications').insert({
           user_id: userId,
           type: 'deposit',
-          title: 'Deposit Confirmed!',
-          message: `Your $${amount.toFixed(2)} deposit has been confirmed and credited to your account.`,
+          title: 'Deposit Completed!',
+          message: `Your $${amount.toFixed(2)} deposit has been completed and credited to your account.`,
           data: { deposit_id: depositId, amount },
         });
       } catch {}
@@ -246,16 +276,15 @@ export async function PATCH(req: NextRequest) {
       });
     }
 
-    // reject
+    // ✅ REJECT must also use allowed status
     const { error: rejErr } = await supabaseAdmin
       .from('deposits')
       .update({
-        status: 'rejected',
+        status: 'failed', // ✅ allowed (use this as “rejected by admin”)
         processed_by: gate.adminId,
         processed_at: now,
         rejection_reason: rejectedReason || 'Rejected by admin',
         admin_note: note || null,
-        updated_at: now,
       })
       .eq('id', depositId);
 

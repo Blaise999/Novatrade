@@ -2,15 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Wallet,
-  CheckCircle,
-  Clock,
-  DollarSign,
-  Search,
-  RefreshCw,
-  Eye,
-} from 'lucide-react';
+import { Wallet, CheckCircle, Clock, DollarSign, Search, RefreshCw, Eye } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 
 interface Deposit {
@@ -27,7 +19,6 @@ interface Deposit {
   status: string;
   admin_note: string | null;
   rejection_reason: string | null;
-  note: string | null;
   processed_at: string | null;
   created_at: string;
   users?: {
@@ -43,25 +34,23 @@ interface Deposit {
 const STATUS_STYLES: Record<string, string> = {
   pending: 'bg-amber-500/20 text-amber-400',
   processing: 'bg-blue-500/20 text-blue-400',
-  confirmed: 'bg-profit/20 text-profit',
-  approved: 'bg-profit/20 text-profit',
-  rejected: 'bg-loss/20 text-loss',
+  completed: 'bg-profit/20 text-profit',
+  failed: 'bg-loss/20 text-loss',
+  cancelled: 'bg-slate-500/20 text-slate-400',
   expired: 'bg-slate-500/20 text-slate-400',
 };
 
-type FilterStatus = 'all' | 'pending' | 'confirmed' | 'rejected';
+type FilterStatus = 'all' | 'pending' | 'completed' | 'failed';
 
 function getStorageToken(): string | null {
   if (typeof window === 'undefined') return null;
 
-  // prefer sessionStorage
   const ss =
     window.sessionStorage.getItem('novatrade_admin_token') ||
     window.sessionStorage.getItem('admin_token');
 
   if (ss) return ss;
 
-  // fallback to localStorage (migrate)
   const ls =
     window.localStorage.getItem('novatrade_admin_token') ||
     window.localStorage.getItem('admin_token');
@@ -90,6 +79,13 @@ function getAdminToken(admin: any, sessionToken?: string | null): string | null 
   return fromStore || getStorageToken();
 }
 
+function labelStatus(status: string) {
+  // UI-friendly labels
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'rejected';
+  return status;
+}
+
 export default function AdminDepositsPage() {
   const store: any = useAdminAuthStore();
   const { admin, isAuthenticated } = store;
@@ -107,7 +103,6 @@ export default function AdminDepositsPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [showDetailModal, setShowDetailModal] = useState<Deposit | null>(null);
 
-  // keep token in sessionStorage for refresh/navigation
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (!token) return;
@@ -142,7 +137,7 @@ export default function AdminDepositsPage() {
   );
 
   const loadDeposits = useCallback(async () => {
-    if (!token) return; // wait for token to hydrate
+    if (!token) return;
     setLoading(true);
     setMessage('');
 
@@ -210,9 +205,9 @@ export default function AdminDepositsPage() {
   }
 
   const pendingCount = deposits.filter((d) => d.status === 'pending').length;
-  const confirmedCount = deposits.filter((d) => ['confirmed', 'approved'].includes(d.status)).length;
-  const totalConfirmed = deposits
-    .filter((d) => ['confirmed', 'approved'].includes(d.status))
+  const completedCount = deposits.filter((d) => d.status === 'completed').length;
+  const totalCompleted = deposits
+    .filter((d) => d.status === 'completed')
     .reduce((sum, d) => sum + Number(d.amount), 0);
 
   const filtered = deposits.filter((d) => {
@@ -277,8 +272,8 @@ export default function AdminDepositsPage() {
           <div className="flex items-center gap-3">
             <CheckCircle className="w-8 h-8 text-profit" />
             <div>
-              <p className="text-2xl font-bold text-cream">{confirmedCount}</p>
-              <p className="text-sm text-profit">Confirmed</p>
+              <p className="text-2xl font-bold text-cream">{completedCount}</p>
+              <p className="text-sm text-profit">Completed</p>
             </div>
           </div>
         </div>
@@ -287,8 +282,8 @@ export default function AdminDepositsPage() {
           <div className="flex items-center gap-3">
             <DollarSign className="w-8 h-8 text-gold" />
             <div>
-              <p className="text-2xl font-bold text-cream">${totalConfirmed.toLocaleString()}</p>
-              <p className="text-sm text-cream/60">Total Deposited</p>
+              <p className="text-2xl font-bold text-cream">${totalCompleted.toLocaleString()}</p>
+              <p className="text-sm text-cream/60">Total Completed</p>
             </div>
           </div>
         </div>
@@ -317,14 +312,12 @@ export default function AdminDepositsPage() {
       {/* Filter + Search */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex gap-2">
-          {(['pending', 'all', 'confirmed', 'rejected'] as FilterStatus[]).map((f) => (
+          {(['pending', 'all', 'completed', 'failed'] as FilterStatus[]).map((f) => (
             <button
               key={f}
               onClick={() => setFilter(f)}
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                filter === f
-                  ? 'bg-gold/20 text-gold'
-                  : 'bg-white/5 text-slate-400 hover:bg-white/10'
+                filter === f ? 'bg-gold/20 text-gold' : 'bg-white/5 text-slate-400 hover:bg-white/10'
               }`}
             >
               {f.charAt(0).toUpperCase() + f.slice(1)}
@@ -415,7 +408,7 @@ export default function AdminDepositsPage() {
                             STATUS_STYLES[d.status] || 'bg-white/10 text-slate-400'
                           }`}
                         >
-                          {d.status}
+                          {labelStatus(d.status)}
                         </span>
                       </td>
 
@@ -500,7 +493,7 @@ export default function AdminDepositsPage() {
                   Cancel
                 </button>
                 <button
-                  onClick={() => handleReject(showRejectModal)}
+                  onClick={() => void handleReject(showRejectModal)}
                   disabled={actionLoading}
                   className="flex-1 py-2 bg-loss/20 text-loss font-semibold rounded-xl disabled:opacity-50"
                 >
@@ -532,8 +525,15 @@ export default function AdminDepositsPage() {
               <h3 className="text-lg font-bold text-cream mb-4">Deposit Details</h3>
 
               <div className="space-y-3 text-sm">
-                <Row label="User" value={`${getUserDisplay(showDetailModal).name} (${getUserDisplay(showDetailModal).email})`} />
-                <Row label="Amount" value={`$${Number(showDetailModal.amount).toLocaleString()} ${showDetailModal.currency || 'USD'}`} bold />
+                <Row
+                  label="User"
+                  value={`${getUserDisplay(showDetailModal).name} (${getUserDisplay(showDetailModal).email})`}
+                />
+                <Row
+                  label="Amount"
+                  value={`$${Number(showDetailModal.amount).toLocaleString()} ${showDetailModal.currency || 'USD'}`}
+                  bold
+                />
                 <Row label="Method" value={showDetailModal.method_name || showDetailModal.method || 'Crypto'} />
                 {showDetailModal.network && <Row label="Network" value={showDetailModal.network} />}
 
@@ -548,37 +548,55 @@ export default function AdminDepositsPage() {
 
                 <div className="flex justify-between">
                   <span className="text-slate-400">Status</span>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[showDetailModal.status] || ''}`}>
-                    {showDetailModal.status}
+                  <span
+                    className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      STATUS_STYLES[showDetailModal.status] || 'bg-white/10 text-slate-400'
+                    }`}
+                  >
+                    {labelStatus(showDetailModal.status)}
                   </span>
                 </div>
 
                 <Row label="Submitted" value={new Date(showDetailModal.created_at).toLocaleString()} />
-                {showDetailModal.processed_at && <Row label="Processed" value={new Date(showDetailModal.processed_at).toLocaleString()} />}
+                {showDetailModal.processed_at && (
+                  <Row label="Processed" value={new Date(showDetailModal.processed_at).toLocaleString()} />
+                )}
 
                 {showDetailModal.proof_url && (
                   <div>
                     <span className="text-slate-400 block mb-2">Payment Proof</span>
-                    <img src={showDetailModal.proof_url} alt="Proof" className="max-w-full rounded-xl border border-white/10" />
+                    <img
+                      src={showDetailModal.proof_url}
+                      alt="Proof"
+                      className="max-w-full rounded-xl border border-white/10"
+                    />
                   </div>
                 )}
 
-                {(showDetailModal.rejection_reason || showDetailModal.note) && (
-                  <Row label="Reason" value={showDetailModal.rejection_reason || showDetailModal.note || ''} loss />
+                {showDetailModal.rejection_reason && (
+                  <Row label="Reason" value={showDetailModal.rejection_reason} loss />
                 )}
+
+                {showDetailModal.admin_note && <Row label="Admin Note" value={showDetailModal.admin_note} />}
               </div>
 
               {(showDetailModal.status === 'pending' || showDetailModal.status === 'processing') && (
                 <div className="flex gap-3 mt-5">
                   <button
-                    onClick={() => { void handleApprove(showDetailModal.id); setShowDetailModal(null); }}
+                    onClick={() => {
+                      void handleApprove(showDetailModal.id);
+                      setShowDetailModal(null);
+                    }}
                     disabled={actionLoading}
                     className="flex-1 py-2 bg-profit/20 text-profit font-semibold rounded-xl hover:bg-profit/30 disabled:opacity-50"
                   >
                     Approve
                   </button>
                   <button
-                    onClick={() => { setShowRejectModal(showDetailModal.id); setShowDetailModal(null); }}
+                    onClick={() => {
+                      setShowRejectModal(showDetailModal.id);
+                      setShowDetailModal(null);
+                    }}
                     className="flex-1 py-2 bg-loss/20 text-loss font-semibold rounded-xl hover:bg-loss/30"
                   >
                     Reject
@@ -604,9 +622,7 @@ function Row({ label, value, bold, loss }: { label: string; value: string; bold?
   return (
     <div className="flex justify-between">
       <span className="text-slate-400">{label}</span>
-      <span className={`${loss ? 'text-loss' : 'text-cream'} ${bold ? 'font-semibold' : ''}`}>
-        {value}
-      </span>
+      <span className={`${loss ? 'text-loss' : 'text-cream'} ${bold ? 'font-semibold' : ''}`}>{value}</span>
     </div>
   );
 }
