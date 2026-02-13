@@ -195,6 +195,11 @@ const TF_STEP_MS: Record<Timeframe, number> = {
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
 export default function FXTradingPage() {
+  // ✅ HYDRATION FIX: zustand/persist rehydrates from localStorage on client,
+  // but server sees empty defaults. Guard with hasMounted to avoid mismatch.
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => { setHasMounted(true); }, []);
+
   const {
     marginAccount,
     marginPositions,
@@ -989,6 +994,16 @@ export default function FXTradingPage() {
       chartHeight,
     };
   }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
+
+  // ✅ HYDRATION FIX: render nothing meaningful until client has mounted
+  // to prevent server/client mismatch from zustand/persist rehydration
+  if (!hasMounted) {
+    return (
+      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex items-center justify-center bg-void">
+        <div className="animate-pulse text-slate-500 text-sm">Loading FX trading…</div>
+      </div>
+    );
+  }
 
   return (
     <KYCGate action="trade forex">

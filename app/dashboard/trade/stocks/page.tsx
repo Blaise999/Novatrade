@@ -130,6 +130,10 @@ function deriveChangePercent(price: number, prevClose?: number) {
 }
 
 export default function StockTradingPage() {
+  // ✅ HYDRATION FIX: zustand/persist rehydrates from localStorage on client
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => { setHasMounted(true); }, []);
+
   const { user, refreshUser } = useStore();
 
   const {
@@ -635,6 +639,15 @@ export default function StockTradingPage() {
   }, [candles, chartDimensions]);
 
   const info = stockInfo[selectedSymbol] || { emoji: '📈', sector: 'Other' };
+
+  // ✅ HYDRATION FIX: render loading until client has mounted
+  if (!hasMounted) {
+    return (
+      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex items-center justify-center bg-void">
+        <div className="animate-pulse text-slate-500 text-sm">Loading stocks trading…</div>
+      </div>
+    );
+  }
 
   return (
     <KYCGate action="trade stocks">
