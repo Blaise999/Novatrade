@@ -4,7 +4,7 @@
  * Handles ALL user authentication - replaces localStorage auth
  */
 
-import { supabase } from './supabase-client';
+import { supabase } from '.client';
 
 export interface User {
   id: string;

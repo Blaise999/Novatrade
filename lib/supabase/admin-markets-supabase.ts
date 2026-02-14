@@ -5,8 +5,8 @@
  * for persistent storage across sessions and devices.
  */
 
-import { supabase, isSupabaseConfigured } from './supabase-client';
-import { createServerSupabaseClient } from './supabase-client';
+import { supabase, isSupabaseConfigured } from '.client';
+import { createServerSupabaseClient } from '.client';
 
 // Helper to check if Supabase is available before making calls
 const checkSupabase = () => {

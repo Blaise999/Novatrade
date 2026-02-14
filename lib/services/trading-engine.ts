@@ -13,7 +13,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/supabase-client';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 // ==========================================
 // TYPES
