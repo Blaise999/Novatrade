@@ -124,6 +124,8 @@ function parseTwelveDatetimeToMs(dt: string) {
   // Twelve often returns "YYYY-MM-DD HH:mm:ss"
   if (!dt) return Date.now();
   const isoLike = dt.includes(' ') ? dt.replace(' ', 'T') : dt;
+
+  // Some Twelve feeds return local/UTC strings; try Z then fallback
   const withZ = isoLike.endsWith('Z') ? isoLike : `${isoLike}Z`;
   const t1 = Date.parse(withZ);
   if (Number.isFinite(t1)) return t1;
@@ -137,20 +139,21 @@ function parseTwelveDatetimeToMs(dt: string) {
 export default function StockTradingPage() {
   // ✅ HYDRATION FIX
   const [hasMounted, setHasMounted] = useState(false);
-  useEffect(() => {
-    setHasMounted(true);
-  }, []);
+  useEffect(() => setHasMounted(true), []);
 
   const { user, refreshUser } = useStore();
 
-  const {
-    spotAccount,
-    stockPositions,
-    executeStockBuy,
-    executeStockSell,
-    updateStockPositionPrice,
-    initializeAccounts,
-  } = useTradingAccountStore();
+  /**
+   * ✅ IMPORTANT BALANCE FIX (stocks only):
+   * DO NOT initialize accounts here.
+   * You already have useUnifiedBalance (seen in logs) initializing accounts in the dashboard shell.
+   * Initializing again inside this page causes repeated “reset” of cash after buy/sell -> looks like balance is increasing.
+   */
+  const spotAccount = useTradingAccountStore((s) => s.spotAccount);
+  const stockPositions = useTradingAccountStore((s) => s.stockPositions);
+  const executeStockBuy = useTradingAccountStore((s) => s.executeStockBuy);
+  const executeStockSell = useTradingAccountStore((s) => s.executeStockSell);
+  const updateStockPositionPrice = useTradingAccountStore((s) => s.updateStockPositionPrice);
 
   // ---- Assets
   const stockAssets = useMemo(() => {
@@ -174,15 +177,6 @@ export default function StockTradingPage() {
     [stockAssets, selectedSymbol]
   );
 
-  // ---- Account init
-  useEffect(() => {
-    if (user?.id && user?.balance !== undefined) {
-      if (!spotAccount || (spotAccount as any)?.userId !== user.id) {
-        initializeAccounts(user.id, user.balance);
-      }
-    }
-  }, [user?.id, user?.balance, spotAccount, initializeAccounts]);
-
   // ---- UI state
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [favorites, setFavorites] = useState<string[]>(['AAPL', 'NVDA', 'TSLA']);
@@ -196,6 +190,20 @@ export default function StockTradingPage() {
   const [dollarAmount, setDollarAmount] = useState(100);
 
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const notifTimerRef = useRef<number | null>(null);
+
+  const pushNotif = (nfy: { type: 'success' | 'error'; message: string }, ms = 3000) => {
+    setNotification(nfy);
+    if (notifTimerRef.current) window.clearTimeout(notifTimerRef.current);
+    notifTimerRef.current = window.setTimeout(() => setNotification(null), ms);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (notifTimerRef.current) window.clearTimeout(notifTimerRef.current);
+    };
+  }, []);
+
   const [showSellModal, setShowSellModal] = useState(false);
   const [positionToSell, setPositionToSell] = useState<StockPosition | null>(null);
   const [sellQty, setSellQty] = useState(0);
@@ -220,11 +228,13 @@ export default function StockTradingPage() {
     return stockAssets.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
   }, [stockAssets, searchQuery]);
 
+  const pollingKey = useMemo(() => subscribedSymbols.join(','), [subscribedSymbols]);
+
   useEffect(() => {
     if (!subscribedSymbols.length) return;
 
     let alive = true;
-    let timer: any;
+    let timer: number | null = null;
 
     const tick = async () => {
       try {
@@ -238,45 +248,43 @@ export default function StockTradingPage() {
           const next: Record<string, LiveQuote> = { ...prev };
 
           for (const sym of subscribedSymbols) {
-            const q: any = (data as any)?.[sym] || (data as any)?.[sym?.toUpperCase?.()] || null;
+            const key = String(sym || '').toUpperCase();
+            const q: any = (data as any)?.[key] || (data as any)?.[sym] || null;
             if (!q) continue;
 
-            const price = n(q?.price ?? q?.close, 0);
+            const price = n(q?.price ?? q?.close ?? q?.last, 0);
             if (!price || !Number.isFinite(price)) continue;
 
-            // prev close: Twelve sometimes provides "previous_close"
             const prevClose =
               n(q?.previous_close, 0) ||
               n(q?.prev_close, 0) ||
               n(q?.close, 0) ||
-              prevCloseRef.current[sym] ||
-              next[sym]?.prevClose ||
+              prevCloseRef.current[key] ||
+              next[key]?.prevClose ||
               undefined;
 
-            if (prevClose && !prevCloseRef.current[sym]) prevCloseRef.current[sym] = prevClose;
+            if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
 
-            // percent change: Twelve has "percent_change" (string)
+            const pctRaw = q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? undefined;
             const pct =
-              Number.isFinite(n(q?.percent_change, NaN))
-                ? n(q?.percent_change, 0)
-                : deriveChangePercent(price, prevClose);
+              Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
 
             const bid = price * 0.9999;
             const ask = price * 1.0001;
 
-            next[sym] = {
-              symbol: sym,
+            next[key] = {
+              symbol: key,
               price,
               bid,
               ask,
               changePercent24h: pct,
-              prevClose: prevClose,
+              prevClose,
               ts: Date.now(),
             };
 
-            // ✅ keep trading-store prices in sync
+            // ✅ keep trading-store prices in sync for correct PnL
             try {
-              updateStockPositionPrice(sym, price);
+              updateStockPositionPrice(key, price);
             } catch {
               // ignore
             }
@@ -293,24 +301,19 @@ export default function StockTradingPage() {
     };
 
     tick();
-    timer = setInterval(tick, 6000);
+    timer = window.setInterval(tick, 6000);
 
     return () => {
       alive = false;
-      clearInterval(timer);
+      if (timer) window.clearInterval(timer);
     };
-  }, [subscribedSymbols.join(','), updateStockPositionPrice]);
+  }, [pollingKey, updateStockPositionPrice, subscribedSymbols]);
 
   // ---- History (candles) from Twelve Data
   const [candles, setCandles] = useState<Candle[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
-  const candlesAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    candlesAbortRef.current?.abort();
-    const ac = new AbortController();
-    candlesAbortRef.current = ac;
-
     let alive = true;
     setLoadingChart(true);
 
@@ -321,13 +324,13 @@ export default function StockTradingPage() {
 
         if (!alive) return;
 
-        const out: Candle[] = raw
-          .map((c, i) => ({
-            t: parseTwelveDatetimeToMs(String(c.time || '')) || Date.now() + i,
-            o: n((c as any).open, 0),
-            h: n((c as any).high, 0),
-            l: n((c as any).low, 0),
-            c: n((c as any).close, 0),
+        const out: Candle[] = (raw || [])
+          .map((c: any, i: number) => ({
+            t: parseTwelveDatetimeToMs(String(c?.time || '')) || Date.now() + i,
+            o: n(c?.open, 0),
+            h: n(c?.high, 0),
+            l: n(c?.low, 0),
+            c: n(c?.close, 0),
             v: undefined,
           }))
           .filter((x) => x.h > 0 && x.l > 0 && x.c > 0);
@@ -342,10 +345,8 @@ export default function StockTradingPage() {
     };
 
     load();
-
     return () => {
       alive = false;
-      ac.abort();
     };
   }, [selectedSymbol, chartTimeframe]);
 
@@ -366,8 +367,8 @@ export default function StockTradingPage() {
     };
 
     update();
-    const t1 = setTimeout(update, 50);
-    const t2 = setTimeout(update, 200);
+    const t1 = window.setTimeout(update, 50);
+    const t2 = window.setTimeout(update, 200);
 
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
@@ -379,8 +380,8 @@ export default function StockTradingPage() {
     window.addEventListener('orientationchange', update);
 
     return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
       window.removeEventListener('resize', update);
       window.removeEventListener('orientationchange', update);
       ro?.disconnect();
@@ -389,21 +390,27 @@ export default function StockTradingPage() {
 
   // ---- Derived selected quote
   const live = quotes[selectedSymbol];
-  const price = live?.price ?? selectedAsset.price;
+  const price = live?.price ?? selectedAsset?.price ?? 0;
   const bidPrice = live?.bid ?? price * 0.9999;
   const askPrice = live?.ask ?? price * 1.0001;
-  const changePercent24h = live?.changePercent24h ?? selectedAsset.changePercent24h;
+  const changePercent24h = live?.changePercent24h ?? selectedAsset?.changePercent24h ?? 0;
   const up = changePercent24h >= 0;
 
-  // ---- Order calc
-  const effectiveShares =
-    orderMode === 'shares' ? clampInt(shareQty, 1, 1_000_000) : Math.floor(dollarAmount / askPrice);
+  // ---- Order calc (guard against missing quotes)
+  const safeAsk = Number.isFinite(askPrice) && askPrice > 0 ? askPrice : 0;
 
-  const orderValue = effectiveShares * askPrice;
-  const commission = Math.max(0.99, orderValue * 0.001);
+  const effectiveShares =
+    orderMode === 'shares'
+      ? clampInt(shareQty, 1, 1_000_000)
+      : safeAsk > 0
+        ? Math.floor(dollarAmount / safeAsk)
+        : 0;
+
+  const orderValue = effectiveShares * safeAsk;
+  const commission = effectiveShares > 0 ? Math.max(0.99, orderValue * 0.001) : 0;
   const totalCost = orderValue + commission;
 
-  // ✅ FIX: user.balance already includes bonus. Don’t double-add.
+  // ✅ user.balance already includes bonus (per your system)
   const userBalance = Number(user?.balance ?? 0);
   const cashBalance =
     (spotAccount as any)?.availableToTrade ??
@@ -415,129 +422,132 @@ export default function StockTradingPage() {
   const totalEquity = cashBalance + portfolioValue;
   const unrealizedPnL = stockPositions.reduce((sum, pos) => sum + Number(pos.unrealizedPnL ?? 0), 0);
 
-  const canBuy = effectiveShares >= 1 && totalCost <= cashBalance;
+  const canBuy = effectiveShares >= 1 && safeAsk > 0 && totalCost <= cashBalance;
 
-  // ---- Buy/Sell (Spot HOLD like crypto)
+  // ---- Buy/Sell (Spot HOLD)
   const handleBuy = async () => {
+    if (safeAsk <= 0) {
+      pushNotif({ type: 'error', message: 'No live price yet. Try again in a second.' }, 2500);
+      return;
+    }
+
     if (effectiveShares < 1) {
-      setNotification({ type: 'error', message: 'Amount too small — shares becomes 0.' });
-      setTimeout(() => setNotification(null), 2500);
+      pushNotif({ type: 'error', message: 'Amount too small — shares becomes 0.' }, 2500);
       return;
     }
 
     if (totalCost > cashBalance) {
-      setNotification({ type: 'error', message: 'Insufficient funds' });
-      setTimeout(() => setNotification(null), 2500);
+      pushNotif({ type: 'error', message: 'Insufficient funds' }, 2500);
       return;
     }
 
-    const result = executeStockBuy(selectedSymbol, selectedAsset.name, effectiveShares, askPrice, commission);
+    const result = executeStockBuy(selectedSymbol, selectedAsset?.name ?? selectedSymbol, effectiveShares, safeAsk, commission);
 
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // ✅ Save/Upsert into trades history (use any to avoid TS excess checks across your project versions)
-      if (user?.id) {
-        const currentPositions = useTradingAccountStore.getState().stockPositions;
-        const pos = currentPositions.find((p) => p.symbol === selectedSymbol);
-
-        if (pos) {
-          const payload: any = {
-            id: pos.id,
-            userId: user.id,
-            accountId: (spotAccount as any)?.id,
-            marketType: 'stocks',
-            assetType: 'stock',
-            pair: selectedSymbol,
-            symbol: selectedSymbol,
-            direction: 'buy',
-            type: 'buy',
-            side: 'buy',
-            quantity: pos.qty,
-            amount: pos.qty * askPrice,
-            entryPrice: pos.avgEntry ?? askPrice,
-            leverage: 1,
-            openedAt: (pos as any)?.openedAt?.toISOString?.() || new Date().toISOString(),
-            status: 'active',
-            isSimulated: true,
-            notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
-          };
-
-          saveTradeToHistory(payload).catch((e) => console.error('[Stocks] Trade history save failed:', e));
+      // ✅ save to trades history (best-effort)
+      try {
+        if (user?.id) {
+          const state = useTradingAccountStore.getState();
+          const pos = state.stockPositions.find((p) => p.symbol === selectedSymbol);
+          if (pos) {
+            const payload: any = {
+              id: pos.id,
+              userId: user.id,
+              marketType: 'stocks',
+              assetType: 'stock',
+              pair: selectedSymbol,
+              symbol: selectedSymbol,
+              type: 'buy',
+              side: 'buy',
+              quantity: pos.qty,
+              amount: pos.qty * safeAsk,
+              entryPrice: pos.avgEntry ?? safeAsk,
+              leverage: 1,
+              status: 'active',
+              openedAt: new Date().toISOString(),
+              notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
+            };
+            saveTradeToHistory(payload).catch((e) => console.error('[Stocks] Trade history save failed:', e));
+          }
         }
+      } catch {
+        // ignore
       }
 
-      setNotification({
-        type: 'success',
-        message: `Bought ${effectiveShares} ${selectedSymbol} @ $${askPrice.toFixed(2)}`,
-      });
+      pushNotif({ type: 'success', message: `Bought ${effectiveShares} ${selectedSymbol} @ $${safeAsk.toFixed(2)}` });
     } else {
-      setNotification({ type: 'error', message: (result as any)?.error || 'Trade failed' });
+      pushNotif({ type: 'error', message: (result as any)?.error || 'Trade failed' });
     }
-    setTimeout(() => setNotification(null), 3000);
   };
 
   const handleSell = async () => {
     if (!positionToSell || sellQty <= 0) return;
 
-    const sellCommission = Math.max(0.99, sellQty * bidPrice * 0.001);
-    const result = executeStockSell(positionToSell.id, sellQty, bidPrice, sellCommission);
+    const safeBid = Number.isFinite(bidPrice) && bidPrice > 0 ? bidPrice : 0;
+    if (!safeBid) {
+      pushNotif({ type: 'error', message: 'No live bid yet. Try again in a second.' }, 2500);
+      return;
+    }
+
+    const sellCommission = Math.max(0.99, sellQty * safeBid * 0.001);
+    const result = executeStockSell(positionToSell.id, sellQty, safeBid, sellCommission);
 
     if ((result as any)?.success) {
       const pnl = Number((result as any)?.realizedPnL ?? 0);
       await refreshUser?.();
 
-      // After sell: check if position still exists (partial sell) or closed (sell all)
-      const after = useTradingAccountStore.getState().stockPositions;
-      const still = after.find((p) => p.id === positionToSell.id);
+      // partial vs full close
+      try {
+        if (user?.id) {
+          const after = useTradingAccountStore.getState().stockPositions;
+          const still = after.find((p) => p.id === positionToSell.id);
 
-      if (user?.id) {
-        if (still) {
-          // partial: keep trade open and upsert qty/avg
-          const payload: any = {
-            id: still.id,
-            userId: user.id,
-            accountId: (spotAccount as any)?.id,
-            marketType: 'stocks',
-            assetType: 'stock',
-            pair: still.symbol,
-            symbol: still.symbol,
-            direction: 'buy',
-            type: 'buy',
-            side: 'buy',
-            quantity: still.qty,
-            entryPrice: still.avgEntry ?? 0,
-            status: 'active',
-            updatedAt: new Date().toISOString(),
-            notes: JSON.stringify({ model: 'spot_hold', partial: true }),
-          };
-          saveTradeToHistory(payload).catch((e) => console.error('[Stocks] Trade history upsert failed:', e));
-        } else {
-          // full close
-          const payload: any = {
-            tradeId: positionToSell.id,
-            userId: user.id,
-            exitPrice: bidPrice,
-            pnl,
-            status: 'closed',
-            closedAt: new Date().toISOString(),
-          };
-          closeTradeInHistory(payload).catch((e) => console.error('[Stocks] Trade history close failed:', e));
+          if (still) {
+            const payload: any = {
+              id: still.id,
+              userId: user.id,
+              marketType: 'stocks',
+              assetType: 'stock',
+              pair: still.symbol,
+              symbol: still.symbol,
+              type: 'buy',
+              side: 'buy',
+              quantity: still.qty,
+              entryPrice: still.avgEntry ?? 0,
+              status: 'active',
+              updatedAt: new Date().toISOString(),
+              notes: JSON.stringify({ model: 'spot_hold', partial: true }),
+            };
+            saveTradeToHistory(payload).catch((e) => console.error('[Stocks] Trade history upsert failed:', e));
+          } else {
+            const payload: any = {
+              tradeId: positionToSell.id,
+              userId: user.id,
+              exitPrice: safeBid,
+              pnl,
+              status: 'closed',
+              closedAt: new Date().toISOString(),
+            };
+            closeTradeInHistory(payload).catch((e) => console.error('[Stocks] Trade history close failed:', e));
+          }
         }
+      } catch {
+        // ignore
       }
 
-      setNotification({
+      pushNotif({
         type: 'success',
         message: `Sold ${sellQty} ${positionToSell.symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
       });
     } else {
-      setNotification({ type: 'error', message: (result as any)?.error || 'Sell failed' });
+      pushNotif({ type: 'error', message: (result as any)?.error || 'Sell failed' });
     }
 
     setShowSellModal(false);
     setPositionToSell(null);
     setSellQty(0);
-    setTimeout(() => setNotification(null), 3000);
   };
 
   // ---- Chart geometry
@@ -612,7 +622,7 @@ export default function StockTradingPage() {
                 <span className="text-lg sm:text-xl">{info.emoji}</span>
                 <div className="text-left">
                   <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedSymbol}</p>
-                  <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
+                  <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset?.name}</p>
                 </div>
               </div>
               <ChevronDown className="w-4 h-4 text-cream/50 flex-shrink-0" />
@@ -621,10 +631,12 @@ export default function StockTradingPage() {
             {/* Price */}
             <div className="flex items-center gap-3 sm:gap-6">
               <div className="text-center">
-                <p className="text-lg sm:text-2xl font-mono font-bold text-cream">${price.toFixed(2)}</p>
+                <p className="text-lg sm:text-2xl font-mono font-bold text-cream">
+                  ${Number.isFinite(price) ? price.toFixed(2) : '0.00'}
+                </p>
                 <p className={`text-xs ${up ? 'text-profit' : 'text-loss'}`}>
                   {up ? '+' : ''}
-                  {changePercent24h.toFixed(2)}%
+                  {Number.isFinite(changePercent24h) ? changePercent24h.toFixed(2) : '0.00'}%
                 </p>
               </div>
             </div>
@@ -690,9 +702,7 @@ export default function StockTradingPage() {
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setChartType('candle')}
-                  className={`p-1.5 rounded-lg ${
-                    chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'
-                  }`}
+                  className={`p-1.5 rounded-lg ${chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
                 >
                   <CandlestickChart className="w-4 h-4" />
                 </button>
@@ -721,12 +731,7 @@ export default function StockTradingPage() {
                 <div className="absolute inset-0 flex items-center justify-center text-cream/50 text-sm">No chart data</div>
               )}
 
-              <svg
-                className="w-full h-full block"
-                viewBox={`0 0 ${chart.w} ${chart.h}`}
-                preserveAspectRatio="xMidYMid meet"
-                style={{ display: 'block' }}
-              >
+              <svg className="w-full h-full block" viewBox={`0 0 ${chart.w} ${chart.h}`} preserveAspectRatio="xMidYMid meet">
                 {/* grid */}
                 {[...Array(8)].map((_, i) => (
                   <line
@@ -753,14 +758,7 @@ export default function StockTradingPage() {
                 {chartType === 'candle' &&
                   chart.items.map((c, i) => (
                     <g key={i}>
-                      <line
-                        x1={c.x}
-                        y1={c.hY}
-                        x2={c.x}
-                        y2={c.lY}
-                        stroke={c.isUp ? '#00d9a5' : '#ef4444'}
-                        strokeWidth="1"
-                      />
+                      <line x1={c.x} y1={c.hY} x2={c.x} y2={c.lY} stroke={c.isUp ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
                       <rect
                         x={c.x - c.bodyW / 2}
                         y={Math.min(c.oY, c.cY)}
@@ -777,9 +775,7 @@ export default function StockTradingPage() {
                   <>
                     <path d={chart.linePath} fill="none" stroke={up ? '#00d9a5' : '#ef4444'} strokeWidth="2" />
                     <path
-                      d={`${chart.linePath} L ${chart.w - chart.pad.r} ${chart.h - chart.pad.b} L ${chart.pad.l} ${
-                        chart.h - chart.pad.b
-                      } Z`}
+                      d={`${chart.linePath} L ${chart.w - chart.pad.r} ${chart.h - chart.pad.b} L ${chart.pad.l} ${chart.h - chart.pad.b} Z`}
                       fill={up ? 'rgba(0,217,165,0.15)' : 'rgba(239,68,68,0.15)'}
                     />
                   </>
@@ -787,6 +783,7 @@ export default function StockTradingPage() {
 
                 {/* current price marker */}
                 {chart.max > 0 &&
+                  Number.isFinite(price) &&
                   (() => {
                     const range = chart.max - chart.min || 1;
                     const priceY = chart.pad.t + ((chart.max - price) / range) * (chart.h - chart.pad.t - chart.pad.b);
@@ -794,14 +791,7 @@ export default function StockTradingPage() {
                       <>
                         <line x1="0" y1={priceY} x2={chart.w} y2={priceY} stroke="#d4af37" strokeDasharray="4" />
                         <rect x={chart.w - 65} y={priceY - 10} width="60" height="20" fill="#d4af37" rx="3" />
-                        <text
-                          x={chart.w - 35}
-                          y={priceY + 4}
-                          textAnchor="middle"
-                          fill="#0a0a0f"
-                          fontSize="10"
-                          fontFamily="monospace"
-                        >
+                        <text x={chart.w - 35} y={priceY + 4} textAnchor="middle" fill="#0a0a0f" fontSize="10" fontFamily="monospace">
                           ${price.toFixed(2)}
                         </text>
                       </>
@@ -813,14 +803,7 @@ export default function StockTradingPage() {
                     <text x={chart.w - 6} y={16} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
                       ${chart.max.toFixed(2)}
                     </text>
-                    <text
-                      x={chart.w - 6}
-                      y={chart.h - 8}
-                      textAnchor="end"
-                      fill="#666"
-                      fontSize="10"
-                      fontFamily="monospace"
-                    >
+                    <text x={chart.w - 6} y={chart.h - 8} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
                       ${chart.min.toFixed(2)}
                     </text>
                   </>
@@ -944,7 +927,9 @@ export default function StockTradingPage() {
                       </button>
                     ))}
                   </div>
-                  <p className="text-xs text-cream/40 mt-2">≈ {effectiveShares} shares @ ${askPrice.toFixed(2)}</p>
+                  <p className="text-xs text-cream/40 mt-2">
+                    ≈ {effectiveShares} shares {safeAsk > 0 ? `@ $${safeAsk.toFixed(2)}` : ''}
+                  </p>
                 </div>
               )}
             </div>
@@ -958,7 +943,7 @@ export default function StockTradingPage() {
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-cream/50">Ask</span>
-                  <span className="text-cream font-mono">${askPrice.toFixed(2)}</span>
+                  <span className="text-cream font-mono">${safeAsk > 0 ? safeAsk.toFixed(2) : '—'}</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-cream/50">Order Value</span>
@@ -984,7 +969,9 @@ export default function StockTradingPage() {
 
               {!canBuy && (
                 <div className="p-2 bg-loss/10 rounded-lg border border-loss/20">
-                  {effectiveShares < 1 ? (
+                  {safeAsk <= 0 ? (
+                    <p className="text-xs text-loss text-center">Waiting for live price…</p>
+                  ) : effectiveShares < 1 ? (
                     <p className="text-xs text-loss text-center">Amount too small — shares becomes 0.</p>
                   ) : (
                     <>
@@ -1006,11 +993,7 @@ export default function StockTradingPage() {
           </div>
 
           {/* Portfolio panel (Mobile) */}
-          <div
-            className={`${
-              mobileTab === 'portfolio' ? 'flex' : 'hidden'
-            } lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}
-          >
+          <div className={`${mobileTab === 'portfolio' ? 'flex' : 'hidden'} lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}>
             <div className="p-3">
               <h3 className="text-sm font-semibold text-cream mb-3">Your Holdings ({stockPositions.length})</h3>
 
@@ -1095,7 +1078,7 @@ export default function StockTradingPage() {
                   </thead>
                   <tbody>
                     {stockPositions.map((pos) => {
-                      const cur = quotes[pos.symbol]?.price ?? pos.currentPrice ?? 0;
+                      const cur = quotes[pos.symbol]?.price ?? (pos as any)?.currentPrice ?? 0;
                       return (
                         <tr key={pos.id} className="border-t border-white/5">
                           <td className="py-2 text-cream font-medium">{pos.symbol}</td>
@@ -1103,11 +1086,7 @@ export default function StockTradingPage() {
                           <td className="py-2 text-right font-mono text-cream">${Number(pos.avgEntry ?? 0).toFixed(2)}</td>
                           <td className="py-2 text-right font-mono text-cream">${Number(cur).toFixed(2)}</td>
                           <td className="py-2 text-right text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</td>
-                          <td
-                            className={`py-2 text-right font-semibold ${
-                              pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'
-                            }`}
-                          >
+                          <td className={`py-2 text-right font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
                             {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
                           </td>
                           <td className="py-2 text-right">
@@ -1198,10 +1177,10 @@ export default function StockTradingPage() {
 
                               <div className="flex items-center gap-2">
                                 <div className="text-right">
-                                  <p className="font-mono text-cream">${p.toFixed(2)}</p>
+                                  <p className="font-mono text-cream">${Number.isFinite(p) ? p.toFixed(2) : '0.00'}</p>
                                   <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
                                     {dp >= 0 ? '+' : ''}
-                                    {dp.toFixed(2)}%
+                                    {Number.isFinite(dp) ? dp.toFixed(2) : '0.00'}%
                                   </p>
                                 </div>
 
@@ -1248,10 +1227,10 @@ export default function StockTradingPage() {
 
                           <div className="flex items-center gap-2">
                             <div className="text-right">
-                              <p className="font-mono text-cream">${p.toFixed(2)}</p>
+                              <p className="font-mono text-cream">${Number.isFinite(p) ? p.toFixed(2) : '0.00'}</p>
                               <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
                                 {dp >= 0 ? '+' : ''}
-                                {dp.toFixed(2)}%
+                                {Number.isFinite(dp) ? dp.toFixed(2) : '0.00'}%
                               </p>
                             </div>
 
@@ -1306,9 +1285,7 @@ export default function StockTradingPage() {
                       <input
                         type="number"
                         value={sellQty}
-                        onChange={(e) =>
-                          setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))
-                        }
+                        onChange={(e) => setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))}
                         className="flex-1 h-10 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
                       />
                       <button
@@ -1333,7 +1310,7 @@ export default function StockTradingPage() {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-cream/50">Bid</span>
-                      <span className="text-cream font-mono">${bidPrice.toFixed(2)}</span>
+                      <span className="text-cream font-mono">${Number.isFinite(bidPrice) ? bidPrice.toFixed(2) : '—'}</span>
                     </div>
                     <div className="flex justify-between pt-2 border-t border-white/10">
                       <span className="text-cream/50">Est. P&amp;L</span>
