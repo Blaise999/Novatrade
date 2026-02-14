@@ -5,7 +5,8 @@
  * This replaces localStorage completely.
  */
 
-import { supabase, isSupabaseConfigured } from '.client';
+import { supabase, isSupabaseConfigured } from './client';
+
 
 // ============================================
 // TYPES

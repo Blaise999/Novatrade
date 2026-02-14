@@ -62,7 +62,8 @@ async function requireSupabaseUser(req: NextRequest) {
     return { user: null, error: 'Invalid or expired token' as const };
   }
 
-  return { user: data.user, error: null as const };
+  return { user: data.user, error: null };
+
 }
 
 // ============================================
