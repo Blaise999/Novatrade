@@ -1,407 +1,325 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
-  ArrowLeft,
   Shield,
-  Gift,
-  Copy,
+  TrendingUp,
+  Bot,
+  Zap,
+  Crown,
+  Star,
   CheckCircle,
-  Loader2,
-  AlertCircle,
-  Wallet,
-  CreditCard,
+  ChevronRight,
+  Sparkles,
+  Lock,
+  Gift,
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { useDepositSettingsStore } from '@/lib/deposit-settings';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
-interface TierInfo {
+interface TierDef {
   level: number;
   code: string;
   name: string;
   price: number;
   bonus: number;
+  icon: typeof Shield;
+  color: string;
+  bgColor: string;
+  borderColor: string;
+  gradient: string;
+  description: string;
   features: string[];
+  popular?: boolean;
 }
 
-const TIER_MAP: Record<string, TierInfo> = {
-  starter: {
+const TIERS: TierDef[] = [
+  {
+    level: 0,
+    code: 'basic',
+    name: 'Basic',
+    price: 0,
+    bonus: 0,
+    icon: Star,
+    color: 'text-slate-400',
+    bgColor: 'bg-slate-500/10',
+    borderColor: 'border-slate-500/20',
+    gradient: 'from-slate-400 to-slate-500',
+    description: 'View markets & paper trading',
+    features: [
+      'View all live markets',
+      'Paper trading (demo)',
+      'Trading Academy access',
+      'Community forum',
+    ],
+  },
+  {
     level: 1,
     code: 'starter',
     name: 'Starter',
     price: 500,
     bonus: 200,
-    features: ['Live trading', 'Shield protection', '1:50 leverage'],
+    icon: TrendingUp,
+    color: 'text-blue-400',
+    bgColor: 'bg-blue-500/10',
+    borderColor: 'border-blue-500/20',
+    gradient: 'from-blue-400 to-blue-600',
+    description: 'Trading + Shield protection',
+    features: [
+      'Live trading enabled',
+      'Shield protection',
+      'Up to 1:50 leverage',
+      '3 trading signals/day',
+      'Email support',
+      '+$200 trading credit bonus',
+    ],
   },
-  trader: {
+  {
     level: 2,
     code: 'trader',
     name: 'Trader',
     price: 1000,
     bonus: 400,
-    features: ['DCA Bots', 'All Starter features', '1:100 leverage'],
+    icon: Bot,
+    color: 'text-emerald-400',
+    bgColor: 'bg-emerald-500/10',
+    borderColor: 'border-emerald-500/20',
+    gradient: 'from-emerald-400 to-emerald-600',
+    description: 'Trading + Shield + DCA Bots',
+    features: [
+      'Everything in Starter',
+      'DCA Bot access',
+      'Up to 1:100 leverage',
+      '10 pro signals/day',
+      'Priority support',
+      '20% spread discount',
+      '+$400 trading credit bonus',
+    ],
+    popular: true,
   },
-  professional: {
+  {
     level: 3,
     code: 'professional',
     name: 'Professional',
     price: 3000,
     bonus: 1200,
-    features: ['GridWarrior Bots', 'AI Assistant', 'All Trader features'],
+    icon: Crown,
+    color: 'text-amber-400',
+    bgColor: 'bg-amber-500/10',
+    borderColor: 'border-amber-500/20',
+    gradient: 'from-amber-400 to-yellow-600',
+    description: 'Trading + Shield + GridWarrior',
+    features: [
+      'Everything in Trader',
+      'GridWarrior Bots',
+      'All trading bots',
+      'AI trading assistant',
+      'Personal account manager',
+      'Up to 1:200 leverage',
+      '+$1,200 trading credit bonus',
+    ],
   },
-  elite: {
+  {
     level: 4,
     code: 'elite',
     name: 'Elite',
     price: 5000,
     bonus: 2000,
-    features: ['Unlimited leverage', 'Dedicated manager', 'All features'],
+    icon: Sparkles,
+    color: 'text-purple-400',
+    bgColor: 'bg-purple-500/10',
+    borderColor: 'border-purple-500/20',
+    gradient: 'from-purple-400 to-pink-600',
+    description: 'Ultimate VIP experience',
+    features: [
+      'Everything in Professional',
+      'Unlimited leverage (1:500)',
+      'Unlimited signals',
+      'Dedicated account manager',
+      'Instant withdrawals',
+      'Private VIP channel',
+      '+$2,000 trading credit bonus',
+    ],
   },
-};
+];
 
-type CheckoutStep = 'review' | 'payment' | 'confirm' | 'submitted';
-
-function CheckoutContent() {
+export default function TierSelectionPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { user } = useStore();
-  const { cryptoWallets, getEnabledCryptoWallets } = useDepositSettingsStore();
+  const [currentTier, setCurrentTier] = useState(0);
+  const [pendingPurchase, setPendingPurchase] = useState<string | null>(null);
 
-  const tierCode = searchParams.get('tier') || '';
-  const tier = TIER_MAP[tierCode.toLowerCase()];
+  useEffect(() => {
+    async function loadTier() {
+      if (!user?.id || !isSupabaseConfigured()) return;
 
-  const [step, setStep] = useState<CheckoutStep>('review');
-  const [selectedWallet, setSelectedWallet] = useState<string>('');
-  const [txHash, setTxHash] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
+      // Get user's current tier from DB
+      const { data } = await supabase
+        .from('users')
+        .select('tier_level, tier_active')
+        .eq('id', user.id)
+        .maybeSingle();
 
-  const enabledWallets = getEnabledCryptoWallets?.() || cryptoWallets?.filter((w: any) => w.enabled) || [];
-
-  if (!tier) {
-    return (
-      <div className="max-w-lg mx-auto text-center py-20">
-        <AlertCircle className="w-12 h-12 text-loss mx-auto mb-4" />
-        <h2 className="text-xl font-bold text-cream mb-2">Invalid Tier</h2>
-        <p className="text-slate-400 mb-6">The tier &quot;{tierCode}&quot; was not found.</p>
-        <button
-          onClick={() => router.push('/dashboard/tier')}
-          className="px-6 py-2 bg-gold text-void rounded-xl font-semibold"
-        >
-          Back to Tiers
-        </button>
-      </div>
-    );
-  }
-
-  async function handleCopyAddress(address: string) {
-    try {
-      await navigator.clipboard.writeText(address);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* noop */
-    }
-  }
-
-  async function handleSubmit() {
-    if (!user?.id) return;
-
-    setIsSubmitting(true);
-    setError('');
-
-    try {
-      const walletObj = enabledWallets.find((w: any) => w.id === selectedWallet || w.symbol === selectedWallet);
-
-      const res = await fetch('/api/tier-purchases', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          tierCode: tier.code,
-          txHash: txHash || undefined,
-          amountPaid: tier.price,
-          currency: 'USD',
-          paymentAsset: walletObj?.symbol || walletObj?.name || 'crypto',
-          paymentNetwork: walletObj?.network || undefined,
-          addressShown: walletObj?.address || undefined,
-        }),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok || !data.success) {
-        setError(data.error || 'Failed to submit purchase');
-        return;
+      if (data) {
+        setCurrentTier(Number(data.tier_level ?? 0));
       }
 
-      setStep('submitted');
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Network error';
-      setError(message);
-    } finally {
-      setIsSubmitting(false);
+      // Check for pending purchase
+      const { data: pendingData } = await supabase
+        .from('tier_purchases')
+        .select('tier_code')
+        .eq('user_id', user.id)
+        .eq('status', 'pending')
+        .maybeSingle();
+
+      if (pendingData) {
+        setPendingPurchase(pendingData.tier_code);
+      }
     }
+
+    loadTier();
+  }, [user?.id]);
+
+  function handleBuyTier(tier: TierDef) {
+    router.push(`/dashboard/tier/checkout?tier=${tier.code}`);
   }
 
   return (
-    <div className="max-w-2xl mx-auto">
-      {/* Back button */}
-      <button
-        onClick={() => router.push('/dashboard/tier')}
-        className="flex items-center gap-2 text-slate-400 hover:text-cream mb-6 transition-colors"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        Back to Tiers
-      </button>
+    <div className="max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="text-center mb-10">
+        <h1 className="text-3xl font-display font-bold text-cream mb-2">
+          Choose Your Trading Tier
+        </h1>
+        <p className="text-slate-400 max-w-xl mx-auto">
+          Unlock powerful features and receive <span className="text-gold font-semibold">+40% bonus trading credit</span> with every tier purchase.
+        </p>
+      </div>
 
-      <h1 className="text-2xl font-display font-bold text-cream mb-6">
-        Purchase {tier.name} Tier
-      </h1>
-
-      {/* Submitted State */}
-      {step === 'submitted' ? (
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="bg-obsidian rounded-2xl border border-profit/30 p-8 text-center"
-        >
-          <CheckCircle className="w-16 h-16 text-profit mx-auto mb-4" />
-          <h2 className="text-2xl font-bold text-cream mb-2">Purchase Submitted!</h2>
-          <p className="text-slate-400 mb-4">
-            Your {tier.name} tier purchase is pending review. Once approved, you&apos;ll receive:
+      {/* Bonus Banner */}
+      <div className="mb-8 p-4 bg-gradient-to-r from-gold/10 to-amber-500/10 border border-gold/20 rounded-2xl flex items-center gap-3">
+        <Gift className="w-6 h-6 text-gold flex-shrink-0" />
+        <div>
+          <p className="text-cream font-medium">40% Bonus Credit on Every Tier</p>
+          <p className="text-sm text-slate-400">
+            Buy any tier and receive 40% of the price as bonus trading credit. e.g. $1,000 tier → $400 bonus!
           </p>
-          <div className="bg-gold/10 border border-gold/20 rounded-xl p-4 mb-6">
-            <p className="text-gold font-bold text-lg">+${tier.bonus.toLocaleString()} Trading Credit</p>
-            <p className="text-sm text-slate-400">40% bonus on ${tier.price.toLocaleString()} tier price</p>
-          </div>
-          <p className="text-sm text-slate-500 mb-6">
-            You&apos;ll be notified when your purchase is approved. This usually takes a few hours.
-          </p>
-          <button
-            onClick={() => router.push('/dashboard')}
-            className="px-8 py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl"
-          >
-            Return to Dashboard
-          </button>
-        </motion.div>
-      ) : (
-        <div className="space-y-6">
-          {/* Order Summary */}
-          <div className="bg-obsidian rounded-2xl border border-white/10 p-6">
-            <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
-              Order Summary
-            </h3>
-            <div className="space-y-3">
-              <div className="flex justify-between">
-                <span className="text-slate-300">{tier.name} Tier</span>
-                <span className="text-cream font-semibold">${tier.price.toLocaleString()}</span>
-              </div>
-              <div className="border-t border-white/5 pt-3 flex justify-between">
-                <span className="text-gold flex items-center gap-1">
-                  <Gift className="w-4 h-4" />
-                  Trading Credit Bonus (40%)
-                </span>
-                <span className="text-gold font-bold">+${tier.bonus.toLocaleString()}</span>
-              </div>
-              <div className="bg-white/5 rounded-xl p-3">
-                <p className="text-xs text-slate-400">Features unlocked:</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {tier.features.map((f, i) => (
-                    <span
-                      key={i}
-                      className="px-2 py-1 bg-white/5 rounded-lg text-xs text-cream"
-                    >
-                      {f}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+        </div>
+      </div>
 
-          {/* Payment Method Selection */}
-          {step === 'review' && (
-            <div className="bg-obsidian rounded-2xl border border-white/10 p-6">
-              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
-                Select Payment Method
-              </h3>
-              {enabledWallets.length > 0 ? (
-                <div className="space-y-2">
-                  {enabledWallets.map((w: any) => (
-                    <button
-                      key={w.id || w.symbol}
-                      onClick={() => {
-                        setSelectedWallet(w.id || w.symbol);
-                        setStep('payment');
-                      }}
-                      className={`w-full p-4 rounded-xl border transition-all flex items-center gap-3 ${
-                        selectedWallet === (w.id || w.symbol)
-                          ? 'border-gold/40 bg-gold/5'
-                          : 'border-white/10 hover:border-white/20'
-                      }`}
-                    >
-                      <Wallet className="w-5 h-5 text-gold" />
-                      <div className="text-left flex-1">
-                        <p className="text-cream font-medium">{w.name || w.symbol}</p>
-                        <p className="text-xs text-slate-500">{w.network || 'Crypto'}</p>
-                      </div>
-                      <CreditCard className="w-4 h-4 text-slate-500" />
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-slate-400 mb-2">Payment methods loading...</p>
-                  <p className="text-xs text-slate-500">Contact support if you need assistance.</p>
-                  <button
-                    onClick={() => setStep('payment')}
-                    className="mt-4 px-6 py-2 bg-white/10 text-cream rounded-xl"
-                  >
-                    Continue Anyway
-                  </button>
+      {/* Tier Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+        {TIERS.filter(t => t.level > 0).map((tier, i) => {
+          const isCurrentTier = currentTier >= tier.level;
+          const isPending = pendingPurchase === tier.code;
+          const isUpgrade = tier.level > currentTier;
+
+          return (
+            <motion.div
+              key={tier.code}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.1 }}
+              className={`relative bg-obsidian rounded-2xl border ${
+                tier.popular
+                  ? 'border-gold/40 shadow-lg shadow-gold/10'
+                  : 'border-white/10'
+              } p-6 flex flex-col`}
+            >
+              {/* Popular badge */}
+              {tier.popular && (
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2">
+                  <span className="px-4 py-1 bg-gold text-void text-xs font-bold rounded-full uppercase tracking-wide">
+                    Most Popular
+                  </span>
                 </div>
               )}
-            </div>
-          )}
 
-          {/* Payment Details */}
-          {step === 'payment' && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="bg-obsidian rounded-2xl border border-white/10 p-6"
-            >
-              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
-                Payment Instructions
-              </h3>
-
-              {(() => {
-                const wallet = enabledWallets.find(
-                  (w: any) => (w.id || w.symbol) === selectedWallet
-                );
-                if (wallet?.address) {
-                  return (
-                    <div className="space-y-4">
-                      <div className="bg-white/5 rounded-xl p-4">
-                        <p className="text-xs text-slate-500 mb-1">Send exactly</p>
-                        <p className="text-xl font-bold text-cream">
-                          ${tier.price.toLocaleString()} USD
-                        </p>
-                        <p className="text-xs text-slate-500 mt-1">
-                          in {wallet.name || wallet.symbol} ({wallet.network || 'default network'})
-                        </p>
-                      </div>
-
-                      <div className="bg-white/5 rounded-xl p-4">
-                        <p className="text-xs text-slate-500 mb-2">To this address:</p>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 text-sm text-gold break-all font-mono bg-void/50 p-2 rounded-lg">
-                            {wallet.address}
-                          </code>
-                          <button
-                            onClick={() => handleCopyAddress(wallet.address)}
-                            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
-                          >
-                            {copied ? (
-                              <CheckCircle className="w-4 h-4 text-profit" />
-                            ) : (
-                              <Copy className="w-4 h-4 text-slate-400" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-3">
-                        <p className="text-xs text-amber-400">
-                          ⚠️ Send only {wallet.symbol || wallet.name} on {wallet.network || 'the correct network'}. Sending wrong tokens may result in loss.
-                        </p>
-                      </div>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="bg-white/5 rounded-xl p-4 text-center">
-                    <p className="text-slate-400">
-                      Send <strong className="text-cream">${tier.price.toLocaleString()}</strong> to complete payment.
-                    </p>
-                    <p className="text-xs text-slate-500 mt-2">Contact support for payment details.</p>
-                  </div>
-                );
-              })()}
-
-              {/* TX Hash input */}
-              <div className="mt-6 space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">
-                    Transaction Hash (optional but recommended)
-                  </label>
-                  <input
-                    type="text"
-                    value={txHash}
-                    onChange={(e) => setTxHash(e.target.value)}
-                    placeholder="0x..."
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:border-gold/40 focus:outline-none font-mono text-sm"
-                  />
+              {/* Current tier badge */}
+              {isCurrentTier && (
+                <div className="absolute -top-3 right-4">
+                  <span className="px-3 py-1 bg-profit/20 text-profit text-xs font-bold rounded-full">
+                    ✓ Active
+                  </span>
                 </div>
+              )}
 
-                {error && (
-                  <div className="p-3 bg-loss/10 border border-loss/20 rounded-xl">
-                    <p className="text-sm text-loss flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4" />
-                      {error}
-                    </p>
-                  </div>
-                )}
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setStep('review')}
-                    className="px-6 py-3 bg-white/5 text-slate-300 rounded-xl hover:bg-white/10 transition-colors"
-                  >
-                    Back
-                  </button>
-                  <button
-                    onClick={handleSubmit}
-                    disabled={isSubmitting}
-                    className="flex-1 py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        Submitting...
-                      </>
-                    ) : (
-                      <>
-                        <Shield className="w-4 h-4" />
-                        I&apos;ve Paid — Submit for Review
-                      </>
-                    )}
-                  </button>
+              {/* Icon + Name */}
+              <div className="flex items-center gap-3 mb-4">
+                <div className={`w-12 h-12 rounded-xl ${tier.bgColor} flex items-center justify-center`}>
+                  <tier.icon className={`w-6 h-6 ${tier.color}`} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-cream">{tier.name}</h3>
+                  <p className="text-xs text-slate-500">{tier.description}</p>
                 </div>
               </div>
-            </motion.div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
-export default function TierCheckoutPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-[50vh] flex items-center justify-center">
-          <div className="animate-spin w-8 h-8 border-2 border-gold border-t-transparent rounded-full" />
-        </div>
-      }
-    >
-      <CheckoutContent />
-    </Suspense>
+              {/* Price */}
+              <div className="mb-4">
+                <span className="text-3xl font-display font-bold text-cream">
+                  ${tier.price.toLocaleString()}
+                </span>
+                <span className="text-sm text-slate-500 ml-1">one-time</span>
+                <div className="mt-1">
+                  <span className="text-sm text-gold font-medium">
+                    +${tier.bonus.toLocaleString()} bonus credit
+                  </span>
+                </div>
+              </div>
+
+              {/* Features */}
+              <ul className="space-y-2 mb-6 flex-1">
+                {tier.features.map((feature, fi) => (
+                  <li key={fi} className="flex items-start gap-2">
+                    <CheckCircle className="w-4 h-4 text-profit mt-0.5 flex-shrink-0" />
+                    <span className="text-sm text-slate-300">{feature}</span>
+                  </li>
+                ))}
+              </ul>
+
+              {/* CTA Button */}
+              {isPending ? (
+                <button
+                  disabled
+                  className="w-full py-3 rounded-xl bg-amber-500/20 text-amber-400 font-semibold text-sm cursor-not-allowed"
+                >
+                  ⏳ Pending Approval
+                </button>
+              ) : isCurrentTier ? (
+                <button
+                  disabled
+                  className="w-full py-3 rounded-xl bg-profit/20 text-profit font-semibold text-sm cursor-not-allowed"
+                >
+                  ✓ Current Plan
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleBuyTier(tier)}
+                  className={`w-full py-3 rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2 ${
+                    tier.popular
+                      ? 'bg-gradient-to-r from-gold to-gold/80 text-void hover:shadow-lg hover:shadow-gold/20'
+                      : 'bg-white/10 text-cream hover:bg-white/20'
+                  }`}
+                >
+                  {isUpgrade ? 'Upgrade' : 'Buy'} {tier.name}
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              )}
+            </motion.div>
+          );
+        })}
+      </div>
+
+      {/* Basic tier info */}
+      <div className="mt-8 p-4 bg-white/5 rounded-xl border border-white/5 text-center">
+        <p className="text-sm text-slate-400">
+          <Lock className="w-4 h-4 inline mr-1" />
+          Currently on <strong className="text-cream">Basic (Free)</strong> tier? You can view markets and paper trade. Upgrade to start live trading.
+        </p>
+      </div>
+    </div>
   );
 }
