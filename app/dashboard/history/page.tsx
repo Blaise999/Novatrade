@@ -1,167 +1,69 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Search, TrendingUp, TrendingDown } from 'lucide-react';
+import {
+  RefreshCw,
+  Search,
+  TrendingUp,
+  TrendingDown,
+  ArrowUpRight,
+  ArrowDownRight,
+  Filter,
+  Calendar,
+  Download,
+  Gift,
+  CreditCard,
+  Users,
+  Wallet,
+  History,
+} from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { useStore } from '@/lib/supabase/store-supabase';
 
-type FxStatus = 'active' | 'closed' | 'liquidated' | 'stopped_out' | 'take_profit';
-type StatusFilter = 'all' | 'open' | 'closed' | 'liquidated' | 'stopped' | 'tp';
+type ActivityKind = 'trade' | 'deposit' | 'withdrawal' | 'tier' | 'bonus' | 'referral' | 'all';
 
-type TradeRow = {
+type ActivityItem = {
   id: string;
-  asset?: string;
-  pair?: string;
-  symbol?: string;
-
-  asset_type?: string;
-  market_type?: string;
-
-  direction?: string;
-  type?: string;
-  direction_int?: number;
-
-  investment?: number;
-  amount?: number;
-
-  multiplier?: number;
-  leverage?: number;
-
-  entry_price?: number;
-  current_price?: number;
-  exit_price?: number;
-
-  stop_loss?: number | null;
-  take_profit?: number | null;
-
-  floating_pnl?: number;
-  pnl?: number;
-  profit_loss?: number;
-
-  status?: string;
-  opened_at?: string;
-  closed_at?: string | null;
-  updated_at?: string;
-  close_reason?: string | null;
-};
-
-type FxUiTrade = {
-  id: string;
-  pair: string;
-  side: 'buy' | 'sell';
-  investment: number;
-  multiplier: number;
-
-  entry: number;
-  current: number;
-  exit?: number;
-
+  kind: 'trade' | 'deposit' | 'withdrawal' | 'tier' | 'bonus' | 'referral';
+  label: string;
+  sublabel: string;
+  amount: number;
   pnl: number;
-  roi: number;
-
-  status: FxStatus;
-  openedAt?: string;
-  closedAt?: string;
-  reason?: string;
+  status: string;
+  created_at: string;
+  // Trade-specific fields
+  direction?: string;
+  entry_price?: number;
+  exit_price?: number;
+  multiplier?: number;
+  market_type?: string;
 };
-
-function clampNum(v: unknown, fallback = 0) {
-  const n = typeof v === 'number' ? v : Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function toDirInt(row: TradeRow): 1 | -1 {
-  const di = clampNum(row.direction_int, 0);
-  if (di === 1 || di === -1) return di as 1 | -1;
-  const s = String(row.direction ?? row.type ?? '').toLowerCase();
-  return s === 'buy' || s === 'long' || s === 'up' ? 1 : -1;
-}
-
-function toSide(di: 1 | -1): 'buy' | 'sell' {
-  return di === 1 ? 'buy' : 'sell';
-}
-
-function normFxStatus(s: unknown): FxStatus {
-  const v = String(s ?? '').toLowerCase();
-  if (v === 'open' || v === 'active' || v === 'pending') return 'active';
-  if (v === 'closed') return 'closed';
-  if (v === 'liquidated') return 'liquidated';
-  if (v === 'stopped_out' || v === 'stop_loss') return 'stopped_out';
-  if (v === 'take_profit') return 'take_profit';
-  return 'closed';
-}
-
-function isFxRow(r: TradeRow) {
-  const mt = String(r.market_type ?? '').toLowerCase();
-  const at = String(r.asset_type ?? '').toLowerCase();
-  return mt === 'fx' || at === 'forex' || at === 'fx';
-}
 
 function fmt(n: number, dp = 2) {
-  if (!Number.isFinite(n)) return '-';
+  if (!Number.isFinite(n)) return '0.00';
   return n.toFixed(dp);
 }
 
-function fmtPx(n: number) {
-  if (!Number.isFinite(n)) return '-';
-  return n.toFixed(n < 10 ? 5 : 2);
+function formatDate(dateStr: string) {
+  const date = new Date(dateStr);
+  return date.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
-function mapFx(row: TradeRow): FxUiTrade {
-  const pair = String(row.asset ?? row.pair ?? row.symbol ?? '').trim() || '—';
-  const di = toDirInt(row);
-  const side = toSide(di);
-
-  const investment = clampNum(row.investment ?? row.amount, 0);
-  const multiplier = clampNum(row.multiplier ?? row.leverage, 1);
-
-  const entry = clampNum(row.entry_price, 0);
-  const current = clampNum(row.current_price ?? row.entry_price, entry);
-  const exit = row.exit_price != null ? clampNum(row.exit_price, 0) : undefined;
-
-  // prefer DB pnl fields
-  const pnlDb =
-    row.profit_loss != null
-      ? clampNum(row.profit_loss, 0)
-      : row.pnl != null
-        ? clampNum(row.pnl, 0)
-        : row.floating_pnl != null
-          ? clampNum(row.floating_pnl, 0)
-          : 0;
-
-  const pnl =
-    pnlDb !== 0
-      ? pnlDb
-      : entry > 0
-        ? di * investment * multiplier * ((current - entry) / entry)
-        : 0;
-
-  const roi = investment > 0 ? (pnl / investment) * 100 : 0;
-
-  return {
-    id: row.id,
-    pair,
-    side,
-    investment,
-    multiplier,
-    entry,
-    current,
-    exit,
-    pnl,
-    roi,
-    status: normFxStatus(row.status),
-    openedAt: row.opened_at,
-    closedAt: row.closed_at ?? undefined,
-    reason: row.close_reason ?? undefined,
-  };
-}
-
-export default function FxHistorySimplePage() {
+export default function FullActivityHistoryPage() {
+  const { user } = useStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [rows, setRows] = useState<FxUiTrade[]>([]);
-  const [q, setQ] = useState('');
-  const [filter, setFilter] = useState<StatusFilter>('all');
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterKind, setFilterKind] = useState<ActivityKind>('all');
+  const [dateRange, setDateRange] = useState<'all' | '7d' | '30d' | '90d'>('all');
 
   const [page, setPage] = useState(1);
   const pageSize = 25;
@@ -171,257 +73,584 @@ export default function FxHistorySimplePage() {
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
 
-  const getToken = async () => {
-    if (!canUseSupabase) return null;
-    const { data, error } = await supabase.auth.getSession();
-    if (error) return null;
-    return data.session?.access_token ?? null;
-  };
+  const fetchAllActivity = useCallback(async () => {
+    if (!user?.id || !canUseSupabase) {
+      setError('Please sign in to view your activity history.');
+      setLoading(false);
+      return;
+    }
 
-  const fetchFxHistory = useCallback(async () => {
     setError(null);
     setLoading(true);
+
     try {
-      const token = await getToken();
-      if (!token) throw new Error('Please sign in to view your FX trades.');
+      const items: ActivityItem[] = [];
 
-      const res = await fetch('/api/trades?limit=500', {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
+      // Calculate date filter
+      let dateFilter: Date | null = null;
+      if (dateRange === '7d') {
+        dateFilter = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      } else if (dateRange === '30d') {
+        dateFilter = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      } else if (dateRange === '90d') {
+        dateFilter = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      }
+
+      // Fetch trades
+      let tradesQuery = supabase
+        .from('trades')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(200);
+
+      if (dateFilter) {
+        tradesQuery = tradesQuery.gte('created_at', dateFilter.toISOString());
+      }
+
+      const { data: trades } = await tradesQuery;
+
+      (trades || []).forEach((t: any) => {
+        const pnl = Number(t.profit_loss ?? t.pnl ?? t.floating_pnl ?? 0);
+        const direction = t.direction || t.type || 'Trade';
+        const marketType = t.market_type || t.asset_type || '';
+
+        items.push({
+          id: `trade-${t.id}`,
+          kind: 'trade',
+          label: t.symbol || t.pair || t.asset || 'Trade',
+          sublabel: `${direction.toUpperCase()} • ${marketType.toUpperCase() || 'SPOT'} • x${t.multiplier || t.leverage || 1}`,
+          amount: Number(t.amount ?? t.investment ?? 0),
+          pnl,
+          status: t.status || 'closed',
+          created_at: t.created_at || t.opened_at,
+          direction: direction,
+          entry_price: Number(t.entry_price || 0),
+          exit_price: Number(t.exit_price || 0),
+          multiplier: Number(t.multiplier || t.leverage || 1),
+          market_type: marketType,
+        });
       });
 
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.success) throw new Error(json?.error || `Failed (${res.status})`);
+      // Fetch deposits
+      let depositsQuery = supabase
+        .from('deposits')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(100);
 
-      const raw: TradeRow[] = Array.isArray(json.trades) ? json.trades : [];
-      const fx = raw.filter(isFxRow).map(mapFx);
+      if (dateFilter) {
+        depositsQuery = depositsQuery.gte('created_at', dateFilter.toISOString());
+      }
 
-      // newest first
-      fx.sort((a, b) => {
-        const at = Date.parse(a.openedAt || a.closedAt || '') || 0;
-        const bt = Date.parse(b.openedAt || b.closedAt || '') || 0;
-        return bt - at;
+      const { data: deposits } = await depositsQuery;
+
+      (deposits || []).forEach((d: any) => {
+        items.push({
+          id: `dep-${d.id}`,
+          kind: 'deposit',
+          label: 'Deposit',
+          sublabel: `${d.network || d.currency || d.method || 'Funds'} • ${d.status}`,
+          amount: Number(d.amount ?? 0),
+          pnl: Number(d.amount ?? 0),
+          status: d.status,
+          created_at: d.created_at,
+        });
       });
 
-      setRows(fx);
+      // Fetch withdrawals
+      let withdrawalsQuery = supabase
+        .from('withdrawals')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (dateFilter) {
+        withdrawalsQuery = withdrawalsQuery.gte('created_at', dateFilter.toISOString());
+      }
+
+      const { data: withdrawals } = await withdrawalsQuery;
+
+      (withdrawals || []).forEach((w: any) => {
+        items.push({
+          id: `wd-${w.id}`,
+          kind: 'withdrawal',
+          label: 'Withdrawal',
+          sublabel: `${w.method || w.network || 'Funds'} • ${w.status}`,
+          amount: Number(w.amount ?? 0),
+          pnl: -Number(w.amount ?? 0),
+          status: w.status,
+          created_at: w.created_at,
+        });
+      });
+
+      // Fetch tier purchases
+      let tierQuery = supabase
+        .from('tier_purchases')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (dateFilter) {
+        tierQuery = tierQuery.gte('created_at', dateFilter.toISOString());
+      }
+
+      const { data: tierPurchases } = await tierQuery;
+
+      const tierNames: Record<number, string> = {
+        1: 'Starter',
+        2: 'Trader',
+        3: 'Professional',
+        4: 'Elite',
+      };
+
+      (tierPurchases || []).forEach((tp: any) => {
+        items.push({
+          id: `tier-${tp.id}`,
+          kind: 'tier',
+          label: `${tierNames[tp.tier_level] || 'Tier'} Purchase`,
+          sublabel: `Tier ${tp.tier_level} • Bonus: $${Number(tp.bonus_amount ?? 0).toFixed(2)}`,
+          amount: Number(tp.price_amount ?? 0),
+          pnl: tp.status === 'approved' ? Number(tp.bonus_amount ?? 0) : 0,
+          status: tp.status,
+          created_at: tp.created_at,
+        });
+      });
+
+      // Fetch bonus transactions
+      let bonusQuery = supabase
+        .from('transactions')
+        .select('*')
+        .eq('user_id', user.id)
+        .in('type', ['tier_bonus', 'bonus', 'deposit', 'referral_bonus'])
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (dateFilter) {
+        bonusQuery = bonusQuery.gte('created_at', dateFilter.toISOString());
+      }
+
+      const { data: bonuses } = await bonusQuery;
+
+      (bonuses || []).forEach((b: any) => {
+        const typeLabel =
+          b.type === 'tier_bonus'
+            ? 'Tier Bonus'
+            : b.type === 'referral_bonus'
+              ? 'Referral Bonus'
+              : b.type === 'deposit'
+                ? 'Deposit Credit'
+                : 'Bonus';
+
+        items.push({
+          id: `tx-${b.id}`,
+          kind: 'bonus',
+          label: typeLabel,
+          sublabel: b.description || b.reference_type || 'Credit',
+          amount: Math.abs(Number(b.amount ?? 0)),
+          pnl: Number(b.amount ?? 0),
+          status: 'completed',
+          created_at: b.created_at,
+        });
+      });
+
+      // Fetch referrals
+      let referralsQuery = supabase
+        .from('referrals')
+        .select('*')
+        .eq('referrer_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (dateFilter) {
+        referralsQuery = referralsQuery.gte('created_at', dateFilter.toISOString());
+      }
+
+      const { data: referrals } = await referralsQuery;
+
+      (referrals || []).forEach((r: any) => {
+        items.push({
+          id: `ref-${r.id}`,
+          kind: 'referral',
+          label: 'Referral',
+          sublabel: r.reward_paid
+            ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}`
+            : 'Pending tier purchase',
+          amount: Number(r.reward_amount ?? 0),
+          pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
+          status: r.reward_paid ? 'completed' : 'pending',
+          created_at: r.created_at,
+        });
+      });
+
+      // Sort by date descending
+      items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      setActivities(items);
     } catch (e: any) {
-      setError(e?.message || 'Failed to load FX history');
+      setError(e?.message || 'Failed to load activity history');
     } finally {
       setLoading(false);
     }
-  }, [canUseSupabase]);
+  }, [user?.id, canUseSupabase, dateRange]);
 
   useEffect(() => {
     if (firstLoadRef.current) return;
     firstLoadRef.current = true;
-    fetchFxHistory();
-  }, [fetchFxHistory]);
-
-  const filtered = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    return rows.filter((t) => {
-      const matchQ = !query || t.pair.toLowerCase().includes(query);
-
-      const matchF =
-        filter === 'all'
-          ? true
-          : filter === 'open'
-            ? t.status === 'active'
-            : filter === 'closed'
-              ? t.status === 'closed'
-              : filter === 'liquidated'
-                ? t.status === 'liquidated'
-                : filter === 'stopped'
-                  ? t.status === 'stopped_out'
-                  : t.status === 'take_profit';
-
-      return matchQ && matchF;
-    });
-  }, [rows, q, filter]);
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    fetchAllActivity();
+  }, [fetchAllActivity]);
 
   useEffect(() => {
-    setPage(1);
-  }, [q, filter]);
+    if (firstLoadRef.current) {
+      fetchAllActivity();
+    }
+  }, [dateRange, fetchAllActivity]);
 
+  // Filtered activities
+  const filtered = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    return activities.filter((item) => {
+      // Kind filter
+      if (filterKind !== 'all' && item.kind !== filterKind) return false;
+
+      // Search filter
+      if (query) {
+        const matchLabel = item.label.toLowerCase().includes(query);
+        const matchSublabel = item.sublabel.toLowerCase().includes(query);
+        if (!matchLabel && !matchSublabel) return false;
+      }
+
+      return true;
+    });
+  }, [activities, filterKind, searchQuery]);
+
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageItems = useMemo(() => {
     const start = (page - 1) * pageSize;
     return filtered.slice(start, start + pageSize);
   }, [filtered, page, pageSize]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, filterKind, dateRange]);
+
+  // Stats
   const stats = useMemo(() => {
-    const open = rows.filter((r) => r.status === 'active').length;
-    const closed = rows.filter((r) => r.status !== 'active').length;
-    const pnl = rows.reduce((acc, r) => acc + clampNum(r.pnl, 0), 0);
-    return { total: rows.length, open, closed, pnl };
-  }, [rows]);
+    const trades = activities.filter((a) => a.kind === 'trade');
+    const deposits = activities.filter((a) => a.kind === 'deposit');
+    const withdrawals = activities.filter((a) => a.kind === 'withdrawal');
+
+    const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+    const totalDeposited = deposits
+      .filter((d) => d.status === 'approved' || d.status === 'completed')
+      .reduce((sum, d) => sum + d.amount, 0);
+    const totalWithdrawn = withdrawals
+      .filter((w) => w.status === 'approved' || w.status === 'completed')
+      .reduce((sum, w) => sum + w.amount, 0);
+
+    const winTrades = trades.filter((t) => t.pnl > 0).length;
+    const lossTrades = trades.filter((t) => t.pnl < 0).length;
+
+    return {
+      totalTrades: trades.length,
+      totalPnl,
+      totalDeposited,
+      totalWithdrawn,
+      winRate: trades.length > 0 ? ((winTrades / trades.length) * 100).toFixed(1) : '0',
+      winTrades,
+      lossTrades,
+    };
+  }, [activities]);
+
+  const getKindIcon = (kind: ActivityItem['kind']) => {
+    switch (kind) {
+      case 'trade':
+        return TrendingUp;
+      case 'deposit':
+        return ArrowUpRight;
+      case 'withdrawal':
+        return ArrowDownRight;
+      case 'tier':
+        return CreditCard;
+      case 'bonus':
+        return Gift;
+      case 'referral':
+        return Users;
+      default:
+        return History;
+    }
+  };
+
+  const getKindColor = (kind: ActivityItem['kind'], pnl: number) => {
+    switch (kind) {
+      case 'deposit':
+        return { bg: 'bg-electric/20', text: 'text-electric' };
+      case 'withdrawal':
+        return { bg: 'bg-orange-500/20', text: 'text-orange-400' };
+      case 'tier':
+        return { bg: 'bg-gold/20', text: 'text-gold' };
+      case 'bonus':
+        return { bg: 'bg-purple-500/20', text: 'text-purple-400' };
+      case 'referral':
+        return { bg: 'bg-cyan-500/20', text: 'text-cyan-400' };
+      case 'trade':
+      default:
+        return pnl >= 0
+          ? { bg: 'bg-profit/20', text: 'text-profit' }
+          : { bg: 'bg-loss/20', text: 'text-loss' };
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status.toLowerCase()) {
+      case 'approved':
+      case 'completed':
+      case 'won':
+      case 'closed':
+        return 'text-emerald-400';
+      case 'pending':
+      case 'active':
+      case 'open':
+        return 'text-yellow-400';
+      case 'rejected':
+      case 'lost':
+      case 'liquidated':
+        return 'text-rose-400';
+      default:
+        return 'text-white/50';
+    }
+  };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-4">
+    <div className="max-w-6xl mx-auto space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <div className="text-xl font-semibold text-white">FX History</div>
-          <div className="text-xs text-white/60">
-            Total: {loading ? '—' : stats.total} • Open: {loading ? '—' : stats.open} • Closed: {loading ? '—' : stats.closed}
-          </div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <History className="w-6 h-6 text-gold" />
+            Activity History
+          </h1>
+          <p className="text-sm text-white/60 mt-1">
+            Complete history of all your trades, deposits, withdrawals, and more
+          </p>
         </div>
 
         <button
           type="button"
-          onClick={fetchFxHistory}
+          onClick={() => fetchAllActivity()}
           disabled={loading}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-white/80 disabled:opacity-50"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-white/80 disabled:opacity-50 transition"
         >
           <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           Refresh
         </button>
       </div>
 
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-white/5 rounded-xl border border-white/10 p-4">
+          <p className="text-xs text-white/50 mb-1">Total Trades</p>
+          <p className="text-xl font-bold text-white">{stats.totalTrades}</p>
+          <p className="text-xs text-white/40 mt-1">
+            Win Rate: <span className="text-profit">{stats.winRate}%</span>
+          </p>
+        </div>
+
+        <div className="bg-white/5 rounded-xl border border-white/10 p-4">
+          <p className="text-xs text-white/50 mb-1">Total P/L</p>
+          <p className={`text-xl font-bold ${stats.totalPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {stats.totalPnl >= 0 ? '+' : ''}${fmt(stats.totalPnl)}
+          </p>
+          <p className="text-xs text-white/40 mt-1">
+            W: {stats.winTrades} / L: {stats.lossTrades}
+          </p>
+        </div>
+
+        <div className="bg-white/5 rounded-xl border border-white/10 p-4">
+          <p className="text-xs text-white/50 mb-1">Total Deposited</p>
+          <p className="text-xl font-bold text-electric">${fmt(stats.totalDeposited)}</p>
+        </div>
+
+        <div className="bg-white/5 rounded-xl border border-white/10 p-4">
+          <p className="text-xs text-white/50 mb-1">Total Withdrawn</p>
+          <p className="text-xl font-bold text-orange-400">${fmt(stats.totalWithdrawn)}</p>
+        </div>
+      </div>
+
       {/* Error */}
-      {error ? (
+      {error && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
           {error}
         </div>
-      ) : null}
+      )}
 
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
-        <div className="relative w-full sm:w-[320px]">
+      {/* Filters */}
+      <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+        {/* Search */}
+        <div className="relative w-full md:w-80">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40" />
           <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search pair…"
-            className="w-full pl-9 pr-3 py-2 rounded-xl bg-white/5 border border-white/10 outline-none text-sm text-white placeholder:text-white/40"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search activity..."
+            className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-white/5 border border-white/10 outline-none text-sm text-white placeholder:text-white/40 focus:border-white/20"
           />
         </div>
 
         <div className="flex flex-wrap gap-2">
-          {(['all', 'open', 'closed', 'liquidated', 'stopped', 'tp'] as StatusFilter[]).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={`px-3 py-2 rounded-xl border text-sm transition ${
-                filter === f ? 'bg-white/10 border-white/20 text-white' : 'bg-white/5 border-white/10 text-white/70 hover:bg-white/10'
-              }`}
-            >
-              {f === 'tp' ? 'TP' : f === 'stopped' ? 'SL' : f[0].toUpperCase() + f.slice(1)}
-            </button>
-          ))}
+          {/* Type Filter */}
+          <div className="flex gap-1 bg-white/5 rounded-xl p-1 border border-white/10">
+            {(['all', 'trade', 'deposit', 'withdrawal', 'tier', 'bonus', 'referral'] as ActivityKind[]).map(
+              (kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={() => setFilterKind(kind)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                    filterKind === kind
+                      ? 'bg-white/10 text-white'
+                      : 'text-white/50 hover:text-white/80'
+                  }`}
+                >
+                  {kind === 'all' ? 'All' : kind.charAt(0).toUpperCase() + kind.slice(1)}
+                </button>
+              )
+            )}
+          </div>
+
+          {/* Date Range */}
+          <div className="flex gap-1 bg-white/5 rounded-xl p-1 border border-white/10">
+            {(['all', '7d', '30d', '90d'] as const).map((range) => (
+              <button
+                key={range}
+                type="button"
+                onClick={() => setDateRange(range)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                  dateRange === range
+                    ? 'bg-white/10 text-white'
+                    : 'text-white/50 hover:text-white/80'
+                }`}
+              >
+                {range === 'all' ? 'All Time' : range.toUpperCase()}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Table */}
+      {/* Activity List */}
       <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead className="text-xs text-white/60">
-              <tr className="border-b border-white/10">
-                <th className="text-left px-4 py-3">Pair</th>
-                <th className="text-left px-4 py-3">Side</th>
-                <th className="text-right px-4 py-3">Invest</th>
-                <th className="text-right px-4 py-3">x</th>
-                <th className="text-right px-4 py-3">Entry</th>
-                <th className="text-right px-4 py-3">Exit</th>
-                <th className="text-right px-4 py-3">P/L</th>
-                <th className="text-left px-4 py-3">Status</th>
-              </tr>
-            </thead>
+        {loading ? (
+          <div className="px-4 py-12 text-center text-white/60">Loading activity...</div>
+        ) : pageItems.length === 0 ? (
+          <div className="px-4 py-12 text-center text-white/60">
+            {searchQuery || filterKind !== 'all'
+              ? 'No matching activity found.'
+              : 'No activity yet.'}
+          </div>
+        ) : (
+          <div className="divide-y divide-white/5">
+            {pageItems.map((item) => {
+              const Icon = getKindIcon(item.kind);
+              const colors = getKindColor(item.kind, item.pnl);
+              const isPositive =
+                item.kind === 'deposit' ||
+                item.kind === 'bonus' ||
+                item.kind === 'tier' ||
+                (item.kind === 'referral' && item.pnl > 0) ||
+                item.pnl >= 0;
 
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td className="px-4 py-6 text-white/60" colSpan={8}>
-                    Loading…
-                  </td>
-                </tr>
-              ) : pageItems.length === 0 ? (
-                <tr>
-                  <td className="px-4 py-6 text-white/60" colSpan={8}>
-                    No FX trades found.
-                  </td>
-                </tr>
-              ) : (
-                pageItems.map((t) => {
-                  const pos = t.pnl >= 0;
-                  const pnlCls = pos ? 'text-emerald-200' : 'text-rose-200';
-                  const sideIcon = t.side === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />;
-                  const sideCls =
-                    t.side === 'buy'
-                      ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-100'
-                      : 'bg-rose-500/15 border-rose-500/30 text-rose-100';
+              return (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between p-4 hover:bg-white/5 transition"
+                >
+                  <div className="flex items-center gap-4">
+                    {/* Icon */}
+                    <div
+                      className={`w-10 h-10 rounded-xl flex items-center justify-center ${colors.bg}`}
+                    >
+                      <Icon className={`w-5 h-5 ${colors.text}`} />
+                    </div>
 
-                  return (
-                    <tr key={t.id} className="border-b border-white/10">
-                      <td className="px-4 py-3 font-medium text-white">{t.pair}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs ${sideCls}`}>
-                          {sideIcon}
-                          {t.side.toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-white">${fmt(t.investment, 2)}</td>
-                      <td className="px-4 py-3 text-right text-white">x{fmt(t.multiplier, 0)}</td>
-                      <td className="px-4 py-3 text-right text-white font-mono">{t.entry ? fmtPx(t.entry) : '-'}</td>
-                      <td className="px-4 py-3 text-right text-white font-mono">
-                        {t.exit != null ? fmtPx(t.exit) : t.status === 'active' ? fmtPx(t.current) : '-'}
-                      </td>
-                      <td className={`px-4 py-3 text-right font-semibold ${pnlCls}`}>
-                        {t.pnl >= 0 ? '+' : ''}${fmt(t.pnl, 2)}
-                        <div className="text-[11px] font-normal text-white/50">
-                          {t.roi >= 0 ? '+' : ''}
-                          {fmt(t.roi, 2)}%
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-white/80">
-                        {t.status === 'active' ? 'Open' : t.status}
-                        {t.reason ? <span className="text-white/40"> • {t.reason}</span> : null}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                    {/* Info */}
+                    <div>
+                      <p className="font-medium text-white">{item.label}</p>
+                      <p className="text-xs text-white/50">{item.sublabel}</p>
+                      <p className="text-xs text-white/30 mt-0.5">{formatDate(item.created_at)}</p>
+                    </div>
+                  </div>
+
+                  {/* Amount & Status */}
+                  <div className="text-right">
+                    <p className={`font-semibold ${colors.text}`}>
+                      {item.kind === 'trade' ? (
+                        <>
+                          {item.pnl >= 0 ? '+' : ''}${fmt(item.pnl)}
+                        </>
+                      ) : item.kind === 'withdrawal' ? (
+                        <>-${fmt(item.amount)}</>
+                      ) : (
+                        <>+${fmt(item.amount)}</>
+                      )}
+                    </p>
+
+                    {item.kind === 'trade' && (
+                      <p className="text-xs text-white/40">${fmt(item.amount)} invested</p>
+                    )}
+
+                    <span
+                      className={`inline-block mt-1 px-2 py-0.5 rounded-lg text-[10px] font-medium ${getStatusColor(
+                        item.status
+                      )} bg-white/5`}
+                    >
+                      {item.status}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* Pagination */}
-        {!loading && filtered.length > pageSize ? (
-          <div className="px-4 py-3 flex items-center justify-between text-xs text-white/60">
+        {!loading && filtered.length > pageSize && (
+          <div className="px-4 py-3 flex items-center justify-between border-t border-white/5 text-xs text-white/60">
             <div>
-              Page {page} / {totalPages} • {filtered.length} result(s)
+              Page {page} / {totalPages} • {filtered.length} total
             </div>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50"
+                className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50 transition"
               >
-                Prev
+                Previous
               </button>
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50"
+                className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 disabled:opacity-50 transition"
               >
                 Next
               </button>
             </div>
           </div>
-        ) : null}
+        )}
       </div>
 
-      {!canUseSupabase ? (
+      {!canUseSupabase && (
         <div className="text-xs text-yellow-200/80">
-          Supabase client not configured — cannot fetch session token to call /api/trades.
+          Supabase client not configured — cannot fetch activity history.
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

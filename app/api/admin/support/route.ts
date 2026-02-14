@@ -1,34 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdmin, supabaseAdmin } from  '@/lib/requireAdmin';
+import { requireAdmin, supabaseAdmin } from '@/lib/requireAdmin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest, ctx: { params: { id: string } }) {
-  const admin = await requireAdmin(req);
+const allowed = new Set(['open', 'in_progress', 'waiting_user', 'resolved', 'closed']);
+
+export async function POST(request: NextRequest, ctx: { params: { id: string } }) {
+  const admin = await requireAdmin(request);
   if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const id = ctx.params.id;
+  const ticketId = ctx.params.id;
 
-  const { data: ticket, error: te } = await supabaseAdmin
-    .from('support_tickets')
-    .select(`
-      *,
-      users:users ( id, email, first_name, last_name )
-    `)
-    .eq('id', id)
-    .single();
+  try {
+    const body = await request.json().catch(() => ({}));
+    const status = String(body?.status ?? '').trim();
 
-  if (te || !ticket) return NextResponse.json({ error: 'Ticket not found' }, { status: 404 });
+    if (!allowed.has(status)) {
+      return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
+    }
 
-  const { data: messages, error: me } = await supabaseAdmin
-    .from('support_messages')
-    .select('id, ticket_id, sender_id, sender_type, message, attachments, read_at, created_at')
-    .eq('ticket_id', id)
-    .order('created_at', { ascending: true })
-    .limit(500);
+    const patch: any = {
+      status,
+      updated_at: new Date().toISOString(),
+    };
 
-  if (me) return NextResponse.json({ error: me.message }, { status: 500 });
+    if (status === 'closed' || status === 'resolved') {
+      patch.resolved_at = new Date().toISOString();
+    }
 
-  return NextResponse.json({ ticket, messages: messages ?? [] });
+    const { data: updated, error } = await supabaseAdmin
+      .from('support_tickets')
+      .update(patch)
+      .eq('id', ticketId)
+      .select('id,user_id,assigned_to,subject,category,priority,status,created_at,updated_at,resolved_at')
+      .single();
+
+    if (error) throw error;
+
+    return NextResponse.json({ ticket: updated });
+  } catch (e: any) {
+    console.error('[AdminSupport] status error:', e);
+    return NextResponse.json({ error: e?.message || 'Failed to update status' }, { status: 500 });
+  }
 }

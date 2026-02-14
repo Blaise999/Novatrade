@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
-import { cookies } from "next/headers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,37 +11,65 @@ const admin = createClient(
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
 
-// Replace this with however you get your logged-in user id
-async function requireUserId() {
-  // If you already have a server auth helper, use it.
-  // For now, expect your app sets a cookie or you use Supabase SSR auth.
-  const c = await cookies();
-  const uid = c.get("uid")?.value; // <-- adapt to your auth
-  if (!uid) return null;
-  return uid;
+// Authenticate using Bearer token
+async function requireUserId(request: NextRequest) {
+  const authHeader = request.headers.get("authorization");
+  if (!authHeader) return null;
+
+  try {
+    const token = authHeader.replace("Bearer ", "");
+    const { data, error } = await admin.auth.getUser(token);
+    if (error || !data?.user?.id) return null;
+    return data.user.id;
+  } catch {
+    return null;
+  }
 }
 
 function makeCode() {
   return crypto.randomBytes(6).toString("hex").toUpperCase(); // simple code like A1B2C3...
 }
 
-export async function GET() {
-  const userId = await requireUserId();
+export async function GET(request: NextRequest) {
+  const userId = await requireUserId(request);
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  // First check users table for referral_code
+  const { data: userData } = await admin
+    .from("users")
+    .select("referral_code")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (userData?.referral_code) {
+    return NextResponse.json({ code: userData.referral_code });
+  }
+
+  // Then check referral_codes table
   const { data: existing } = await admin
     .from("referral_codes")
     .select("code")
     .eq("user_id", userId)
     .maybeSingle();
 
-  if (existing?.code) return NextResponse.json({ code: existing.code });
+  if (existing?.code) {
+    // Sync to users table
+    await admin.from("users").update({ referral_code: existing.code }).eq("id", userId);
+    return NextResponse.json({ code: existing.code });
+  }
 
-  // create
+  // Create new code
   for (let i = 0; i < 5; i++) {
     const code = makeCode();
-    const { error } = await admin.from("referral_codes").insert({ user_id: userId, code });
-    if (!error) return NextResponse.json({ code });
+    
+    // Insert into referral_codes
+    const { error: insertError } = await admin.from("referral_codes").insert({ user_id: userId, code });
+    
+    if (!insertError) {
+      // Also update users table
+      await admin.from("users").update({ referral_code: code }).eq("id", userId);
+      return NextResponse.json({ code });
+    }
   }
 
   return NextResponse.json({ error: "Failed to create code" }, { status: 500 });
