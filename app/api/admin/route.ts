@@ -1,308 +1,132 @@
-// app/api/admin/deposits/route.ts
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import crypto from 'crypto';
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { autoRefreshToken: false, persistSession: false } }
+);
 
-const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
-
-function getToken(req: NextRequest) {
-  const h = req.headers.get('authorization') || req.headers.get('Authorization') || '';
-  const m = h.match(/^bearer\s+(.+)$/i);
-  if (m?.[1]) return m[1].trim();
-  return req.cookies.get('novatrade_admin_token')?.value || null;
+function hashToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-function sha256Hex(value: string) {
-  return crypto.createHash('sha256').update(value).digest('hex');
-}
+type GuardOk = { ok: true; adminId: string; role: string };
+type GuardFail = { ok: false; status: number; error: string };
 
-function isHex64(v: string) {
-  return /^[0-9a-f]{64}$/i.test(v);
-}
+async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail> {
+  const auth = req.headers.get("authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return { ok: false, status: 401, error: "Missing admin token" };
 
-/**
- * ✅ OPAQUE admin session auth
- * Expects: public.admin_sessions(token?, token_hash?, admin_id, expires_at, revoked_at)
- */
-async function requireAdmin(req: NextRequest) {
-  if (!SUPABASE_URL || !SERVICE_KEY) {
-    return { ok: false as const, status: 500, message: 'Server misconfigured (missing Supabase env)' };
-  }
+  const tokenHash = hashToken(token);
 
-  const token = getToken(req);
-  if (!token) return { ok: false as const, status: 401, message: 'Missing admin token' };
-
-  // We’ll try multiple lookup styles because projects often evolve:
-  // - raw token stored in token
-  // - raw token stored as token_hash
-  // - token_hash stored as sha256(raw)
-  // - client might already store hashed token (64-hex)
-  const tokenHash = sha256Hex(token);
-
-  let session:
-    | { admin_id: string; expires_at: string | null; revoked_at: string | null }
-    | null = null;
-
-  // 1) token column = token
-  {
-    const { data, error } = await supabaseAdmin
-      .from('admin_sessions')
-      .select('admin_id, expires_at, revoked_at')
-      .eq('token', token)
-      .maybeSingle();
-
-    if (!error && data?.admin_id) session = data as any;
-  }
-
-  // 2) token_hash column = token  (if token is already stored hashed in client)
-  if (!session) {
-    const { data, error } = await supabaseAdmin
-      .from('admin_sessions')
-      .select('admin_id, expires_at, revoked_at')
-      .eq('token_hash', token)
-      .maybeSingle();
-
-    if (!error && data?.admin_id) session = data as any;
-  }
-
-  // 3) token_hash column = sha256(token) (if DB stores sha256(raw))
-  if (!session) {
-    const { data, error } = await supabaseAdmin
-      .from('admin_sessions')
-      .select('admin_id, expires_at, revoked_at')
-      .eq('token_hash', tokenHash)
-      .maybeSingle();
-
-    if (!error && data?.admin_id) session = data as any;
-  }
-
-  // Optional: if token is hex64, also try sha256Hex(token) is already above.
-  // (kept as is; the 3 tries cover most real-world setups)
-
-  if (!session?.admin_id) {
-    return { ok: false as const, status: 401, message: 'Invalid token' };
-  }
-
-  if (session.revoked_at) {
-    return { ok: false as const, status: 401, message: 'Token revoked' };
-  }
-
-  if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
-    return { ok: false as const, status: 401, message: 'Token expired' };
-  }
-
-  // Role check (users table)
-  const { data: profile, error: profErr } = await supabaseAdmin
-    .from('users')
-    .select('id, role')
-    .eq('id', session.admin_id)
+  const { data: session, error } = await supabaseAdmin
+    .from("admin_sessions")
+    .select("admin_id, revoked_at, expires_at")
+    .eq("token_hash", tokenHash)
     .maybeSingle();
 
-  if (profErr || !profile?.id) {
-    return { ok: false as const, status: 401, message: 'Admin profile not found' };
+  if (error) return { ok: false, status: 500, error: error.message };
+  if (!session || session.revoked_at) return { ok: false, status: 401, error: "Invalid admin session" };
+
+  if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
+    return { ok: false, status: 401, error: "Session expired" };
   }
 
-  const role = String(profile.role || '').toLowerCase();
-  if (!['admin', 'super_admin', 'support'].includes(role)) {
-    return { ok: false as const, status: 403, message: 'Not allowed' };
+  const { data: adminUser, error: adminErr } = await supabaseAdmin
+    .from("users")
+    .select("id, role, is_active")
+    .eq("id", session.admin_id)
+    .maybeSingle();
+
+  if (adminErr) return { ok: false, status: 500, error: adminErr.message };
+  if (!adminUser) return { ok: false, status: 401, error: "Admin not found" };
+  if (adminUser.is_active === false) return { ok: false, status: 403, error: "Admin account disabled" };
+
+  const role = String(adminUser.role || "").toLowerCase();
+  if (role !== "admin" && role !== "super_admin") {
+    return { ok: false, status: 403, error: "Admin privileges required" };
   }
 
-  return { ok: true as const, adminId: session.admin_id };
+  // keep alive
+  void Promise.resolve(
+    supabaseAdmin
+      .from("admin_sessions")
+      .update({ last_activity_at: new Date().toISOString() })
+      .eq("token_hash", tokenHash)
+  ).catch(() => {});
+
+  return { ok: true, adminId: String(session.admin_id), role };
 }
 
-// ─────────────────────────────────────────────
-// GET /api/admin/deposits?status=pending
-// Allowed statuses (per your constraint):
-// pending, processing, completed, failed, cancelled, expired
-// ─────────────────────────────────────────────
-export async function GET(req: NextRequest) {
-  const gate = await requireAdmin(req);
-  if (!gate.ok) return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const guard = await requireAdminWrite(req);
+  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
 
-  const url = new URL(req.url);
-  const status = url.searchParams.get('status');
+  const { id: userId } = await ctx.params;
 
+  let body: any = {};
   try {
-    let query = supabaseAdmin
-      .from('deposits')
-      .select(
-        `
-          id,
-          user_id,
-          amount,
-          currency,
-          method,
-          method_name,
-          network,
-          transaction_ref,
-          tx_hash,
-          proof_url,
-          status,
-          admin_note,
-          rejection_reason,
-          processed_at,
-          created_at,
-          users:user_id (
-            id, email, first_name, last_name, tier_level, balance_available
-          )
-        `
-      )
-      .order('created_at', { ascending: false })
-      .limit(200);
+    body = await req.json();
+  } catch {}
 
-    if (status && status !== 'all') query = query.eq('status', status);
+  const type = String(body?.type || "spot"); // "spot" | "bonus"
+  const action = String(body?.action || "add"); // "add" | "subtract" | "set"
+  const note = String(body?.note || "").trim();
+  const amount = Number(body?.amount);
 
-    const { data, error } = await query;
-    if (error) throw error;
+  if (!userId) return NextResponse.json({ error: "Missing user id" }, { status: 400 });
+  if (!note) return NextResponse.json({ error: "Missing note" }, { status: 400 });
+  if (!Number.isFinite(amount) || amount <= 0) return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
 
-    return NextResponse.json({ success: true, deposits: data || [] });
-  } catch (err: any) {
-    console.error('[Admin Deposits GET]', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
-  }
-}
+  const field = type === "bonus" ? "balance_bonus" : "balance_available";
 
-// ─────────────────────────────────────────────
-// PATCH /api/admin/deposits
-// body: { depositId, action:'approve'|'reject', note?, rejectedReason? }
-// ─────────────────────────────────────────────
-export async function PATCH(req: NextRequest) {
-  const gate = await requireAdmin(req);
-  if (!gate.ok) return NextResponse.json({ success: false, error: gate.message }, { status: gate.status });
+  // Load current balances
+  const { data: user, error: uErr } = await supabaseAdmin
+    .from("users")
+    .select(`id,email,first_name,last_name,${field}`)
+    .eq("id", userId)
+    .maybeSingle();
 
-  try {
-    const body = await req.json().catch(() => ({}));
-    const { depositId, action, note, rejectedReason } = body;
+  if (uErr) return NextResponse.json({ error: uErr.message }, { status: 400 });
+  if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
-    if (!depositId || !['approve', 'reject'].includes(action)) {
-      return NextResponse.json(
-        { success: false, error: 'depositId and action (approve|reject) required' },
-        { status: 400 }
-      );
-    }
+  const current = Number((user as any)[field] ?? 0);
+  let next = current;
 
-    const { data: deposit, error: fetchErr } = await supabaseAdmin
-      .from('deposits')
-      .select('*')
-      .eq('id', depositId)
-      .single();
+  if (action === "add") next = current + amount;
+  else if (action === "subtract") next = Math.max(0, current - amount);
+  else if (action === "set") next = amount;
+  else return NextResponse.json({ error: "Invalid action" }, { status: 400 });
 
-    if (fetchErr || !deposit) {
-      return NextResponse.json({ success: false, error: 'Deposit not found' }, { status: 404 });
-    }
+  const { data: updated, error: upErr } = await supabaseAdmin
+    .from("users")
+    .update({ [field]: next })
+    .eq("id", userId)
+    .select("*")
+    .maybeSingle();
 
-    if (deposit.status !== 'pending' && deposit.status !== 'processing') {
-      return NextResponse.json(
-        { success: false, error: `Deposit already ${deposit.status}` },
-        { status: 400 }
-      );
-    }
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
 
-    const now = new Date().toISOString();
-    const userId = deposit.user_id;
-    const amount = Number(deposit.amount || 0);
+  // Optional audit insert (won’t crash if table not present)
+  void Promise.resolve(
+    supabaseAdmin.from("admin_audit_log").insert({
+      admin_id: guard.adminId,
+      target_user_id: userId,
+      action: "balance_adjustment",
+      meta: { type, action, amount, field, from: current, to: next, note },
+      created_at: new Date().toISOString(),
+    })
+  ).catch(() => {});
 
-    if (action === 'approve') {
-      // ✅ must be allowed by check constraint
-      const { error: upErr } = await supabaseAdmin
-        .from('deposits')
-        .update({
-          status: 'completed', // ✅ allowed
-          processed_by: gate.adminId,
-          processed_at: now,
-          admin_note: note || null,
-        })
-        .eq('id', depositId);
-
-      if (upErr) return NextResponse.json({ success: false, error: upErr.message }, { status: 500 });
-
-      // credit user
-      const { data: userRow, error: uErr } = await supabaseAdmin
-        .from('users')
-        .select('balance_available')
-        .eq('id', userId)
-        .single();
-
-      if (uErr) return NextResponse.json({ success: false, error: uErr.message }, { status: 500 });
-
-      const currentBalance = Number(userRow?.balance_available ?? 0);
-      const newBalance = currentBalance + amount;
-
-      const { error: balErr } = await supabaseAdmin
-        .from('users')
-        .update({ balance_available: newBalance })
-        .eq('id', userId);
-
-      if (balErr) return NextResponse.json({ success: false, error: balErr.message }, { status: 500 });
-
-      // logs (safe)
-      try {
-        await supabaseAdmin.from('transactions').insert({
-          user_id: userId,
-          type: 'deposit',
-          amount,
-          currency: deposit.currency || 'USD',
-          balance_before: currentBalance,
-          balance_after: newBalance,
-          status: 'completed',
-          reference_type: 'deposit_approval',
-          description: `Deposit approved: $${amount.toFixed(2)} via ${deposit.method_name || deposit.method || 'crypto'}`,
-          metadata: { deposit_id: depositId, approved_by: gate.adminId },
-        });
-      } catch {}
-
-      try {
-        await supabaseAdmin.from('notifications').insert({
-          user_id: userId,
-          type: 'deposit',
-          title: 'Deposit Completed!',
-          message: `Your $${amount.toFixed(2)} deposit has been completed and credited to your account.`,
-          data: { deposit_id: depositId, amount },
-        });
-      } catch {}
-
-      return NextResponse.json({
-        success: true,
-        message: `Deposit approved. $${amount.toFixed(2)} credited to user.`,
-        details: { newBalance, amount },
-      });
-    }
-
-    // ✅ REJECT must also use allowed status
-    const { error: rejErr } = await supabaseAdmin
-      .from('deposits')
-      .update({
-        status: 'failed', // ✅ allowed (use this as “rejected by admin”)
-        processed_by: gate.adminId,
-        processed_at: now,
-        rejection_reason: rejectedReason || 'Rejected by admin',
-        admin_note: note || null,
-      })
-      .eq('id', depositId);
-
-    if (rejErr) return NextResponse.json({ success: false, error: rejErr.message }, { status: 500 });
-
-    try {
-      await supabaseAdmin.from('notifications').insert({
-        user_id: userId,
-        type: 'alert',
-        title: 'Deposit Rejected',
-        message: `Your $${amount.toFixed(2)} deposit was rejected. ${rejectedReason || 'Contact support for details.'}`,
-        data: { deposit_id: depositId, reason: rejectedReason },
-      });
-    } catch {}
-
-    return NextResponse.json({ success: true, message: 'Deposit rejected.' });
-  } catch (err: any) {
-    console.error('[Admin Deposits PATCH]', err);
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
-  }
+  return NextResponse.json({
+    ok: true,
+    user: updated,
+    adjustment: { type, action, amount, field, from: current, to: next, note },
+  });
 }

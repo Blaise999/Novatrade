@@ -4,99 +4,62 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
-  Trophy,
-  Clock,
-  Users,
-  DollarSign,
-  TrendingUp,
-  Medal,
-  ArrowRight,
-  Calendar,
+  Star,
+  Gift,
   Target,
+  CheckCircle,
+  Clock,
+  Flame,
+  Trophy,
   Zap,
-  Crown,
-  Star
+  ArrowRight,
+  Lock,
+  Coins,
+  Calendar,
+  TrendingUp
 } from 'lucide-react';
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
 
-const activeCompetitions = [
-  {
-    id: 'weekly-forex',
-    name: 'Weekly Forex Championship',
-    description: 'Compete in forex trading for the highest ROI',
-    prizePool: 25000,
-    participants: 1847,
-    maxParticipants: 5000,
-    startDate: 'Jan 20, 2025',
-    endDate: 'Jan 27, 2025',
-    status: 'active',
-    timeLeft: '4 days 12:34:56',
-    entryFee: 0,
-    asset: 'Forex',
-    color: 'from-profit to-emerald-600',
-  },
-  {
-    id: 'crypto-kings',
-    name: 'Crypto Kings Tournament',
-    description: 'Battle for crypto trading supremacy',
-    prizePool: 50000,
-    participants: 3241,
-    maxParticipants: 10000,
-    startDate: 'Jan 15, 2025',
-    endDate: 'Feb 15, 2025',
-    status: 'active',
-    timeLeft: '23 days 08:12:33',
-    entryFee: 50,
-    asset: 'Crypto',
-    color: 'from-gold to-yellow-600',
-  },
-  {
-    id: 'newbie-challenge',
-    name: 'Newbie Trading Challenge',
-    description: 'Exclusive competition for new traders',
-    prizePool: 10000,
-    participants: 892,
-    maxParticipants: 2000,
-    startDate: 'Jan 22, 2025',
-    endDate: 'Jan 29, 2025',
-    status: 'upcoming',
-    timeLeft: 'Starts in 2 days',
-    entryFee: 0,
-    asset: 'All',
-    color: 'from-electric to-blue-600',
-  },
+const dailyTasks = [
+  { id: 1, name: 'Login to platform', reward: 10, completed: false, icon: Star },
+  { id: 2, name: 'Make 1 trade', reward: 25, completed: false, icon: TrendingUp },
+  { id: 3, name: 'Check market news', reward: 5, completed: false, icon: Target },
+  { id: 4, name: 'Share on social media', reward: 15, completed: false, icon: Zap },
+  { id: 5, name: 'Complete KYC verification', reward: 100, completed: false, icon: CheckCircle, oneTime: true },
 ];
 
-const upcomingCompetitions = [
-  { name: 'February Mega Tournament', date: 'Feb 1-28', prize: '$100,000', asset: 'All Markets' },
-  { name: 'Stock Trading Sprint', date: 'Feb 10-17', prize: '$30,000', asset: 'Stocks' },
-  { name: 'VIP Exclusive Cup', date: 'Feb 15-22', prize: '$75,000', asset: 'Crypto' },
+const achievements = [
+  { name: 'First Trade', description: 'Complete your first trade', reward: 50, progress: 0, target: 1, icon: '🎯' },
+  { name: 'Trader 10', description: 'Complete 10 trades', reward: 100, progress: 0, target: 10, icon: '📈' },
+  { name: 'Trader 100', description: 'Complete 100 trades', reward: 500, progress: 0, target: 100, icon: '🚀' },
+  { name: 'Big Spender', description: 'Deposit $1,000+', reward: 200, progress: 0, target: 1000, icon: '💰' },
+  { name: 'Whale', description: 'Deposit $10,000+', reward: 1000, progress: 0, target: 10000, icon: '🐋' },
+  { name: 'Social Butterfly', description: 'Refer 5 friends', reward: 250, progress: 0, target: 5, icon: '🦋' },
+  { name: 'Streak Master', description: '7-day login streak', reward: 150, progress: 0, target: 7, icon: '🔥' },
+  { name: 'Copy Cat', description: 'Copy 3 traders', reward: 75, progress: 0, target: 3, icon: '🐱' },
 ];
 
-const leaderboard = [
-  { rank: 1, name: 'CryptoKing_23', roi: '+847%', trades: 234, prize: '$10,000', avatar: '👑' },
-  { rank: 2, name: 'TradeM***er', roi: '+623%', trades: 189, prize: '$5,000', avatar: '🥈' },
-  { rank: 3, name: 'Inve***Pro', roi: '+512%', trades: 156, prize: '$2,500', avatar: '🥉' },
-  { rank: 4, name: 'Bit***Whale', roi: '+428%', trades: 201, prize: '$1,500', avatar: '4️⃣' },
-  { rank: 5, name: 'Nova***ader', roi: '+356%', trades: 178, prize: '$1,000', avatar: '5️⃣' },
-  { rank: 6, name: 'Forex***ter', roi: '+298%', trades: 145, prize: '$750', avatar: '6️⃣' },
-  { rank: 7, name: 'Day***der', roi: '+267%', trades: 167, prize: '$500', avatar: '7️⃣' },
-  { rank: 8, name: 'Swing***er', roi: '+234%', trades: 89, prize: '$400', avatar: '8️⃣' },
-  { rank: 9, name: 'Scal***Pro', roi: '+212%', trades: 312, prize: '$300', avatar: '9️⃣' },
-  { rank: 10, name: 'Trend***er', roi: '+198%', trades: 134, prize: '$200', avatar: '🔟' },
+const streakRewards = [
+  { day: 1, reward: 10, icon: '🌱' },
+  { day: 3, reward: 30, icon: '🌿' },
+  { day: 7, reward: 100, icon: '🌳' },
+  { day: 14, reward: 250, icon: '🌲' },
+  { day: 30, reward: 750, icon: '🏆' },
 ];
 
-const prizeBreakdown = [
-  { position: '1st Place', percentage: 40, color: 'text-gold' },
-  { position: '2nd Place', percentage: 20, color: 'text-slate-300' },
-  { position: '3rd Place', percentage: 10, color: 'text-orange-400' },
-  { position: '4th-10th', percentage: 15, color: 'text-cream' },
-  { position: '11th-50th', percentage: 10, color: 'text-cream/70' },
-  { position: '51st-100th', percentage: 5, color: 'text-cream/50' },
+const vipLevels = [
+  { level: 'Bronze', points: 0, perks: ['5% bonus on deposits', 'Basic support'], color: 'from-orange-600 to-orange-700' },
+  { level: 'Silver', points: 1000, perks: ['10% bonus on deposits', 'Priority support', 'Reduced fees'], color: 'from-slate-400 to-slate-500' },
+  { level: 'Gold', points: 5000, perks: ['15% bonus on deposits', '24/7 support', 'Free withdrawals'], color: 'from-gold to-yellow-600' },
+  { level: 'Platinum', points: 15000, perks: ['20% bonus', 'Personal manager', 'VIP events'], color: 'from-cyan-400 to-cyan-500' },
+  { level: 'Diamond', points: 50000, perks: ['25% bonus', 'Exclusive bots', 'Zero fees'], color: 'from-purple-500 to-pink-500' },
 ];
 
-export default function CompetitionsPage() {
+export default function RewardsPage() {
+  const [currentStreak] = useState(0);
+  const [totalPoints] = useState(0);
+
   return (
     <div className="min-h-screen bg-void">
       <Navigation />
@@ -106,215 +69,197 @@ export default function CompetitionsPage() {
           {/* Header */}
           <div className="text-center mb-16">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-gold/10 border border-gold/20 rounded-full mb-6">
-              <Trophy className="w-4 h-4 text-gold" />
-              <span className="text-gold text-sm font-medium">Trading Competitions</span>
+              <Star className="w-4 h-4 text-gold" />
+              <span className="text-gold text-sm font-medium">Rewards Center</span>
             </div>
             
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-display font-bold text-cream mb-6">
-              Compete & Win
+              Earn Rewards
               <br />
-              <span className="gradient-text-gold">Massive Prizes</span>
+              <span className="gradient-text-gold">Every Day</span>
             </h1>
             <p className="text-lg text-cream/60 max-w-2xl mx-auto">
-              Test your trading skills against the best traders on the platform. 
-              Compete for glory and win from massive prize pools!
+              Complete tasks, achieve milestones, and maintain streaks to earn NOVA points. 
+              Redeem for trading bonuses, fee discounts, and exclusive perks.
             </p>
           </div>
 
-          {/* Stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
-            {[
-              { label: 'Total Prize Pool', value: '$185,000', icon: DollarSign },
-              { label: 'Active Competitions', value: '3', icon: Trophy },
-              { label: 'Total Participants', value: '5,980+', icon: Users },
-              { label: 'Prizes Awarded', value: '$2.5M+', icon: Medal },
-            ].map((stat, index) => (
-              <motion.div
-                key={index}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
-                className="p-4 bg-white/5 rounded-xl border border-white/10 text-center"
-              >
-                <stat.icon className="w-6 h-6 text-gold mx-auto mb-2" />
-                <p className="text-2xl font-bold text-cream">{stat.value}</p>
-                <p className="text-sm text-cream/50">{stat.label}</p>
-              </motion.div>
-            ))}
+          {/* Points Overview */}
+          <div className="grid md:grid-cols-3 gap-4 mb-12">
+            <div className="p-6 bg-gradient-to-br from-gold/10 to-transparent rounded-2xl border border-gold/20">
+              <div className="flex items-center gap-3 mb-2">
+                <Coins className="w-6 h-6 text-gold" />
+                <span className="text-cream/50">Total Points</span>
+              </div>
+              <p className="text-4xl font-bold text-gold">{totalPoints.toLocaleString()}</p>
+              <p className="text-sm text-cream/50 mt-1">NOVA Points</p>
+            </div>
+            <div className="p-6 bg-gradient-to-br from-loss/10 to-transparent rounded-2xl border border-loss/20">
+              <div className="flex items-center gap-3 mb-2">
+                <Flame className="w-6 h-6 text-loss" />
+                <span className="text-cream/50">Current Streak</span>
+              </div>
+              <p className="text-4xl font-bold text-loss">{currentStreak} Days</p>
+              <p className="text-sm text-cream/50 mt-1">Keep it going!</p>
+            </div>
+            <div className="p-6 bg-gradient-to-br from-electric/10 to-transparent rounded-2xl border border-electric/20">
+              <div className="flex items-center gap-3 mb-2">
+                <Trophy className="w-6 h-6 text-electric" />
+                <span className="text-cream/50">VIP Level</span>
+              </div>
+              <p className="text-4xl font-bold text-electric">Bronze</p>
+              <p className="text-sm text-cream/50 mt-1">1,000 pts to Silver</p>
+            </div>
           </div>
 
-          {/* Active Competitions */}
-          <div className="mb-16">
-            <h2 className="text-2xl font-bold text-cream mb-6">Active & Upcoming</h2>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {activeCompetitions.map((comp, index) => (
-                <motion.div
-                  key={comp.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.1 }}
-                  className={`relative p-6 rounded-2xl border ${
-                    comp.status === 'active'
-                      ? 'bg-gradient-to-b from-profit/10 to-transparent border-profit/20'
-                      : 'bg-white/5 border-white/10'
-                  }`}
-                >
-                  {comp.status === 'active' && (
-                    <div className="absolute -top-3 right-4 px-3 py-1 bg-profit text-void text-xs font-bold rounded-full flex items-center gap-1">
-                      <span className="w-2 h-2 bg-void rounded-full animate-pulse" />
-                      LIVE
-                    </div>
-                  )}
+          <div className="grid lg:grid-cols-2 gap-8 mb-12">
+            {/* Daily Tasks */}
+            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <Calendar className="w-6 h-6 text-gold" />
+                  <h2 className="text-xl font-bold text-cream">Daily Tasks</h2>
+                </div>
+                <span className="text-sm text-cream/50">Resets in 18:32:45</span>
+              </div>
 
-                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${comp.color} flex items-center justify-center mb-4`}>
-                    <Trophy className="w-6 h-6 text-white" />
-                  </div>
-
-                  <h3 className="text-xl font-bold text-cream mb-2">{comp.name}</h3>
-                  <p className="text-sm text-cream/60 mb-4">{comp.description}</p>
-
-                  <div className="space-y-3 mb-6">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-cream/50 flex items-center gap-2">
-                        <DollarSign className="w-4 h-4" />
-                        Prize Pool
-                      </span>
-                      <span className="text-gold font-bold">${comp.prizePool.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-cream/50 flex items-center gap-2">
-                        <Users className="w-4 h-4" />
-                        Participants
-                      </span>
-                      <span className="text-cream">{comp.participants.toLocaleString()} / {comp.maxParticipants.toLocaleString()}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-cream/50 flex items-center gap-2">
-                        <Clock className="w-4 h-4" />
-                        {comp.status === 'active' ? 'Time Left' : 'Starts'}
-                      </span>
-                      <span className={comp.status === 'active' ? 'text-loss' : 'text-electric'}>{comp.timeLeft}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-cream/50 flex items-center gap-2">
-                        <Target className="w-4 h-4" />
-                        Entry Fee
-                      </span>
-                      <span className="text-cream">{comp.entryFee === 0 ? 'FREE' : `$${comp.entryFee}`}</span>
-                    </div>
-                  </div>
-
-                  {/* Progress Bar */}
-                  <div className="mb-4">
-                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-gold to-profit"
-                        style={{ width: `${(comp.participants / comp.maxParticipants) * 100}%` }}
-                      />
-                    </div>
-                    <p className="text-xs text-cream/50 mt-1">
-                      {Math.round((comp.participants / comp.maxParticipants) * 100)}% filled
-                    </p>
-                  </div>
-
-                  <Link
-                    href="/auth/signup"
-                    className={`w-full flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition-all ${
-                      comp.status === 'active'
-                        ? 'bg-profit text-void hover:bg-profit/90'
-                        : 'bg-white/10 text-cream hover:bg-white/20'
+              <div className="space-y-3">
+                {dailyTasks.map((task) => (
+                  <div
+                    key={task.id}
+                    className={`flex items-center gap-4 p-3 rounded-xl border transition-all ${
+                      task.completed
+                        ? 'bg-profit/10 border-profit/20'
+                        : 'bg-white/5 border-white/10 hover:border-white/20'
                     }`}
                   >
-                    {comp.status === 'active' ? 'Join Now' : 'Register'}
-                    <ArrowRight className="w-4 h-4" />
-                  </Link>
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                      task.completed ? 'bg-profit/20' : 'bg-white/10'
+                    }`}>
+                      {task.completed ? (
+                        <CheckCircle className="w-5 h-5 text-profit" />
+                      ) : (
+                        <task.icon className="w-5 h-5 text-cream/50" />
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className={`font-medium ${task.completed ? 'text-cream/50 line-through' : 'text-cream'}`}>
+                        {task.name}
+                      </p>
+                      {task.oneTime && <span className="text-xs text-gold">One-time reward</span>}
+                    </div>
+                    <span className={`font-bold ${task.completed ? 'text-profit' : 'text-gold'}`}>
+                      +{task.reward} pts
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Streak Rewards */}
+            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
+              <div className="flex items-center gap-3 mb-6">
+                <Flame className="w-6 h-6 text-loss" />
+                <h2 className="text-xl font-bold text-cream">Streak Rewards</h2>
+              </div>
+
+              <div className="space-y-3">
+                {streakRewards.map((streak) => {
+                  const achieved = currentStreak >= streak.day;
+                  return (
+                    <div
+                      key={streak.day}
+                      className={`flex items-center gap-4 p-3 rounded-xl border ${
+                        achieved
+                          ? 'bg-profit/10 border-profit/20'
+                          : 'bg-white/5 border-white/10'
+                      }`}
+                    >
+                      <span className="text-2xl">{streak.icon}</span>
+                      <div className="flex-1">
+                        <p className="text-cream font-medium">Day {streak.day}</p>
+                        <p className="text-sm text-cream/50">
+                          {achieved ? 'Claimed!' : `${streak.day - currentStreak} days to go`}
+                        </p>
+                      </div>
+                      <span className={`font-bold ${achieved ? 'text-profit' : 'text-gold'}`}>
+                        +{streak.reward} pts
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Achievements */}
+          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 mb-12">
+            <div className="flex items-center gap-3 mb-6">
+              <Trophy className="w-6 h-6 text-gold" />
+              <h2 className="text-xl font-bold text-cream">Achievements</h2>
+            </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {achievements.map((achievement, index) => (
+                <motion.div
+                  key={achievement.name}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.05 }}
+                  className="p-4 bg-white/5 rounded-xl border border-white/10"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="text-3xl">{achievement.icon}</span>
+                    <span className="text-gold font-bold">+{achievement.reward}</span>
+                  </div>
+                  <h3 className="text-cream font-medium mb-1">{achievement.name}</h3>
+                  <p className="text-xs text-cream/50 mb-3">{achievement.description}</p>
+                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gold"
+                      style={{ width: `${(achievement.progress / achievement.target) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-cream/50 mt-1">
+                    {achievement.progress}/{achievement.target}
+                  </p>
                 </motion.div>
               ))}
             </div>
           </div>
 
-          {/* Leaderboard */}
+          {/* VIP Levels */}
           <div className="bg-white/5 rounded-2xl border border-white/10 p-6 mb-12">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-3">
-                <Crown className="w-6 h-6 text-gold" />
-                <h2 className="text-xl font-bold text-cream">Current Leaderboard</h2>
-              </div>
-              <span className="text-sm text-cream/50">Weekly Forex Championship</span>
+            <div className="flex items-center gap-3 mb-6">
+              <Star className="w-6 h-6 text-gold" />
+              <h2 className="text-xl font-bold text-cream">VIP Levels</h2>
             </div>
 
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-white/10">
-                    <th className="text-left p-3 text-cream/50 font-medium">Rank</th>
-                    <th className="text-left p-3 text-cream/50 font-medium">Trader</th>
-                    <th className="text-right p-3 text-cream/50 font-medium">ROI</th>
-                    <th className="text-right p-3 text-cream/50 font-medium">Trades</th>
-                    <th className="text-right p-3 text-cream/50 font-medium">Prize</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leaderboard.map((user) => (
-                    <tr key={user.rank} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                      <td className="p-3">
-                        <span className="text-2xl">{user.avatar}</span>
-                      </td>
-                      <td className="p-3">
-                        <span className="text-cream font-medium">{user.name}</span>
-                      </td>
-                      <td className="p-3 text-right text-profit font-bold">{user.roi}</td>
-                      <td className="p-3 text-right text-cream">{user.trades}</td>
-                      <td className="p-3 text-right text-gold font-bold">{user.prize}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Prize Breakdown */}
-          <div className="grid md:grid-cols-2 gap-8 mb-16">
-            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
-              <div className="flex items-center gap-3 mb-6">
-                <Medal className="w-6 h-6 text-gold" />
-                <h2 className="text-xl font-bold text-cream">Prize Distribution</h2>
-              </div>
-              <div className="space-y-3">
-                {prizeBreakdown.map((item, index) => (
-                  <div key={index} className="flex items-center gap-4">
-                    <span className={`w-24 text-sm font-medium ${item.color}`}>{item.position}</span>
-                    <div className="flex-1 h-3 bg-white/10 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-gold to-profit"
-                        style={{ width: `${item.percentage}%` }}
-                      />
-                    </div>
-                    <span className="text-cream font-bold w-12 text-right">{item.percentage}%</span>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              {vipLevels.map((vip, index) => (
+                <div
+                  key={vip.level}
+                  className={`p-4 rounded-xl border ${
+                    index === 0
+                      ? 'bg-gradient-to-b from-orange-500/10 to-transparent border-orange-500/20'
+                      : 'bg-white/5 border-white/10'
+                  }`}
+                >
+                  <div className={`w-10 h-10 rounded-lg bg-gradient-to-br ${vip.color} flex items-center justify-center mb-3`}>
+                    <Star className="w-5 h-5 text-white" />
                   </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="bg-white/5 rounded-2xl border border-white/10 p-6">
-              <div className="flex items-center gap-3 mb-6">
-                <Calendar className="w-6 h-6 text-electric" />
-                <h2 className="text-xl font-bold text-cream">Coming Soon</h2>
-              </div>
-              <div className="space-y-3">
-                {upcomingCompetitions.map((comp, index) => (
-                  <div key={index} className="p-4 bg-white/5 rounded-xl border border-white/10">
-                    <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-cream font-medium">{comp.name}</h3>
-                      <span className="text-gold font-bold">{comp.prize}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-sm text-cream/50">
-                      <span>{comp.date}</span>
-                      <span>{comp.asset}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  <h3 className="text-cream font-bold mb-1">{vip.level}</h3>
+                  <p className="text-sm text-cream/50 mb-3">{vip.points.toLocaleString()} pts</p>
+                  <ul className="space-y-1">
+                    {vip.perks.map((perk, i) => (
+                      <li key={i} className="text-xs text-cream/60 flex items-center gap-1">
+                        <CheckCircle className="w-3 h-3 text-profit" />
+                        {perk}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -324,8 +269,8 @@ export default function CompetitionsPage() {
               href="/auth/signup"
               className="inline-flex items-center gap-2 px-8 py-4 bg-gold text-void font-bold rounded-xl hover:bg-gold/90 transition-all"
             >
-              <Trophy className="w-5 h-5" />
-              Join Competition Now
+              Start Earning Rewards
+              <ArrowRight className="w-5 h-5" />
             </Link>
           </div>
         </div>

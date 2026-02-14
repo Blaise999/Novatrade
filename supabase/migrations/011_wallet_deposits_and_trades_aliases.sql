@@ -52,6 +52,10 @@ ALTER TABLE public.trades ADD COLUMN IF NOT EXISTS symbol TEXT;
 -- direction (alias for type — some code writes type, admin reads direction)
 ALTER TABLE public.trades ADD COLUMN IF NOT EXISTS direction TEXT;
 
+-- Sync type<->direction where one is NULL
+UPDATE public.trades SET type = direction WHERE type IS NULL AND direction IS NOT NULL;
+UPDATE public.trades SET direction = type WHERE direction IS NULL AND type IS NOT NULL;
+
 -- profit_loss (alias for pnl — some code writes pnl, admin reads profit_loss)
 ALTER TABLE public.trades ADD COLUMN IF NOT EXISTS profit_loss DECIMAL(15,2);
 

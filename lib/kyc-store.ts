@@ -1,85 +1,95 @@
-/**
- * KYC STORE — standalone file
- * KYC form state and submission
- */
-import { create } from 'zustand';
+'use client';
 
-export interface KycFormData {
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+
+export type KYCStep = 1 | 2 | 3 | 4 | 5;
+
+export type KYCData = {
   firstName?: string;
   lastName?: string;
   dateOfBirth?: string;
-
-  country?: string;
   nationality?: string;
 
+  address?: string;
   city?: string;
   state?: string;
-
-  address?: string;
-  addressLine1?: string;
-  addressLine2?: string;
-
   postalCode?: string;
+  country?: string;
 
-  idType?: 'passport' | 'drivers_license' | 'national_id' | 'other';
+  idType?: 'passport' | 'drivers_license' | 'national_id';
   idNumber?: string;
 
-  documentType?: 'passport' | 'drivers_license' | 'national_id' | 'other';
-  documentNumber?: string;
-
-  documentFrontUrl?: string;
-  documentBackUrl?: string;
-  selfieUrl?: string;
-
   [key: string]: any;
-}
+};
 
-interface KYCStore {
-  step: number;
-  currentStep: number;
-  data: KycFormData;
-
-  submitting: boolean;
+type KYCStore = {
+  currentStep: KYCStep;
+  data: KYCData;
   isSubmitting: boolean;
+
+  setStep: (step: number) => void;          // ✅ accepts number (fixes TS2345)
+  updateData: (patch: Partial<KYCData>) => void;
   setSubmitting: (v: boolean) => void;
 
-  setStep: (step: number) => void;
-  updateData: (patch: Partial<KycFormData>) => void;
   reset: () => void;
+};
 
-  submitKyc: () => Promise<boolean>;
-}
+type KYCPersisted = Pick<KYCStore, 'currentStep' | 'data'>;
 
-export const useKYCStore = create<KYCStore>((set, get) => ({
-  step: 1,
-  currentStep: 1,
-  data: {},
+const clampStep = (n: number): KYCStep => {
+  if (n <= 1) return 1;
+  if (n >= 5) return 5;
+  return n as KYCStep; // 2..4
+};
 
-  submitting: false,
-  isSubmitting: false,
+// ✅ IMPORTANT: only define storage on the client.
+// This avoids `PersistStorage<...> | undefined` being passed directly.
+const clientStorage =
+  typeof window !== 'undefined'
+    ? createJSONStorage<KYCPersisted>(() => sessionStorage)
+    : undefined;
 
-  setSubmitting: (v) => set({ submitting: v, isSubmitting: v }),
-
-  setStep: (step) => set({ step, currentStep: step }),
-  updateData: (patch) => set({ data: { ...get().data, ...patch } }),
-  reset: () =>
-    set({
-      step: 1,
+export const useKYCStore = create<KYCStore>()(
+  persist(
+    (set, get) => ({
       currentStep: 1,
       data: {},
-      submitting: false,
       isSubmitting: false,
-    }),
 
-  submitKyc: async () => {
-    set({ submitting: true, isSubmitting: true });
-    try {
-      // Lazy import to avoid circular dependency with main store
-      const { useStore } = await import('@/lib/store');
-      const ok = await useStore.getState().updateKycStatus('pending');
-      return ok;
-    } finally {
-      set({ submitting: false, isSubmitting: false });
+      setStep: (step) => set({ currentStep: clampStep(step) }),
+
+      updateData: (patch) =>
+        set({
+          data: { ...get().data, ...patch },
+        }),
+
+      setSubmitting: (v) => set({ isSubmitting: v }),
+
+      reset: () =>
+        set({
+          currentStep: 1,
+          data: {},
+          isSubmitting: false,
+        }),
+    }),
+    {
+      name: 'novatrade_kyc_store',
+      version: 1,
+
+      // ✅ persist only what you want stored (matches KYCPersisted)
+      partialize: (state): KYCPersisted => ({
+        currentStep: state.currentStep,
+        data: state.data,
+      }),
+
+      // ✅ ONLY include storage if it exists (fixes TS2322)
+      ...(clientStorage ? { storage: clientStorage } : {}),
+
+      // ✅ safety: never keep submit spinner after refresh
+      onRehydrateStorage: () => (state) => {
+        if (state) state.setSubmitting(false);
+      },
     }
-  },
-}));
+  )
+);

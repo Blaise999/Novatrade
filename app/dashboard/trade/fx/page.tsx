@@ -683,13 +683,17 @@ export default function FXTradingPage() {
         // For other symbols use mid price.
         // updateMarginPositionPrice receives a single price; the SL/TP checks inside
         // will use this price. For accurate SL/TP we pass the appropriate price.
-        let priceForUpdate: number;
+        let priceForUpdate: any;
         if (sym === symbolSelected) {
           // Use mid for the general update (PnL calc), SL/TP checks inside store
           // already compare against the price we pass. For longs, SL triggers when
           // price drops (bid), for shorts SL triggers when price rises (ask).
           // Using bid as the baseline is more conservative for both.
-          priceForUpdate = currentBid;
+          priceForUpdate = {
+            bid: currentBid,
+            ask: currentAsk,
+            mid: (currentBid + currentAsk) / 2,
+          };
         } else {
           const midOther = livePricesRef.current?.[sym];
           priceForUpdate = typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
@@ -755,21 +759,29 @@ export default function FXTradingPage() {
       return;
     }
 
-    // Compute effective lot size from amount or direct lot input
-    const tradeEntryPx = tradeDirection === 'buy' ? askPrice : bidPrice;
-    const computedLotsInner = tradeEntryPx > 0 ? (tradeAmount * leverage) / (tradeEntryPx * 100000) : 0;
-    const effLotSize = inputMode === 'amount' ? Math.max(0.01, Math.round(computedLotsInner * 100) / 100) : lotSize;
+    // Compute sizing from $ amount (exact margin) or direct lot input
+const entryPrice = tradeDirection === 'buy' ? askPrice : bidPrice;
 
-    if (!Number.isFinite(effLotSize) || effLotSize <= 0) {
-      setNotification({ type: 'error', message: 'Invalid trade amount' });
-      setTimeout(() => setNotification(null), 3000);
-      return;
-    }
+let effLotSize = lotSize;
+let qty = 0; // units
+let requiredMarginUsd = 0;
 
-    const entryPrice = tradeEntryPx;
+if (inputMode === 'amount') {
+  requiredMarginUsd = tradeAmount;
+  qty = entryPrice > 0 ? (requiredMarginUsd * leverage) / entryPrice : 0;
+  effLotSize = qty / 100000;
+} else {
+  effLotSize = lotSize;
+  qty = effLotSize * 100000;
+  requiredMarginUsd = leverage > 0 ? (qty * entryPrice) / leverage : qty * entryPrice;
+}
 
-    // FX qty in units: 1.0 lot = 100,000 units
-    const qty = effLotSize * 100000;
+if (!Number.isFinite(effLotSize) || effLotSize <= 0 || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(requiredMarginUsd) || requiredMarginUsd <= 0) {
+  setNotification({ type: 'error', message: 'Invalid trade amount' });
+  setTimeout(() => setNotification(null), 3000);
+  return;
+}
+
 
     // Notional (quote currency)
     const notional = qty * entryPrice;
@@ -811,7 +823,7 @@ export default function FXTradingPage() {
           entryPrice,
           stopLoss: stopLoss || null,
           takeProfit: takeProfit || null,
-          amount: qty * entryPrice / leverage,
+          amount: requiredMarginUsd,
           isSimulated: true,
         }),
       }).catch((e) => console.error('[FX] Server trade save failed:', e));
@@ -920,12 +932,20 @@ export default function FXTradingPage() {
 
   // ✅ Amount-based: auto-compute lots from user's dollar amount
   // margin = notional / leverage → notional = margin * leverage → units = notional / price → lots = units / 100000
-  const computedLots = entryPx > 0 ? (tradeAmount * leverage) / (entryPx * 100000) : 0;
-  const effectiveLotSize = inputMode === 'amount' ? Math.max(0.01, Math.round(computedLots * 100) / 100) : lotSize;
+  // ✅ Amount-based: user enters exact margin ($) OR user enters lot size.
+// margin = notional / leverage → notional = margin * leverage → units = notional / price → lots = units / 100000
+let effectiveLotSize = lotSize;
+let units = effectiveLotSize * 100000;
+let positionNotional = units * entryPx;
+let requiredMargin = leverage > 0 ? positionNotional / leverage : positionNotional;
 
-  const units = effectiveLotSize * 100000;
-  const positionNotional = units * entryPx;
-  const requiredMargin = leverage > 0 ? positionNotional / leverage : positionNotional;
+if (inputMode === 'amount') {
+  requiredMargin = tradeAmount;
+  positionNotional = requiredMargin * leverage;
+  units = entryPx > 0 ? positionNotional / entryPx : 0;
+  effectiveLotSize = units / 100000;
+}
+
 
   // SL/TP dollar risk calculations
   const slRisk = (() => {

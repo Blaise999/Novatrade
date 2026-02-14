@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 
 import { useStore } from '@/lib/supabase/store-supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 type FilterType = 'all' | 'won' | 'lost' | 'open' | 'cancelled';
 type MarketFilter = 'all' | 'crypto' | 'fx' | 'stocks';
@@ -242,14 +243,78 @@ export default function TradeHistoryPage() {
       }
 
       const mapped: Trade[] = (data.trades || []).map(mapRawTrade);
+// ✅ ALSO include FX margin positions stored in user_trading_data (so FX shows on history immediately)
+let fxMapped: Trade[] = [];
+const shouldIncludeFx =
+  page === 1 && (marketFilter === 'all' || marketFilter === 'fx') && (statusFilter === 'all' || statusFilter === 'open');
+
+if (shouldIncludeFx && user?.id && isSupabaseConfigured()) {
+  try {
+    const { data: utd, error: utdErr } = await supabase
+      .from('user_trading_data')
+      .select('spot_stocks_state')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (!utdErr) {
+      const state = (utd as any)?.spot_stocks_state || {};
+      const marginPositions = Array.isArray(state?.marginPositions) ? state.marginPositions : [];
+
+      fxMapped = marginPositions
+        .filter((p: any) => String(p?.type || '').toLowerCase() === 'forex' || String(p?.type || '').toLowerCase() === 'fx')
+        .map((p: any) => {
+          const openedAt = p?.openedAt || p?.opened_at || p?.createdAt || p?.created_at || new Date().toISOString();
+          const side = String(p?.side || '').toLowerCase();
+          const requiredMargin = toNum(p?.requiredMargin ?? p?.marginUsed ?? p?.margin_used ?? p?.amount ?? 0);
+          const pnl = toNum(p?.unrealizedPnL ?? p?.pnl ?? 0);
+
+          return {
+            id: String(p?.id || `fx_${openedAt}_${p?.symbol || ''}`),
+            type: 'forex',
+            asset: String(p?.symbol || p?.pair || 'FX'),
+            direction: side === 'short' ? 'down' : 'up',
+            amount: requiredMargin,
+            profit: pnl,
+            payout: 0,
+            status: 'pending',
+            entryPrice: toNum(p?.avgEntry ?? p?.entryPrice ?? p?.entry_price ?? 0),
+            exitPrice: null,
+            duration: 'Open',
+            date: new Date(openedAt).toLocaleString(),
+            created_at: openedAt,
+          } as Trade;
+        });
+
+      // Apply search text locally for FX-only items (server query doesn't cover these)
+      if (debouncedQuery) {
+        const q = debouncedQuery.toLowerCase();
+        fxMapped = fxMapped.filter((t) => t.asset.toLowerCase().includes(q));
+      }
+    }
+  } catch {
+    // ignore FX state read errors; history still works
+  }
+}
+
+const merged: Trade[] = (() => {
+  const out = [...mapped];
+  const seen = new Set(out.map((t) => t.id));
+  for (const t of fxMapped) {
+    if (!seen.has(t.id)) out.push(t);
+  }
+  out.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  return out;
+})();
+
+
 
       // Client-side won/lost filter for "closed" trades that map to won/lost
-      let filtered = mapped;
+      let filtered = merged;
       if (statusFilter === 'won') filtered = mapped.filter(t => t.status === 'won');
       else if (statusFilter === 'lost') filtered = mapped.filter(t => t.status === 'lost');
 
       setTradeHistory(filtered);
-      setTotalTrades(data.total || 0);
+      setTotalTrades((data.total || 0) + (fxMapped?.length || 0));
     } catch (err: any) {
       const msg = String(err?.message || '');
       if (msg.includes('fetch') || msg.includes('network') || msg.includes('Failed to fetch')) {

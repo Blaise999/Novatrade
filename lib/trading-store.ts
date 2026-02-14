@@ -212,7 +212,7 @@ interface TradingAccountState {
     fee: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
 
-  updateMarginPositionPrice: (symbol: string, price: number) => { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }[];
+  updateMarginPositionPrice: (symbol: string, price: number | { bid: number; ask: number; mid?: number }) => { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }[];
 
   // Risk management
   checkLiquidation: () => string[];
@@ -1009,43 +1009,86 @@ export const useTradingAccountStore = create<TradingAccountState>()(
       updateMarginPositionPrice: (symbol, price) => {
         const slTpTriggered: { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }[] = [];
 
+        const isObj = typeof price === 'object' && price !== null;
+        let bid = isObj ? Number((price as any).bid) : Number(price);
+        let ask = isObj ? Number((price as any).ask) : Number(price);
+        let mid = isObj ? Number((price as any).mid) : Number(price);
+
+        // Defensive: if ask/bid got inverted, swap them
+        if (Number.isFinite(bid) && Number.isFinite(ask) && ask < bid) {
+          const tmp = ask;
+          ask = bid;
+          bid = tmp;
+        }
+
+        if (!Number.isFinite(mid)) {
+          if (Number.isFinite(bid) && Number.isFinite(ask)) mid = (bid + ask) / 2;
+          else if (Number.isFinite(bid)) mid = bid;
+          else if (Number.isFinite(ask)) mid = ask;
+          else mid = 0;
+        }
+
         set((state) => {
           const updatedPositions = state.marginPositions.map((p) => {
             if (p.symbol !== symbol) return p;
-            const unrealizedPnL = calculateMarginPnL(p, price);
 
-            // --- SL/TP detection ---
             const side = (p as any).side as string;
             const isLong = side === 'long';
 
-            // Stop Loss check
+            // For longs mark-to-market with BID, for shorts with ASK (spread-aware)
+            const px = isLong ? (Number.isFinite(bid) ? bid : mid) : (Number.isFinite(ask) ? ask : mid);
+            if (!Number.isFinite(px) || px <= 0) return p;
+
+            const unrealizedPnL = calculateMarginPnL(p, px);
+
+            // --- SL/TP detection (side-appropriate price) ---
             if (p.stopLoss != null && Number.isFinite(p.stopLoss)) {
-              const slHit = isLong ? price <= p.stopLoss : price >= p.stopLoss;
+              const slHit = isLong ? px <= p.stopLoss : px >= p.stopLoss;
               if (slHit) {
-                const slPnl = calculateMarginPnL(p, p.stopLoss);
-                slTpTriggered.push({ id: p.id, symbol: p.symbol, side, reason: 'sl', triggerPrice: p.stopLoss, pnl: slPnl });
+                slTpTriggered.push({
+                  id: p.id,
+                  symbol: p.symbol,
+                  side,
+                  reason: 'sl',
+                  triggerPrice: p.stopLoss,
+                  pnl: unrealizedPnL,
+                });
               }
             }
 
-            // Take Profit check
             if (p.takeProfit != null && Number.isFinite(p.takeProfit)) {
-              const tpHit = isLong ? price >= p.takeProfit : price <= p.takeProfit;
+              const tpHit = isLong ? px >= p.takeProfit : px <= p.takeProfit;
               if (tpHit) {
-                const tpPnl = calculateMarginPnL(p, p.takeProfit);
-                slTpTriggered.push({ id: p.id, symbol: p.symbol, side, reason: 'tp', triggerPrice: p.takeProfit, pnl: tpPnl });
+                slTpTriggered.push({
+                  id: p.id,
+                  symbol: p.symbol,
+                  side,
+                  reason: 'tp',
+                  triggerPrice: p.takeProfit,
+                  pnl: unrealizedPnL,
+                });
               }
             }
 
             return {
               ...p,
-              currentPrice: price,
+              currentPrice: px,
               unrealizedPnL,
-              unrealizedPnLPercent: (unrealizedPnL / p.requiredMargin) * 100,
+              unrealizedPnLPercent:
+                p.requiredMargin && p.requiredMargin > 0 ? (unrealizedPnL / p.requiredMargin) * 100 : 0,
               updatedAt: new Date(),
             };
           });
 
-          const totalUnrealizedPnL = updatedPositions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
+          const totalUnrealizedPnL = updatedPositions.reduce(
+            (sum, p) => sum + (p.unrealizedPnL || 0),
+            0
+          );
+
+          const balance = state.marginAccount?.balance || 0;
+          const marginUsed = state.marginAccount?.marginUsed || 0;
+          const equity = balance + totalUnrealizedPnL;
+          const freeMargin = equity - marginUsed;
 
           return {
             marginPositions: updatedPositions,
@@ -1054,19 +1097,15 @@ export const useTradingAccountStore = create<TradingAccountState>()(
               ? {
                   ...state.marginAccount,
                   unrealizedPnL: totalUnrealizedPnL,
-                  equity: state.marginAccount.balance + totalUnrealizedPnL,
-                  marginLevel:
-                    state.marginAccount.marginUsed > 0
-                      ? ((state.marginAccount.balance + totalUnrealizedPnL) /
-                          state.marginAccount.marginUsed) *
-                        100
-                      : undefined,
+                  equity,
+                  freeMargin,
+                  marginLevel: marginUsed > 0 ? (equity / marginUsed) * 100 : undefined,
+                  updatedAt: new Date(),
                 }
               : null,
           };
         });
 
-        // Return triggered SL/TP info so callers can handle auto-close
         return slTpTriggered;
       },
 

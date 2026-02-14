@@ -103,13 +103,39 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
     const direction = body.direction ?? body.side ?? 'buy';
     const pair = body.pair ?? body.symbol ?? '';
-    const marketType = body.market_type ?? body.marketType ?? 'fx';
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const safeId =
+  typeof body.id === 'string' && uuidRe.test(body.id.trim()) ? body.id.trim() : null;
 
-    const row: Record<string, any> = {
-      ...(body.id ? { id: body.id } : {}),
+const marketType: string = (body.market_type ?? body.marketType ?? 'other') as string;
+const normalizedMarket = marketType === 'forex' ? 'fx' : marketType;
+
+const tradeType: string =
+  (body.trade_type ?? body.tradeType ??
+    (normalizedMarket === 'fx'
+      ? 'forex'
+      : normalizedMarket === 'stocks'
+        ? 'stock'
+        : normalizedMarket === 'crypto'
+          ? 'crypto'
+          : 'other')) as string;
+
+const assetType: string =
+  (body.asset_type ?? body.assetType ??
+    (normalizedMarket === 'fx'
+      ? 'forex'
+      : normalizedMarket === 'stocks'
+        ? 'stock'
+        : normalizedMarket === 'crypto'
+          ? 'crypto'
+          : 'other')) as string;
+
+const row: Record<string, any> = {
+      ...(safeId ? { id: safeId } : {}),
       user_id: userId,
-      market_type: marketType === 'forex' ? 'fx' : marketType,
-      asset_type: body.asset_type ?? body.assetType ?? null,
+      market_type: normalizedMarket,
+      asset_type: assetType,
+      trade_type: tradeType,
       pair,
       symbol: pair,
       type: direction,
