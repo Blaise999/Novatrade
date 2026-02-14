@@ -1,5 +1,13 @@
 'use client';
 
+/**
+ * TRADE HISTORY PAGE (FIXED)
+ * ==========================
+ * 
+ * This page fetches ALL trade history from the database.
+ * NO local state fallbacks - database is the single source of truth.
+ */
+
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
@@ -19,7 +27,10 @@ import {
 } from 'lucide-react';
 
 import { useStore } from '@/lib/supabase/store-supabase';
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+
+// ==========================================
+// TYPES
+// ==========================================
 
 type FilterType = 'all' | 'won' | 'lost' | 'open' | 'cancelled';
 type MarketFilter = 'all' | 'crypto' | 'fx' | 'stocks';
@@ -42,14 +53,16 @@ interface Trade {
   created_at: string;
 }
 
-/* -------- utils -------- */
+// ==========================================
+// UTILITIES
+// ==========================================
 
-function toNum(v: any, fallback = 0) {
+function toNum(v: any, fallback = 0): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function csvEscape(value: any) {
+function csvEscape(value: any): string {
   const s = String(value ?? '');
   if (s.includes('"') || s.includes(',') || s.includes('\n')) {
     return `"${s.replace(/"/g, '""')}"`;
@@ -57,7 +70,7 @@ function csvEscape(value: any) {
   return s;
 }
 
-function marketLabel(t: TradeType) {
+function marketLabel(t: TradeType): string {
   switch (t) {
     case 'crypto': return 'Crypto';
     case 'forex': return 'FX';
@@ -66,7 +79,7 @@ function marketLabel(t: TradeType) {
   }
 }
 
-function marketPillClass(t: TradeType) {
+function marketPillClass(t: TradeType): string {
   switch (t) {
     case 'crypto': return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
     case 'forex': return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
@@ -75,7 +88,7 @@ function marketPillClass(t: TradeType) {
   }
 }
 
-function statusPillClass(s: TradeStatus) {
+function statusPillClass(s: TradeStatus): string {
   switch (s) {
     case 'won': return 'bg-profit/10 text-profit border-profit/20';
     case 'lost': return 'bg-loss/10 text-loss border-loss/20';
@@ -84,7 +97,7 @@ function statusPillClass(s: TradeStatus) {
   }
 }
 
-function formatPrice(v: number) {
+function formatPrice(v: number): string {
   if (!Number.isFinite(v)) return '-';
   return v.toFixed(v < 10 ? 4 : 2);
 }
@@ -113,44 +126,27 @@ function computeStatus(raw: string, profit: number): TradeStatus {
   if (s === 'lost') return 'lost';
   if (s === 'cancelled' || s === 'expired') return 'cancelled';
   if (['open', 'pending', 'active'].includes(s)) return 'pending';
-  if (s === 'closed') return profit >= 0 ? 'won' : 'lost';
+  if (s === 'closed' || s === 'liquidated' || s === 'stopped_out' || s === 'take_profit') {
+    return profit >= 0 ? 'won' : 'lost';
+  }
   return 'pending';
 }
 
 function mapRawTrade(t: any): Trade {
   const type = normalizeMarketType(t);
   const direction = normalizeDirection(t.direction ?? t.type);
-  const amount = toNum(t.amount, 0);
+  const amount = toNum(t.investment ?? t.amount ?? 0, 0);
   const entry = toNum(t.entry_price, 0);
   const exit = t.exit_price == null ? null : toNum(t.exit_price, 0);
-  let profit = toNum(t.profit_loss ?? t.pnl, 0);
+  let profit = toNum(t.profit_loss ?? t.pnl ?? t.floating_pnl, 0);
 
-  const tradeTypeRaw = String(t.trade_type ?? '').toLowerCase();
   const statusRaw = String(t.status ?? '').toLowerCase();
-  const payoutPct = toNum(t.payout_percent, 85);
-
-  if ((profit === 0 || !Number.isFinite(profit)) && tradeTypeRaw === 'binary') {
-    if (statusRaw === 'won') profit = amount * (payoutPct / 100);
-    else if (statusRaw === 'lost') profit = -amount;
-  }
-
-  if ((profit === 0 || !Number.isFinite(profit)) && statusRaw === 'closed' && exit != null && entry > 0) {
-    const lev = Math.max(1, toNum(t.leverage, 1));
-    const effectiveQty = t.quantity != null ? toNum(t.quantity, 0) : (entry > 0 ? amount / entry : 0);
-    const diff = exit - entry;
-    const signed = direction === 'down' ? -diff : diff;
-    profit = signed * effectiveQty * lev;
-  }
-
   const displayStatus = computeStatus(statusRaw, profit);
 
-  const durationSeconds = toNum(t.duration_seconds, 0);
+  // Calculate duration
   let duration = '-';
-  if (['open', 'pending', 'active'].includes(statusRaw)) duration = 'Open';
-  else if (durationSeconds > 0) {
-    if (durationSeconds < 60) duration = `${durationSeconds}s`;
-    else if (durationSeconds < 3600) duration = `${Math.floor(durationSeconds / 60)}m`;
-    else duration = `${Math.floor(durationSeconds / 3600)}h`;
+  if (['open', 'pending', 'active'].includes(statusRaw)) {
+    duration = 'Open';
   } else if (t.opened_at && t.closed_at) {
     const diffMins = Math.max(0, Math.floor((new Date(t.closed_at).getTime() - new Date(t.opened_at).getTime()) / 60000));
     if (diffMins < 60) duration = `${diffMins}m`;
@@ -167,7 +163,7 @@ function mapRawTrade(t: any): Trade {
     direction,
     amount,
     profit,
-    payout: payoutPct,
+    payout: 0,
     status: displayStatus,
     entryPrice: entry,
     exitPrice: exit,
@@ -177,7 +173,9 @@ function mapRawTrade(t: any): Trade {
   };
 }
 
-/* ============================== COMPONENT ============================== */
+// ==========================================
+// COMPONENT
+// ==========================================
 
 export default function TradeHistoryPage() {
   const { user } = useStore();
@@ -242,79 +240,14 @@ export default function TradeHistoryPage() {
         throw new Error(data.error || 'Failed to load trades');
       }
 
+      // Map all trades from database
       const mapped: Trade[] = (data.trades || []).map(mapRawTrade);
-// ✅ ALSO include FX margin positions stored in user_trading_data (so FX shows on history immediately)
-let fxMapped: Trade[] = [];
-const shouldIncludeFx =
-  page === 1 && (marketFilter === 'all' || marketFilter === 'fx') && (statusFilter === 'all' || statusFilter === 'open');
 
-if (shouldIncludeFx && user?.id && isSupabaseConfigured()) {
-  try {
-    const { data: utd, error: utdErr } = await supabase
-      .from('user_trading_data')
-      .select('spot_stocks_state')
-      .eq('user_id', user.id)
-      .maybeSingle();
+      // Sort by date
+      mapped.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
 
-    if (!utdErr) {
-      const state = (utd as any)?.spot_stocks_state || {};
-      const marginPositions = Array.isArray(state?.marginPositions) ? state.marginPositions : [];
-
-      fxMapped = marginPositions
-        .filter((p: any) => String(p?.type || '').toLowerCase() === 'forex' || String(p?.type || '').toLowerCase() === 'fx')
-        .map((p: any) => {
-          const openedAt = p?.openedAt || p?.opened_at || p?.createdAt || p?.created_at || new Date().toISOString();
-          const side = String(p?.side || '').toLowerCase();
-          const requiredMargin = toNum(p?.requiredMargin ?? p?.marginUsed ?? p?.margin_used ?? p?.amount ?? 0);
-          const pnl = toNum(p?.unrealizedPnL ?? p?.pnl ?? 0);
-
-          return {
-            id: String(p?.id || `fx_${openedAt}_${p?.symbol || ''}`),
-            type: 'forex',
-            asset: String(p?.symbol || p?.pair || 'FX'),
-            direction: side === 'short' ? 'down' : 'up',
-            amount: requiredMargin,
-            profit: pnl,
-            payout: 0,
-            status: 'pending',
-            entryPrice: toNum(p?.avgEntry ?? p?.entryPrice ?? p?.entry_price ?? 0),
-            exitPrice: null,
-            duration: 'Open',
-            date: new Date(openedAt).toLocaleString(),
-            created_at: openedAt,
-          } as Trade;
-        });
-
-      // Apply search text locally for FX-only items (server query doesn't cover these)
-      if (debouncedQuery) {
-        const q = debouncedQuery.toLowerCase();
-        fxMapped = fxMapped.filter((t) => t.asset.toLowerCase().includes(q));
-      }
-    }
-  } catch {
-    // ignore FX state read errors; history still works
-  }
-}
-
-const merged: Trade[] = (() => {
-  const out = [...mapped];
-  const seen = new Set(out.map((t) => t.id));
-  for (const t of fxMapped) {
-    if (!seen.has(t.id)) out.push(t);
-  }
-  out.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-  return out;
-})();
-
-
-
-      // Client-side won/lost filter for "closed" trades that map to won/lost
-      let filtered = merged;
-      if (statusFilter === 'won') filtered = mapped.filter(t => t.status === 'won');
-      else if (statusFilter === 'lost') filtered = mapped.filter(t => t.status === 'lost');
-
-      setTradeHistory(filtered);
-      setTotalTrades((data.total || 0) + (fxMapped?.length || 0));
+      setTradeHistory(mapped);
+      setTotalTrades(data.total || mapped.length);
     } catch (err: any) {
       const msg = String(err?.message || '');
       if (msg.includes('fetch') || msg.includes('network') || msg.includes('Failed to fetch')) {
@@ -333,19 +266,38 @@ const merged: Trade[] = (() => {
     fetchTradeHistory();
   }, [fetchTradeHistory]);
 
-  /* -------- stats -------- */
+  // Stats
   const stats = useMemo(() => {
     const completed = tradeHistory.filter(t => t.status === 'won' || t.status === 'lost');
     const won = completed.filter(t => t.status === 'won').length;
     const totalProfit = tradeHistory.reduce((acc, t) => acc + toNum(t.profit, 0), 0);
     const totalInvested = tradeHistory.reduce((acc, t) => acc + toNum(t.amount, 0), 0);
     const winRate = completed.length > 0 ? ((won / completed.length) * 100).toFixed(1) : '0.0';
-    return { pageTrades: tradeHistory.length, totalTradesDb: totalTrades, wonTrades: won, lostTrades: completed.length - won, totalProfit, totalInvested, winRate };
+    return { 
+      pageTrades: tradeHistory.length, 
+      totalTradesDb: totalTrades, 
+      wonTrades: won, 
+      lostTrades: completed.length - won, 
+      totalProfit: Math.round(totalProfit * 100) / 100, 
+      totalInvested: Math.round(totalInvested * 100) / 100, 
+      winRate 
+    };
   }, [tradeHistory, totalTrades]);
 
   const exportToCSV = () => {
     const headers = ['Date', 'Symbol', 'Market', 'Side', 'Amount', 'Entry', 'Exit', 'Duration', 'Status', 'P&L'];
-    const rows = tradeHistory.map(t => [t.date, t.asset, marketLabel(t.type), t.direction === 'up' ? 'Buy/Long' : 'Sell/Short', t.amount, t.entryPrice, t.exitPrice ?? '', t.duration, t.status, t.profit]);
+    const rows = tradeHistory.map(t => [
+      t.date, 
+      t.asset, 
+      marketLabel(t.type), 
+      t.direction === 'up' ? 'Buy/Long' : 'Sell/Short', 
+      t.amount, 
+      t.entryPrice, 
+      t.exitPrice ?? '', 
+      t.duration, 
+      t.status, 
+      t.profit
+    ]);
     const csv = [headers, ...rows].map(row => row.map(csvEscape).join(',')).join('\n') + '\n';
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -365,6 +317,7 @@ const merged: Trade[] = (() => {
     { id: 'open', label: 'Open' },
     { id: 'cancelled', label: 'Cancelled' },
   ];
+  
   const marketTabs: { id: MarketFilter; label: string }[] = [
     { id: 'all', label: 'All' },
     { id: 'crypto', label: 'Crypto' },
@@ -381,10 +334,17 @@ const merged: Trade[] = (() => {
           <p className="text-slate-400 mt-1">All markets — Crypto, FX, Stocks</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={fetchTradeHistory} className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl text-slate-400 hover:text-cream transition-colors">
+          <button 
+            onClick={fetchTradeHistory} 
+            className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl text-slate-400 hover:text-cream transition-colors"
+          >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
           </button>
-          <button onClick={exportToCSV} disabled={tradeHistory.length === 0} className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl text-slate-400 hover:text-cream transition-colors disabled:opacity-50">
+          <button 
+            onClick={exportToCSV} 
+            disabled={tradeHistory.length === 0} 
+            className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl text-slate-400 hover:text-cream transition-colors disabled:opacity-50"
+          >
             <Download className="w-4 h-4" /> Export CSV
           </button>
         </div>
@@ -397,7 +357,10 @@ const merged: Trade[] = (() => {
           <div className="flex-1">
             <p className="text-loss font-medium text-sm">{error}</p>
           </div>
-          <button onClick={fetchTradeHistory} className="px-4 py-2 bg-loss/20 text-loss rounded-lg text-sm hover:bg-loss/30 transition-colors font-medium">
+          <button 
+            onClick={fetchTradeHistory} 
+            className="px-4 py-2 bg-loss/20 text-loss rounded-lg text-sm hover:bg-loss/30 transition-colors font-medium"
+          >
             Try Again
           </button>
         </div>
@@ -405,27 +368,57 @@ const merged: Trade[] = (() => {
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
-          <div className="w-10 h-10 bg-gold/10 rounded-xl flex items-center justify-center mb-2"><BarChart3 className="w-5 h-5 text-gold" /></div>
+        <motion.div 
+          initial={{ opacity: 0, y: 14 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div className="w-10 h-10 bg-gold/10 rounded-xl flex items-center justify-center mb-2">
+            <BarChart3 className="w-5 h-5 text-gold" />
+          </div>
           <p className="text-xs text-slate-500">Total Trades</p>
           <p className="text-2xl font-bold text-cream">{loading ? '-' : stats.totalTradesDb}</p>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.08 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
-          <div className="w-10 h-10 bg-profit/10 rounded-xl flex items-center justify-center mb-2"><Target className="w-5 h-5 text-profit" /></div>
+        
+        <motion.div 
+          initial={{ opacity: 0, y: 14 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          transition={{ delay: 0.08 }} 
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div className="w-10 h-10 bg-profit/10 rounded-xl flex items-center justify-center mb-2">
+            <Target className="w-5 h-5 text-profit" />
+          </div>
           <p className="text-xs text-slate-500">Win Rate</p>
           <p className="text-2xl font-bold text-profit">{loading ? '-' : `${stats.winRate}%`}</p>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.16 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
-          <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center mb-2"><DollarSign className="w-5 h-5 text-electric" /></div>
+        
+        <motion.div 
+          initial={{ opacity: 0, y: 14 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          transition={{ delay: 0.16 }} 
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
+          <div className="w-10 h-10 bg-electric/10 rounded-xl flex items-center justify-center mb-2">
+            <DollarSign className="w-5 h-5 text-electric" />
+          </div>
           <p className="text-xs text-slate-500">Invested</p>
           <p className="text-2xl font-bold text-cream">{loading ? '-' : `$${stats.totalInvested.toLocaleString()}`}</p>
         </motion.div>
-        <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.24 }} className="p-4 bg-white/5 rounded-2xl border border-white/5">
+        
+        <motion.div 
+          initial={{ opacity: 0, y: 14 }} 
+          animate={{ opacity: 1, y: 0 }} 
+          transition={{ delay: 0.24 }} 
+          className="p-4 bg-white/5 rounded-2xl border border-white/5"
+        >
           <div className={`w-10 h-10 rounded-xl flex items-center justify-center mb-2 ${stats.totalProfit >= 0 ? 'bg-profit/10' : 'bg-loss/10'}`}>
             {stats.totalProfit >= 0 ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
           </div>
           <p className="text-xs text-slate-500">P&L</p>
-          <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-profit' : 'text-loss'}`}>{loading ? '-' : `${stats.totalProfit >= 0 ? '+' : ''}$${stats.totalProfit.toLocaleString()}`}</p>
+          <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {loading ? '-' : `${stats.totalProfit >= 0 ? '+' : ''}$${stats.totalProfit.toLocaleString()}`}
+          </p>
         </motion.div>
       </div>
 
@@ -433,17 +426,39 @@ const merged: Trade[] = (() => {
       <div className="space-y-3">
         <div className="relative">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
-          <input type="text" value={searchQuery} onChange={e => { setSearchQuery(e.target.value); setPage(1); }} placeholder="Search symbols…" className="w-full pl-12 pr-4 py-3 bg-white/5 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-gold/50" />
+          <input 
+            type="text" 
+            value={searchQuery} 
+            onChange={e => { setSearchQuery(e.target.value); setPage(1); }} 
+            placeholder="Search symbols…" 
+            className="w-full pl-12 pr-4 py-3 bg-white/5 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-gold/50" 
+          />
         </div>
         <div className="flex flex-col lg:flex-row gap-3">
           <div className="flex flex-wrap gap-2">
             {statusTabs.map(t => (
-              <button key={t.id} onClick={() => { setStatusFilter(t.id); setPage(1); }} className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${statusFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'}`}>{t.label}</button>
+              <button 
+                key={t.id} 
+                onClick={() => { setStatusFilter(t.id); setPage(1); }} 
+                className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${
+                  statusFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
+                }`}
+              >
+                {t.label}
+              </button>
             ))}
           </div>
           <div className="flex flex-wrap gap-2 lg:ml-auto">
             {marketTabs.map(t => (
-              <button key={t.id} onClick={() => { setMarketFilter(t.id); setPage(1); }} className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${marketFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'}`}>{t.label}</button>
+              <button 
+                key={t.id} 
+                onClick={() => { setMarketFilter(t.id); setPage(1); }} 
+                className={`px-4 py-2 text-sm font-medium rounded-xl transition-all ${
+                  marketFilter === t.id ? 'bg-gold text-void' : 'bg-white/5 text-slate-400 hover:text-cream'
+                }`}
+              >
+                {t.label}
+              </button>
             ))}
           </div>
         </div>
@@ -452,7 +467,15 @@ const merged: Trade[] = (() => {
       {/* Trade List */}
       <div className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden">
         <div className="hidden lg:grid grid-cols-9 gap-4 p-4 border-b border-white/5 text-xs text-slate-500 uppercase">
-          <div>Symbol</div><div>Market</div><div>Side</div><div>Amount</div><div>Entry</div><div>Exit</div><div>Duration</div><div>Result</div><div>Time</div>
+          <div>Symbol</div>
+          <div>Market</div>
+          <div>Side</div>
+          <div>Amount</div>
+          <div>Entry</div>
+          <div>Exit</div>
+          <div>Duration</div>
+          <div>Result</div>
+          <div>Time</div>
         </div>
 
         {loading && (
@@ -466,30 +489,59 @@ const merged: Trade[] = (() => {
           <div className="divide-y divide-white/5">
             {tradeHistory.map((trade, index) => {
               const sideLabel = trade.direction === 'up' ? 'Buy/Long' : 'Sell/Short';
-              const pnlLabel = trade.status === 'pending' ? 'Open' : trade.status === 'cancelled' ? 'Cancelled' : `${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`;
+              const pnlLabel = trade.status === 'pending' 
+                ? 'Open' 
+                : trade.status === 'cancelled' 
+                  ? 'Cancelled' 
+                  : `${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`;
 
               return (
-                <motion.div key={trade.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: Math.min(0.2, index * 0.015) }} className="p-4 hover:bg-white/5 transition-all">
+                <motion.div 
+                  key={trade.id} 
+                  initial={{ opacity: 0 }} 
+                  animate={{ opacity: 1 }} 
+                  transition={{ delay: Math.min(0.2, index * 0.015) }} 
+                  className="p-4 hover:bg-white/5 transition-all"
+                >
                   {/* Mobile */}
                   <div className="lg:hidden space-y-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
-                          {trade.direction === 'up' ? <TrendingUp className="w-5 h-5 text-profit" /> : <TrendingDown className="w-5 h-5 text-loss" />}
+                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                          trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
+                        }`}>
+                          {trade.direction === 'up' 
+                            ? <TrendingUp className="w-5 h-5 text-profit" /> 
+                            : <TrendingDown className="w-5 h-5 text-loss" />
+                          }
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-semibold text-cream truncate">{trade.asset}</span>
-                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${marketPillClass(trade.type)}`}>{marketLabel(trade.type)}</span>
-                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${statusPillClass(trade.status)}`}>{trade.status === 'pending' ? 'Open' : trade.status}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${marketPillClass(trade.type)}`}>
+                              {marketLabel(trade.type)}
+                            </span>
+                            <span className={`text-xs px-2 py-0.5 rounded-lg border ${statusPillClass(trade.status)}`}>
+                              {trade.status === 'pending' ? 'Open' : trade.status}
+                            </span>
                           </div>
                           <div className="text-xs text-slate-500 mt-1 flex items-center gap-2">
-                            <span>{sideLabel}</span><span className="text-slate-600">•</span><span>${trade.amount.toLocaleString()}</span><span className="text-slate-600">•</span><span className="flex items-center gap-1"><Clock className="w-3 h-3" />{trade.duration}</span>
+                            <span>{sideLabel}</span>
+                            <span className="text-slate-600">•</span>
+                            <span>${trade.amount.toLocaleString()}</span>
+                            <span className="text-slate-600">•</span>
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3 h-3" />{trade.duration}
+                            </span>
                           </div>
                         </div>
                       </div>
                       <div className="text-right">
-                        <p className={`font-semibold ${trade.status === 'pending' ? 'text-yellow-400' : trade.profit >= 0 ? 'text-profit' : 'text-loss'}`}>{pnlLabel}</p>
+                        <p className={`font-semibold ${
+                          trade.status === 'pending' ? 'text-yellow-400' : trade.profit >= 0 ? 'text-profit' : 'text-loss'
+                        }`}>
+                          {pnlLabel}
+                        </p>
                         <p className="text-xs text-slate-500">{trade.date}</p>
                       </div>
                     </div>
@@ -498,24 +550,54 @@ const merged: Trade[] = (() => {
                   {/* Desktop */}
                   <div className="hidden lg:grid grid-cols-9 gap-4 items-center">
                     <div className="flex items-center gap-3">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'}`}>
-                        {trade.direction === 'up' ? <TrendingUp className="w-4 h-4 text-profit" /> : <TrendingDown className="w-4 h-4 text-loss" />}
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                        trade.direction === 'up' ? 'bg-profit/10' : 'bg-loss/10'
+                      }`}>
+                        {trade.direction === 'up' 
+                          ? <TrendingUp className="w-4 h-4 text-profit" /> 
+                          : <TrendingDown className="w-4 h-4 text-loss" />
+                        }
                       </div>
                       <div>
                         <p className="text-sm font-semibold text-cream">{trade.asset}</p>
-                        <p className="text-xs text-slate-500">{trade.entryPrice ? `Entry: ${formatPrice(trade.entryPrice)}` : ''}</p>
+                        <p className="text-xs text-slate-500">
+                          {trade.entryPrice ? `Entry: ${formatPrice(trade.entryPrice)}` : ''}
+                        </p>
                       </div>
                     </div>
-                    <div><span className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(trade.type)}`}>{marketLabel(trade.type)}</span></div>
+                    <div>
+                      <span className={`inline-flex items-center text-xs px-2 py-1 rounded-lg border ${marketPillClass(trade.type)}`}>
+                        {marketLabel(trade.type)}
+                      </span>
+                    </div>
                     <div className="text-sm text-cream">{sideLabel}</div>
                     <div className="text-sm text-cream">${trade.amount.toLocaleString()}</div>
                     <div className="text-sm font-mono text-cream">{formatPrice(trade.entryPrice)}</div>
-                    <div className="text-sm font-mono text-cream">{trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}</div>
-                    <div className="flex items-center gap-1 text-sm text-slate-400"><Clock className="w-3 h-3" />{trade.duration}</div>
+                    <div className="text-sm font-mono text-cream">
+                      {trade.exitPrice != null ? formatPrice(trade.exitPrice) : '-'}
+                    </div>
+                    <div className="flex items-center gap-1 text-sm text-slate-400">
+                      <Clock className="w-3 h-3" />{trade.duration}
+                    </div>
                     <div className="flex items-center gap-2">
-                      {trade.status === 'won' ? <CheckCircle className="w-4 h-4 text-profit" /> : trade.status === 'lost' ? <XCircle className="w-4 h-4 text-loss" /> : trade.status === 'cancelled' ? <XCircle className="w-4 h-4 text-slate-500" /> : <Clock className="w-4 h-4 text-yellow-500" />}
-                      <span className={`text-sm font-semibold ${trade.status === 'pending' ? 'text-yellow-500' : trade.status === 'cancelled' ? 'text-slate-500' : trade.profit >= 0 ? 'text-profit' : 'text-loss'}`}>{pnlLabel}</span>
-                      <span className={`ml-2 inline-flex items-center text-xs px-2 py-1 rounded-lg border ${statusPillClass(trade.status)}`}>{trade.status === 'pending' ? 'Open' : trade.status}</span>
+                      {trade.status === 'won' 
+                        ? <CheckCircle className="w-4 h-4 text-profit" /> 
+                        : trade.status === 'lost' 
+                          ? <XCircle className="w-4 h-4 text-loss" /> 
+                          : trade.status === 'cancelled' 
+                            ? <XCircle className="w-4 h-4 text-slate-500" /> 
+                            : <Clock className="w-4 h-4 text-yellow-500" />
+                      }
+                      <span className={`text-sm font-semibold ${
+                        trade.status === 'pending' ? 'text-yellow-500' 
+                          : trade.status === 'cancelled' ? 'text-slate-500' 
+                          : trade.profit >= 0 ? 'text-profit' : 'text-loss'
+                      }`}>
+                        {pnlLabel}
+                      </span>
+                      <span className={`ml-2 inline-flex items-center text-xs px-2 py-1 rounded-lg border ${statusPillClass(trade.status)}`}>
+                        {trade.status === 'pending' ? 'Open' : trade.status}
+                      </span>
                     </div>
                     <div className="text-xs text-slate-500">{trade.date}</div>
                   </div>
@@ -537,10 +619,24 @@ const merged: Trade[] = (() => {
       {/* Pagination */}
       {!loading && totalPages > 1 && (
         <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">Page {page} of {totalPages} • {totalTrades} total trades</p>
+          <p className="text-sm text-slate-500">
+            Page {page} of {totalPages} • {totalTrades} total trades
+          </p>
           <div className="flex gap-2">
-            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1} className="px-4 py-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream disabled:opacity-50">Previous</button>
-            <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="px-4 py-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream disabled:opacity-50">Next</button>
+            <button 
+              onClick={() => setPage(p => Math.max(1, p - 1))} 
+              disabled={page === 1} 
+              className="px-4 py-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button 
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))} 
+              disabled={page === totalPages} 
+              className="px-4 py-2 bg-white/5 rounded-lg text-slate-400 hover:text-cream disabled:opacity-50"
+            >
+              Next
+            </button>
           </div>
         </div>
       )}

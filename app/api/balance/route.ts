@@ -1,246 +1,106 @@
-// Atomic Balance Operations API
-// POST /api/balance/update - Atomic balance update with transaction logging
-// GET /api/balance - Get current balance
-// POST /api/balance/transfer - Transfer between accounts
+/**
+ * BALANCE API
+ * ===========
+ * 
+ * Single source of truth for user balance.
+ * GET /api/balance - Returns the current balance from Supabase
+ */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-// Initialize Supabase admin client (server-side only)
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
-
-// ============================================
-// Types
-// ============================================
-
-interface AtomicBalanceResult {
-  success: boolean;
-  balance_before?: number;
-  balance_after?: number;
-  transaction_id?: string;
-  error?: string;
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  
+  if (!url || !key) {
+    throw new Error('Supabase not configured');
+  }
+  
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false }
+  });
 }
 
-// ============================================
-// GET /api/balance - Get user balance
-// ============================================
+async function getUserId(request: NextRequest): Promise<string | null> {
+  const userId = request.headers.get('x-user-id');
+  if (userId) return userId;
+  
+  const authHeader = request.headers.get('authorization');
+  if (!authHeader) return null;
+  
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const supabase = getSupabaseAdmin();
+    const { data } = await supabase.auth.getUser(token);
+    return data?.user?.id || null;
+  } catch {
+    return null;
+  }
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const userId = request.headers.get('x-user-id');
-    
+    const userId = await getUserId(request);
     if (!userId) {
       return NextResponse.json(
-        { success: false, error: 'User ID required' },
-        { status: 400 }
+        { success: false, error: 'Authentication required' },
+        { status: 401 }
       );
     }
     
-    const { data, error } = await supabaseAdmin
+    const supabase = getSupabaseAdmin();
+    
+    const { data, error } = await supabase
       .from('users')
-      .select('balance_available, balance_bonus, total_deposited, total_withdrawn')
+      .select('balance_available, balance_bonus, total_deposited')
       .eq('id', userId)
       .single();
     
-    if (error) {
+    if (error || !data) {
       return NextResponse.json(
-        { success: false, error: error.message },
+        { success: false, error: 'User not found' },
         { status: 404 }
       );
     }
     
+    // Also get active FX trades to calculate unrealized P/L
+    const { data: activeTrades } = await supabase
+      .from('trades')
+      .select('investment, floating_pnl')
+      .eq('user_id', userId)
+      .eq('market_type', 'fx')
+      .in('status', ['open', 'active', 'pending']);
+    
+    const totalInvested = (activeTrades || []).reduce(
+      (sum, t) => sum + Number(t.investment || 0),
+      0
+    );
+    
+    const totalUnrealizedPnL = (activeTrades || []).reduce(
+      (sum, t) => sum + Number(t.floating_pnl || 0),
+      0
+    );
+    
+    const balance = Number(data.balance_available) || 0;
+    const bonus = Number(data.balance_bonus) || 0;
+    const totalDeposited = Number(data.total_deposited) || 0;
+    
     return NextResponse.json({
       success: true,
-      balance: {
-        available: Number(data.balance_available || 0),
-        bonus: Number(data.balance_bonus || 0),
-        totalDeposited: Number(data.total_deposited || 0),
-        totalWithdrawn: Number(data.total_withdrawn || 0),
-        total: Number(data.balance_available || 0) + Number(data.balance_bonus || 0),
-      },
-    });
-  } catch (error: any) {
-    console.error('[Balance API] GET Error:', error);
-    return NextResponse.json(
-      { success: false, error: 'Failed to fetch balance' },
-      { status: 500 }
-    );
-  }
-}
-
-// ============================================
-// POST /api/balance - Atomic balance update
-// ============================================
-
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { 
-      userId, 
-      amount, 
-      type, 
-      description, 
-      referenceId,
-      adminId,
-      idempotencyKey 
-    } = body;
-    
-    // Validation
-    if (!userId || amount === undefined || !type) {
-      return NextResponse.json(
-        { success: false, error: 'userId, amount, and type are required' },
-        { status: 400 }
-      );
-    }
-    
-    const validTypes = ['deposit', 'withdrawal', 'trade_open', 'trade_close', 'bonus', 'adjustment', 'fee', 'reversal', 'tier_bonus'];
-    if (!validTypes.includes(type)) {
-      return NextResponse.json(
-        { success: false, error: `Invalid type. Must be one of: ${validTypes.join(', ')}` },
-        { status: 400 }
-      );
-    }
-    
-    // Check idempotency key if provided
-    if (idempotencyKey) {
-      const { data: existingKey } = await supabaseAdmin
-        .from('idempotency_keys')
-        .select('response_body')
-        .eq('key', idempotencyKey)
-        .eq('user_id', userId)
-        .single();
-      
-      if (existingKey?.response_body) {
-        console.log(`[Balance API] Idempotency hit for key: ${idempotencyKey}`);
-        return NextResponse.json(existingKey.response_body);
-      }
-    }
-    
-    // Call atomic database function
-    const { data, error } = await supabaseAdmin.rpc('update_user_balance', {
-      p_user_id: userId,
-      p_amount: amount,
-      p_type: type,
-      p_description: description || null,
-      p_reference_id: referenceId || null,
-      p_admin_id: adminId || null,
-    });
-    
-    if (error) {
-      console.error('[Balance API] Database error:', error);
-      return NextResponse.json(
-        { success: false, error: error.message },
-        { status: 500 }
-      );
-    }
-    
-    const result = data as AtomicBalanceResult;
-    
-    if (!result.success) {
-      return NextResponse.json(
-        { success: false, error: result.error || 'Operation failed' },
-        { status: 400 }
-      );
-    }
-    
-    const response = {
-      success: true,
-      balanceBefore: result.balance_before,
-      balanceAfter: result.balance_after,
-      transactionId: result.transaction_id,
-      amount,
-      type,
-    };
-    
-    // Store idempotency response if key provided
-    if (idempotencyKey) {
-      await supabaseAdmin
-        .from('idempotency_keys')
-        .upsert({
-          key: idempotencyKey,
-          user_id: userId,
-          operation_type: 'balance_update',
-          response_status: 200,
-          response_body: response,
-        });
-    }
-    
-    console.log(`[Balance API] ✅ ${type}: ${amount >= 0 ? '+' : ''}${amount} | ${result.balance_before} → ${result.balance_after}`);
-    
-    return NextResponse.json(response);
-    
-  } catch (error: any) {
-    console.error('[Balance API] POST Error:', error);
-    return NextResponse.json(
-      { success: false, error: error.message || 'Failed to update balance' },
-      { status: 500 }
-    );
-  }
-}
-
-// ============================================
-// PATCH /api/balance - Batch balance operations
-// ============================================
-
-export async function PATCH(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const { operations } = body;
-    
-    if (!Array.isArray(operations) || operations.length === 0) {
-      return NextResponse.json(
-        { success: false, error: 'Operations array required' },
-        { status: 400 }
-      );
-    }
-    
-    if (operations.length > 10) {
-      return NextResponse.json(
-        { success: false, error: 'Maximum 10 operations per batch' },
-        { status: 400 }
-      );
-    }
-    
-    const results = [];
-    
-    // Process each operation atomically
-    for (const op of operations) {
-      const { data, error } = await supabaseAdmin.rpc('update_user_balance', {
-        p_user_id: op.userId,
-        p_amount: op.amount,
-        p_type: op.type,
-        p_description: op.description || null,
-        p_reference_id: op.referenceId || null,
-        p_admin_id: op.adminId || null,
-      });
-      
-      if (error) {
-        results.push({ success: false, error: error.message, operation: op });
-      } else {
-        results.push({ success: true, ...data, operation: op });
-      }
-    }
-    
-    const allSuccess = results.every(r => r.success);
-    
-    return NextResponse.json({
-      success: allSuccess,
-      results,
-      summary: {
-        total: operations.length,
-        successful: results.filter(r => r.success).length,
-        failed: results.filter(r => !r.success).length,
-      },
+      balance,
+      bonus,
+      totalDeposited,
+      totalInvested,
+      totalUnrealizedPnL,
+      equity: balance + totalUnrealizedPnL,
+      available: balance, // For backwards compatibility
     });
     
   } catch (error: any) {
-    console.error('[Balance API] PATCH Error:', error);
+    console.error('[Balance GET]', error);
     return NextResponse.json(
-      { success: false, error: error.message || 'Batch operation failed' },
+      { success: false, error: error.message || 'Internal error' },
       { status: 500 }
     );
   }
