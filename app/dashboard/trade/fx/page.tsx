@@ -1200,6 +1200,7 @@ export default function FXTradePage() {
           Debug: set <code className="text-white/70">localStorage.nt_debug=1</code> to see logs.
         </div>
       </div>
+ 
     </div>
   );
 }
