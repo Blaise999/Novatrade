@@ -21,7 +21,8 @@ import {
 } from 'lucide-react';
 
 // ✅ STATIC IMPORT (fixes “Chart module not available” from dynamic import issues)
-import { createChart, CrosshairMode } from 'lightweight-charts';
+import { createChart, CrosshairMode, CandlestickSeries } from 'lightweight-charts';
+
 
 type Mode = 'active' | 'history';
 
@@ -621,14 +622,14 @@ export default function FXTradePage() {
       autoSize: true, // v5 supports this; we also fitContent on resize
     });
 
-    const candleSeries = chart.addCandlestickSeries({
-      upColor: '#22c55e',
-      downColor: '#f43f5e',
-      borderUpColor: '#22c55e',
-      borderDownColor: '#f43f5e',
-      wickUpColor: '#22c55e',
-      wickDownColor: '#f43f5e',
-    });
+  const candleSeries = chart.addSeries(CandlestickSeries, {
+  upColor: '#22c55e',
+  downColor: '#f43f5e',
+  borderUpColor: '#22c55e',
+  borderDownColor: '#f43f5e',
+  wickUpColor: '#22c55e',
+  wickDownColor: '#f43f5e',
+});
 
     chartApiRef.current = chart;
     candleSeriesRef.current = candleSeries;
