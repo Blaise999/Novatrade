@@ -643,6 +643,25 @@ export default function FXTradePage() {
   };
 
   useEffect(() => {
+  // Polling for "live-ish" updates
+  const ms =
+    tf === '1m' ? 7000 :
+    tf === '5m' ? 12000 :
+    tf === '15m' ? 20000 :
+    tf === '1h' ? 30000 :
+    tf === '4h' ? 45000 :
+    60000;
+
+  const id = window.setInterval(() => {
+    loadChart();
+  }, ms);
+
+  return () => window.clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [asset, tf]);
+
+
+  useEffect(() => {
     if (firstLoadRef.current) return;
     firstLoadRef.current = true;
 
