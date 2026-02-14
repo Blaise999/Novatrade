@@ -5,36 +5,27 @@
  * Server-side execution ONLY - the App is just a TV screen, the Server is the judge.
  *
  * ENDPOINTS:
- * POST /api/trades - Open new trade (atomic balance deduction)
- * GET /api/trades - Get user's trades
+ * POST /api/trades  - Open new trade (atomic balance deduction)
+ * GET  /api/trades  - Get user's trades
  * PATCH /api/trades - Close trade (atomic balance credit)
- *
- * CRITICAL: Uses database transactions to prevent:
- * - Double-paying on wins
- * - Missing deductions on losses
- * - Race conditions on concurrent trades
  */
 
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { authenticateRequest } from '@/lib/auth';
 import OlympTradingEngine, { TradeOpenParams } from '@/lib/services/olymp-trading-engine';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 // ============================================
-// SUPABASE ADMIN CLIENT (for atomic operations)
+// SUPABASE ADMIN CLIENT
 // ============================================
-
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!url || !key) {
-    throw new Error('Supabase not configured');
-  }
+  if (!url || !key) throw new Error('Supabase not configured');
 
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -42,16 +33,48 @@ function getSupabaseAdmin() {
 }
 
 // ============================================
-// IDEMPOTENCY PROTECTION
+// AUTH (Supabase-native)
 // ============================================
+function extractBearerToken(req: NextRequest): string | null {
+  const h = req.headers.get('authorization') || req.headers.get('Authorization');
+  if (!h) return null;
+  const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+  return m?.[1]?.trim() || null;
+}
 
+async function requireUser(req: NextRequest) {
+  const token = extractBearerToken(req);
+  if (!token) {
+    return {
+      user: null as any,
+      error: 'Missing or invalid authorization header',
+      status: 401,
+    };
+  }
+
+  const supabase = getSupabaseAdmin();
+  const { data, error } = await supabase.auth.getUser(token);
+
+  if (error || !data?.user) {
+    return {
+      user: null as any,
+      error: 'Invalid or expired token',
+      status: 401,
+    };
+  }
+
+  return { user: data.user, error: null as any, status: 200 };
+}
+
+// ============================================
+// IDEMPOTENCY
+// ============================================
 const idempotencyCache = new Map<string, { tradeId: string; expiresAt: number }>();
-const IDEMPOTENCY_TTL = 5 * 60 * 1000; // 5 minutes
+const IDEMPOTENCY_TTL = 5 * 60 * 1000;
 
 function checkIdempotency(key: string): string | null {
   const record = idempotencyCache.get(key);
 
-  // Clean up expired entries
   if (idempotencyCache.size > 10000) {
     const now = Date.now();
     for (const [k, v] of idempotencyCache.entries()) {
@@ -63,11 +86,8 @@ function checkIdempotency(key: string): string | null {
   return null;
 }
 
-function setIdempotency(key: string, tradeId: string): void {
-  idempotencyCache.set(key, {
-    tradeId,
-    expiresAt: Date.now() + IDEMPOTENCY_TTL,
-  });
+function setIdempotency(key: string, tradeId: string) {
+  idempotencyCache.set(key, { tradeId, expiresAt: Date.now() + IDEMPOTENCY_TTL });
 }
 
 function clampInt(n: number, min: number, max: number) {
@@ -77,20 +97,15 @@ function clampInt(n: number, min: number, max: number) {
 // ============================================
 // GET /api/trades
 // ============================================
-
 export async function GET(request: NextRequest) {
   try {
-    const authHeader = request.headers.get('authorization');
-    const { user, error: authError } = await authenticateRequest(authHeader);
-
-    if (!user) {
-      return NextResponse.json({ success: false, error: authError }, { status: 401 });
-    }
+    const { user, error, status } = await requireUser(request);
+    if (!user) return NextResponse.json({ success: false, error }, { status });
 
     const supabase = getSupabaseAdmin();
     const { searchParams } = request.nextUrl;
 
-    const status = searchParams.get('status');
+    const qStatus = searchParams.get('status');
     const limit = clampInt(parseInt(searchParams.get('limit') || '50', 10) || 50, 1, 200);
     const offset = clampInt(parseInt(searchParams.get('offset') || '0', 10) || 0, 0, 100000);
 
@@ -101,25 +116,20 @@ export async function GET(request: NextRequest) {
       .order('opened_at', { ascending: false })
       .range(offset, offset + limit - 1);
 
-    if (status) query = query.eq('status', status);
+    if (qStatus) query = query.eq('status', qStatus);
 
-    const { data: trades, error, count } = await query;
+    const { data: trades, error: fetchErr, count } = await query;
 
-    if (error) {
-      console.error('[Trades API] GET Error:', error);
+    if (fetchErr) {
+      console.error('[Trades API] GET Error:', fetchErr);
       return NextResponse.json({ success: false, error: 'Failed to fetch trades' }, { status: 500 });
     }
 
-    // Get user balance
-    const { data: userData, error: balErr } = await supabase
+    const { data: userData } = await supabase
       .from('users')
       .select('balance_available')
       .eq('id', user.id)
       .single();
-
-    if (balErr) {
-      console.warn('[Trades API] Balance fetch failed:', balErr);
-    }
 
     return NextResponse.json({
       success: true,
@@ -132,33 +142,25 @@ export async function GET(request: NextRequest) {
         hasMore: (trades?.length || 0) === limit,
       },
     });
-  } catch (error: any) {
-    console.error('[Trades API] GET Exception:', error);
-    return NextResponse.json(
-      { success: false, error: error?.message || 'Internal server error' },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    console.error('[Trades API] GET Exception:', e);
+    return NextResponse.json({ success: false, error: e?.message || 'Internal server error' }, { status: 500 });
   }
 }
 
 // ============================================
-// POST /api/trades - OPEN NEW TRADE
+// POST /api/trades - OPEN TRADE
 // ============================================
-
 export async function POST(request: NextRequest) {
   try {
-    const authHeader = request.headers.get('authorization');
-    const { user, error: authError } = await authenticateRequest(authHeader);
-
-    if (!user) {
-      return NextResponse.json({ success: false, error: authError }, { status: 401 });
-    }
+    const { user, error, status } = await requireUser(request);
+    if (!user) return NextResponse.json({ success: false, error }, { status });
 
     const body = await request.json();
     const {
       asset,
       assetType = 'forex',
-      direction, // 'buy' | 'sell' | 'up' | 'down'
+      direction,
       investment,
       multiplier,
       marketPrice,
@@ -167,9 +169,7 @@ export async function POST(request: NextRequest) {
       idempotencyKey,
     } = body ?? {};
 
-    // =========================================
-    // IDEMPOTENCY CHECK
-    // =========================================
+    // idempotency key
     const clientKey = idempotencyKey || request.headers.get('x-idempotency-key');
     if (clientKey) {
       const existingTradeId = checkIdempotency(`${user.id}:${clientKey}`);
@@ -183,7 +183,6 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Server-side duplicate detection (5 second window)
     const timeWindow = Math.floor(Date.now() / 5000);
     const serverKey = `${user.id}:${asset}:${investment}:${direction}:${timeWindow}`;
     const existingFromServer = checkIdempotency(serverKey);
@@ -196,16 +195,10 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // =========================================
-    // VALIDATION
-    // =========================================
+    // validation
     if (!asset || !direction || investment == null || multiplier == null || marketPrice == null) {
       return NextResponse.json(
-        {
-          success: false,
-          error:
-            'Missing required fields: asset, direction, investment, multiplier, marketPrice',
-        },
+        { success: false, error: 'Missing required fields: asset, direction, investment, multiplier, marketPrice' },
         { status: 400 }
       );
     }
@@ -217,26 +210,15 @@ export async function POST(request: NextRequest) {
     if (!Number.isFinite(inv) || inv <= 0) {
       return NextResponse.json({ success: false, error: 'Investment must be positive' }, { status: 400 });
     }
-
     if (!Number.isFinite(mult) || mult < 1 || mult > 1000) {
-      return NextResponse.json(
-        { success: false, error: 'Multiplier must be between 1 and 1000' },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: 'Multiplier must be between 1 and 1000' }, { status: 400 });
     }
-
     if (!Number.isFinite(price) || price <= 0) {
-      return NextResponse.json(
-        { success: false, error: 'marketPrice must be a valid number' },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: 'marketPrice must be a valid number' }, { status: 400 });
     }
 
-    // =========================================
-    // TIER CHECK (optional)
-    // =========================================
+    // optional tier check
     const supabase = getSupabaseAdmin();
-
     try {
       const { data: tierData } = await supabase
         .from('users')
@@ -261,9 +243,7 @@ export async function POST(request: NextRequest) {
       console.warn('[Trades API] Tier check skipped:', tierErr);
     }
 
-    // =========================================
-    // CREATE TRADE OBJECT (engine-side)
-    // =========================================
+    // build engine trade
     const tradeParams: TradeOpenParams = {
       userId: user.id,
       asset,
@@ -277,25 +257,17 @@ export async function POST(request: NextRequest) {
     };
 
     const { trade, error: createError } = OlympTradingEngine.createTrade(tradeParams);
-
     if (createError || !trade) {
-      return NextResponse.json(
-        { success: false, error: createError || 'Failed to create trade' },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: createError || 'Failed to create trade' }, { status: 400 });
     }
 
-    // ✅ IMPORTANT FIX:
-    // DB expects trades.id = uuid.
-    // Engine trade.id may be text. So generate a real UUID for DB.
+    // ✅ DB uuid id
     const dbTradeId = crypto.randomUUID();
 
-    // =========================================
-    // ATOMIC DATABASE OPERATION
-    // =========================================
+    // atomic open
     const { data: result, error: dbError } = await supabase.rpc('open_trade_atomic', {
       p_user_id: user.id,
-      p_trade_id: dbTradeId, // ✅ uuid
+      p_trade_id: dbTradeId,
       p_investment: trade.investment,
       p_asset: trade.asset,
       p_direction: trade.direction === 1 ? 'buy' : 'sell',
@@ -308,32 +280,21 @@ export async function POST(request: NextRequest) {
 
     if (dbError) {
       console.error('[Trades API] Atomic open failed:', dbError);
-      return NextResponse.json(
-        { success: false, error: 'Trade execution failed: ' + dbError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ success: false, error: 'Trade execution failed: ' + dbError.message }, { status: 500 });
     }
 
     if (!result?.success) {
-      return NextResponse.json(
-        { success: false, error: result?.error || 'Trade rejected' },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: result?.error || 'Trade rejected' }, { status: 400 });
     }
 
-    // =========================================
-    // SET IDEMPOTENCY KEYS (store DB uuid)
-    // =========================================
+    // store idempotency (DB uuid)
     if (clientKey) setIdempotency(`${user.id}:${clientKey}`, dbTradeId);
     setIdempotency(serverKey, dbTradeId);
 
-    // =========================================
-    // SUCCESS RESPONSE
-    // =========================================
     return NextResponse.json({
       success: true,
       trade: {
-        id: dbTradeId, // ✅ return DB uuid so client can close it later
+        id: dbTradeId,
         asset: trade.asset,
         direction: trade.direction === 1 ? 'buy' : 'sell',
         investment: trade.investment,
@@ -349,56 +310,37 @@ export async function POST(request: NextRequest) {
       newBalance: result.new_balance,
       message: `Trade opened: ${trade.direction === 1 ? 'BUY' : 'SELL'} ${trade.asset} @ ${trade.entryPrice.toFixed(5)}`,
     });
-  } catch (error: any) {
-    console.error('[Trades API] POST Exception:', error);
-    return NextResponse.json(
-      { success: false, error: error?.message || 'Internal server error' },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    console.error('[Trades API] POST Exception:', e);
+    return NextResponse.json({ success: false, error: e?.message || 'Internal server error' }, { status: 500 });
   }
 }
 
 // ============================================
 // PATCH /api/trades - CLOSE TRADE
 // ============================================
-
 export async function PATCH(request: NextRequest) {
   try {
-    const authHeader = request.headers.get('authorization');
-    const { user, error: authError } = await authenticateRequest(authHeader);
-
-    if (!user) {
-      return NextResponse.json({ success: false, error: authError }, { status: 401 });
-    }
+    const { user, error, status } = await requireUser(request);
+    if (!user) return NextResponse.json({ success: false, error }, { status });
 
     const body = await request.json();
     const { tradeId, action = 'close', exitPrice, closeReason = 'manual' } = body ?? {};
 
-    if (!tradeId) {
-      return NextResponse.json({ success: false, error: 'Trade ID required' }, { status: 400 });
-    }
+    if (!tradeId) return NextResponse.json({ success: false, error: 'Trade ID required' }, { status: 400 });
+    if (action !== 'close') return NextResponse.json({ success: false, error: 'Unsupported action' }, { status: 400 });
 
-    // (optional) basic uuid format check to fail fast
-    const uuidLike =
+    // quick uuid format check
+    const uuidOk =
       typeof tradeId === 'string' &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tradeId);
 
-    if (!uuidLike) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid tradeId (must be uuid)' },
-        { status: 400 }
-      );
-    }
-
-    if (action !== 'close') {
-      return NextResponse.json({ success: false, error: 'Unsupported action' }, { status: 400 });
+    if (!uuidOk) {
+      return NextResponse.json({ success: false, error: 'Invalid tradeId (must be uuid)' }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
 
-    // =========================================
-    // GET TRADE
-    // =========================================
     const { data: trade, error: fetchError } = await supabase
       .from('trades')
       .select('*')
@@ -406,31 +348,20 @@ export async function PATCH(request: NextRequest) {
       .eq('user_id', user.id)
       .single();
 
-    if (fetchError || !trade) {
-      return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
-    }
+    if (fetchError || !trade) return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
+    if (trade.status !== 'active') return NextResponse.json({ success: false, error: 'Trade is not active' }, { status: 400 });
 
-    if (trade.status !== 'active') {
-      return NextResponse.json({ success: false, error: 'Trade is not active' }, { status: 400 });
-    }
-
-    // =========================================
-    // CALCULATE FINAL P/L
-    // =========================================
     const investment = Number(trade.investment || trade.amount || 0);
     const multiplier = Number(trade.multiplier || trade.leverage || 1);
     const entryPrice = Number(trade.entry_price || trade.entryPrice);
     const finalExitPrice = Number(exitPrice ?? trade.current_price);
-
     const direction = Number(trade.direction_int) || (trade.direction === 'buy' ? 1 : -1);
 
     const relativeChange = (finalExitPrice - entryPrice) / entryPrice;
     let finalPnL = direction * investment * multiplier * relativeChange;
-
-    // Cap loss at investment
     if (finalPnL < -investment) finalPnL = -investment;
 
-    const status =
+    const newStatus =
       closeReason === 'liquidated'
         ? 'liquidated'
         : closeReason === 'stopped_out'
@@ -439,38 +370,29 @@ export async function PATCH(request: NextRequest) {
             ? 'take_profit'
             : 'closed';
 
-    // =========================================
-    // ATOMIC DATABASE OPERATION
-    // =========================================
     const { data: result, error: closeError } = await supabase.rpc('close_trade_atomic', {
-      p_trade_id: tradeId, // ✅ uuid
+      p_trade_id: tradeId,
       p_user_id: user.id,
       p_exit_price: finalExitPrice,
       p_final_pnl: finalPnL,
       p_investment: investment,
-      p_status: status,
+      p_status: newStatus,
     });
 
     if (closeError) {
       console.error('[Trades API] Atomic close failed:', closeError);
-      return NextResponse.json(
-        { success: false, error: 'Trade close failed: ' + closeError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ success: false, error: 'Trade close failed: ' + closeError.message }, { status: 500 });
     }
 
     if (!result?.success) {
-      return NextResponse.json(
-        { success: false, error: result?.error || 'Close rejected' },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: result?.error || 'Close rejected' }, { status: 400 });
     }
 
     return NextResponse.json({
       success: true,
       trade: {
         id: tradeId,
-        status,
+        status: newStatus,
         exitPrice: finalExitPrice,
         finalPnL,
         creditAmount: result.credit_amount,
@@ -483,11 +405,8 @@ export async function PATCH(request: NextRequest) {
       },
       message: `Trade closed: ${finalPnL >= 0 ? '+' : ''}$${finalPnL.toFixed(2)}`,
     });
-  } catch (error: any) {
-    console.error('[Trades API] PATCH Exception:', error);
-    return NextResponse.json(
-      { success: false, error: error?.message || 'Internal server error' },
-      { status: 500 }
-    );
+  } catch (e: any) {
+    console.error('[Trades API] PATCH Exception:', e);
+    return NextResponse.json({ success: false, error: e?.message || 'Internal server error' }, { status: 500 });
   }
 }
