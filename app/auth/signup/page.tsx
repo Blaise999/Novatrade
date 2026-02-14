@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -23,7 +23,6 @@ import {
 
 // ✅ FIX: import useOtpStore (do NOT rely on global)
 import { useOtpStore } from '@/lib/auth/store';
-
 import { useEmail } from '@/hooks/useEmail';
 
 // ============================================
@@ -57,6 +56,20 @@ const signupSchema = z
   });
 
 type SignupForm = z.infer<typeof signupSchema>;
+
+// ============================================
+// FALLBACK (for Suspense)
+// ============================================
+function PageFallback() {
+  return (
+    <div className="min-h-[70vh] flex items-center justify-center">
+      <div className="flex items-center gap-2 text-gold">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span>Loading…</span>
+      </div>
+    </div>
+  );
+}
 
 // ============================================
 // ANIMATED BACKGROUND COMPONENT
@@ -160,9 +173,18 @@ function PasswordStrength({ password }: { password: string }) {
 }
 
 // ============================================
-// SIGNUP PAGE COMPONENT
+// ✅ IMPORTANT:
+// Wrap useSearchParams inside Suspense for Next export/prerender.
 // ============================================
 export default function SignupPage() {
+  return (
+    <Suspense fallback={<PageFallback />}>
+      <SignupInner />
+    </Suspense>
+  );
+}
+
+function SignupInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const refFromUrl = (searchParams.get('ref') || '').trim();
