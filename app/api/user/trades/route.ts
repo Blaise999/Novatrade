@@ -1,12 +1,16 @@
 /**
- * USER TRADE HISTORY API
+ * USER TRADE HISTORY API (SECURE)
+ * GET /api/user/trades — list signed-in user's trades from Supabase
  *
- * GET /api/user/trades — list user's trades from Supabase
- * Uses service role key so it works even if client JWT expired
+ * - Uses Authorization Bearer token to identify user (NO x-user-id trust)
+ * - Uses service role to read trades even if RLS is strict
+ * - NO POST/PATCH here (opening/closing must go through /api/trades atomic RPC)
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { authenticateRequest } from '@/lib/auth';
+
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -18,39 +22,43 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
   try {
-    const url = new URL(request.url);
-    const userId = request.headers.get('x-user-id') || url.searchParams.get('userId');
-    
-    if (!userId) {
+    const authHeader = request.headers.get('authorization');
+    const { user, error: authErr } = await authenticateRequest(authHeader);
+
+    if (!user?.id) {
       return NextResponse.json(
-        { success: false, error: 'Please sign in to view your trades.' },
+        { success: false, error: authErr || 'Please sign in to view your trades.' },
         { status: 401 }
       );
     }
 
+    const url = new URL(request.url);
+
     const status = url.searchParams.get('status') || 'all';
     const market = url.searchParams.get('market') || 'all';
-    const search = url.searchParams.get('search') || '';
+    const search = (url.searchParams.get('search') || '').trim();
+
     const page = Math.max(1, Number(url.searchParams.get('page') || 1));
     const pageSize = Math.min(50, Math.max(5, Number(url.searchParams.get('pageSize') || 20)));
 
     let query = supabaseAdmin
       .from('trades')
       .select('*', { count: 'exact' })
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .eq('user_id', user.id)
+      // prefer opened_at (your fx system), fallback to created_at if you still have it
+      .order('opened_at', { ascending: false });
 
-    // Market filter
-    if (market !== 'all') {
-      query = query.eq('market_type', market);
-    }
+    // Market filter (UI sends: crypto | fx | stocks)
+    if (market !== 'all') query = query.eq('market_type', market);
 
     // Search
     if (search) {
-      query = query.or(`pair.ilike.%${search}%,symbol.ilike.%${search}%`);
+      // NOTE: keep simple; avoid special chars breaking `or(...)`
+      const safe = search.replace(/[(),]/g, ' ').trim();
+      if (safe) query = query.or(`pair.ilike.%${safe}%,symbol.ilike.%${safe}%,asset.ilike.%${safe}%`);
     }
 
-    // Status filter
+    // Status filter (match your FX statuses)
     if (status === 'open') {
       query = query.in('status', ['open', 'pending', 'active']);
     } else if (status === 'won') {
@@ -58,7 +66,7 @@ export async function GET(request: NextRequest) {
     } else if (status === 'lost') {
       query = query.eq('status', 'lost');
     } else if (status === 'closed') {
-      query = query.in('status', ['closed', 'won', 'lost']);
+      query = query.in('status', ['closed', 'won', 'lost', 'liquidated', 'stopped_out', 'take_profit']);
     } else if (status === 'cancelled') {
       query = query.in('status', ['cancelled', 'expired']);
     }
@@ -69,7 +77,6 @@ export async function GET(request: NextRequest) {
     query = query.range(from, to);
 
     const { data, error, count } = await query;
-
     if (error) throw error;
 
     return NextResponse.json({
@@ -88,129 +95,18 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/**
- * POST /api/user/trades — save a new trade (uses service role key, bypasses RLS)
- */
-export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const userId = request.headers.get('x-user-id') || body.userId || body.user_id;
-
-    if (!userId) {
-      return NextResponse.json({ success: false, error: 'Missing userId' }, { status: 401 });
-    }
-
-    const now = new Date().toISOString();
-    const direction = body.direction ?? body.side ?? 'buy';
-    const pair = body.pair ?? body.symbol ?? '';
-    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const safeId =
-  typeof body.id === 'string' && uuidRe.test(body.id.trim()) ? body.id.trim() : null;
-
-const marketType: string = (body.market_type ?? body.marketType ?? 'other') as string;
-const normalizedMarket = marketType === 'forex' ? 'fx' : marketType;
-
-const tradeType: string =
-  (body.trade_type ?? body.tradeType ??
-    (normalizedMarket === 'fx'
-      ? 'forex'
-      : normalizedMarket === 'stocks'
-        ? 'stock'
-        : normalizedMarket === 'crypto'
-          ? 'crypto'
-          : 'other')) as string;
-
-const assetType: string =
-  (body.asset_type ?? body.assetType ??
-    (normalizedMarket === 'fx'
-      ? 'forex'
-      : normalizedMarket === 'stocks'
-        ? 'stock'
-        : normalizedMarket === 'crypto'
-          ? 'crypto'
-          : 'other')) as string;
-
-const row: Record<string, any> = {
-      ...(safeId ? { id: safeId } : {}),
-      user_id: userId,
-      market_type: normalizedMarket,
-      asset_type: assetType,
-      trade_type: tradeType,
-      pair,
-      symbol: pair,
-      type: direction,
-      direction,
-      amount: Number(body.amount ?? body.quantity ?? 0) || 0,
-      quantity: body.quantity ?? null,
-      lot_size: body.lot_size ?? body.lotSize ?? null,
-      leverage: body.leverage ?? null,
-      entry_price: Number(body.entry_price ?? body.entryPrice ?? 0) || 0,
-      stop_loss: body.stop_loss ?? body.stopLoss ?? null,
-      take_profit: body.take_profit ?? body.takeProfit ?? null,
-      status: body.status ?? 'open',
-      opened_at: body.opened_at ?? body.openedAt ?? now,
-      updated_at: now,
-      is_simulated: body.is_simulated ?? body.isSimulated ?? null,
-      notes: body.notes ?? null,
-    };
-
-    const base = body.id
-      ? supabaseAdmin.from('trades').upsert(row, { onConflict: 'id' })
-      : supabaseAdmin.from('trades').insert(row);
-
-    const { data, error } = await base.select('*').single();
-    if (error) throw error;
-
-    return NextResponse.json({ success: true, trade: data });
-  } catch (err: any) {
-    console.error('[User Trades POST]', err);
-    return NextResponse.json(
-      { success: false, error: err?.message || 'Failed to save trade' },
-      { status: 500 }
-    );
-  }
+// IMPORTANT: block POST/PATCH here to prevent balance cheating.
+// Opening/closing trades must go through /api/trades (atomic).
+export async function POST() {
+  return NextResponse.json(
+    { success: false, error: 'Use POST /api/trades to open trades.' },
+    { status: 405 }
+  );
 }
 
-/**
- * PATCH /api/user/trades — close/update a trade (uses service role key, bypasses RLS)
- */
-export async function PATCH(request: NextRequest) {
-  try {
-    const body = await request.json();
-    const userId = request.headers.get('x-user-id') || body.userId || body.user_id;
-    const tradeId = body.tradeId ?? body.trade_id ?? body.id;
-
-    if (!userId || !tradeId) {
-      return NextResponse.json({ success: false, error: 'Missing userId or tradeId' }, { status: 400 });
-    }
-
-    const now = new Date().toISOString();
-    const patch: Record<string, any> = {
-      exit_price: body.exit_price ?? body.exitPrice ?? null,
-      closed_at: body.closed_at ?? body.closedAt ?? now,
-      pnl: body.pnl ?? null,
-      profit_loss: body.pnl ?? null,
-      pnl_percentage: body.pnl_percent ?? body.pnlPercent ?? null,
-      status: body.status ?? 'closed',
-      updated_at: now,
-    };
-
-    const { data, error } = await supabaseAdmin
-      .from('trades')
-      .update(patch)
-      .eq('id', tradeId)
-      .eq('user_id', userId)
-      .select('*')
-      .single();
-
-    if (error) throw error;
-
-    return NextResponse.json({ success: true, trade: data });
-  } catch (err: any) {
-    console.error('[User Trades PATCH]', err);
-    return NextResponse.json(
-      { success: false, error: err?.message || 'Failed to update trade' },
-      { status: 500 }
-    );
-  }
+export async function PATCH() {
+  return NextResponse.json(
+    { success: false, error: 'Use PATCH /api/trades to close trades.' },
+    { status: 405 }
+  );
 }
