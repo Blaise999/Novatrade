@@ -5,8 +5,8 @@
  * ❌ No Supabase / DB writes here
  *
  * Model:
- * - Investment (I): cash risked
- * - Multiplier (M): amplifier
+ * - Investment (I): cash risked (margin/stake)
+ * - Multiplier (M): leverage
  * - Direction (D): +1 buy, -1 sell
  *
  * PnL:
@@ -32,21 +32,21 @@ export interface OlympTrade {
   assetType: AssetType;
   direction: 1 | -1;
 
-  investment: number;
-  multiplier: number;
-  volume: number;
+  investment: number;     // margin/stake
+  multiplier: number;     // leverage
+  volume: number;         // notional exposure = investment * multiplier
 
   // pricing
-  spreadPercent: number;     // e.g. 0.00008
-  entryPrice: number;        // ask (buy) or bid (sell)
+  spreadPercent: number;  // fraction of price (0.00008 = 0.008%)
+  entryPrice: number;     // ask (buy) or bid (sell)
   liquidationPrice: number;
 
   stopLoss?: number;
   takeProfit?: number;
 
   // live mark
-  midPrice: number;          // mid
-  effectiveExitPrice: number;// bid (buy) / ask (sell)
+  midPrice: number;           // mid
+  effectiveExitPrice: number; // bid (buy) / ask (sell)
   floatingPnL: number;
   floatingPnLPercent: number;
 
@@ -91,20 +91,33 @@ export interface TradeUpdateResult {
   shouldTakeProfit: boolean;
 }
 
+/**
+ * More realistic spread defaults (fraction of price).
+ * You can tune these later, but keep them small.
+ */
 export const DEFAULT_SPREADS: Record<string, number> = {
+  // majors
   'EUR/USD': 0.00008,
   'GBP/USD': 0.00010,
-  'USD/JPY': 0.008,
   'USD/CHF': 0.00012,
   'AUD/USD': 0.00010,
   'USD/CAD': 0.00012,
   'NZD/USD': 0.00012,
   'EUR/GBP': 0.00015,
-  'EUR/JPY': 0.012,
-  'GBP/JPY': 0.018,
-  'BTC/USD': 0.0003,
-  'ETH/USD': 0.0004,
-  default: 0.0002,
+
+  // JPY pairs (still a fraction of price)
+  'USD/JPY': 0.00010,
+  'EUR/JPY': 0.00014,
+  'GBP/JPY': 0.00018,
+  'CHF/JPY': 0.00018,
+  'AUD/JPY': 0.00018,
+  'CAD/JPY': 0.00018,
+
+  // crypto
+  'BTC/USD': 0.00030,
+  'ETH/USD': 0.00040,
+
+  default: 0.00020,
 };
 
 // ------------------------------------------
@@ -146,12 +159,13 @@ export function calculatePnLPercent(
 }
 
 /**
- * Liquidation price where PnL == -investment (100% loss)
+ * Liquidation price where PnL == -investment (100% loss of margin)
  * BUY: entry * (1 - 1/M)
  * SELL: entry * (1 + 1/M)
  */
 export function calculateLiquidationPrice(direction: 1 | -1, entryPrice: number, multiplier: number): number {
   if (!Number.isFinite(multiplier) || multiplier <= 0) return 0;
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return 0;
   return entryPrice * (1 - direction / multiplier);
 }
 
@@ -175,8 +189,11 @@ export function shouldTakeProfit(direction: 1 | -1, effectiveExitPrice: number, 
  */
 export function calculateSpreadPrices(mid: number, spreadPercent: number) {
   const s = Math.max(0, Number(spreadPercent) || 0);
-  const half = mid * s * 0.5;
 
+  // clamp insane spreads (safety)
+  const safe = Math.min(s, 0.01); // max 1%
+
+  const half = mid * safe * 0.5;
   const ask = mid + half;
   const bid = mid - half;
 
@@ -240,15 +257,18 @@ export function createTrade(params: TradeOpenParams): {
   const volume = calculateVolume(inv, mult);
   const liq = calculateLiquidationPrice(d, entry, mult);
 
-  // Start with correct “flat-market” spread loss
+  // Start with correct “flat-market” spread loss (pnl is negative right after open)
   let floatingPnL = calculateFloatingPnL(d, inv, mult, entry, exit0);
-  if (floatingPnL < -inv) floatingPnL = -inv; // cap loss
+  if (floatingPnL < -inv) floatingPnL = -inv; // cap loss at -investment
 
   const floatingPnLPercent = inv > 0 ? (floatingPnL / inv) * 100 : 0;
   const spreadCostUsd = Math.max(0, -floatingPnL);
 
   const now = new Date().toISOString();
   const id = tradeId || makeId();
+
+  const cleanSL = Number.isFinite(Number(stopLoss)) ? Number(stopLoss) : undefined;
+  const cleanTP = Number.isFinite(Number(takeProfit)) ? Number(takeProfit) : undefined;
 
   const trade: OlympTrade = {
     id,
@@ -263,8 +283,8 @@ export function createTrade(params: TradeOpenParams): {
     spreadPercent,
     entryPrice: entry,
     liquidationPrice: liq,
-    stopLoss: stopLoss,
-    takeProfit: takeProfit,
+    stopLoss: cleanSL,
+    takeProfit: cleanTP,
     midPrice: mid,
     effectiveExitPrice: exit0,
     floatingPnL,

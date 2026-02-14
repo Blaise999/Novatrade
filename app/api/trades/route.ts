@@ -6,6 +6,9 @@
  * POST /api/trades  - Open new trade (atomic balance deduction)
  * GET  /api/trades  - Get user's trades
  * PATCH /api/trades - Close trade (atomic balance credit)
+ *
+ * NOTE:
+ * - DB is the judge. close_trade_atomic now computes FX margin principal+pnl even if client/API is wrong.
  */
 
 import crypto from 'crypto';
@@ -22,7 +25,6 @@ export const dynamic = 'force-dynamic';
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
   if (!url || !key) throw new Error('Supabase not configured');
 
   return createClient(url, key, {
@@ -72,13 +74,10 @@ function sanitizeDbErrorMessage(msg: string): string {
   const s = String(msg || '').trim();
   if (!s) return 'Database error';
 
-  // Cloudflare HTML / upstream 500 sometimes leaks as a huge HTML document
   const lower = s.toLowerCase();
   if (lower.includes('<!doctype html') || lower.includes('<html') || lower.includes('cloudflare')) {
     return 'Database error (upstream 500). Check Supabase logs for the real cause.';
   }
-
-  // keep it short + readable
   return s.replace(/\s+/g, ' ').slice(0, 400);
 }
 
@@ -130,6 +129,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
 
     const qStatus = searchParams.get('status');
+    const qMarket = searchParams.get('market_type') || searchParams.get('marketType');
+
     const limit = clampInt(parseInt(searchParams.get('limit') || '50', 10) || 50, 1, 200);
     const offset = clampInt(parseInt(searchParams.get('offset') || '0', 10) || 0, 0, 100000);
 
@@ -141,6 +142,7 @@ export async function GET(request: NextRequest) {
       .range(offset, offset + limit - 1);
 
     if (qStatus) query = query.eq('status', qStatus);
+    if (qMarket) query = query.eq('market_type', qMarket);
 
     const { data: trades, error: fetchErr, count } = await query;
 
@@ -193,7 +195,6 @@ export async function POST(request: NextRequest) {
       idempotencyKey,
     } = body ?? {};
 
-    // idempotency key
     const clientKey = idempotencyKey || request.headers.get('x-idempotency-key');
     if (clientKey) {
       const existingTradeId = checkIdempotency(`${user.id}:${clientKey}`);
@@ -219,7 +220,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // validation
     if (!asset || !direction || investment == null || multiplier == null || marketPrice == null) {
       return NextResponse.json(
         { success: false, error: 'Missing required fields: asset, direction, investment, multiplier, marketPrice' },
@@ -235,7 +235,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Investment must be positive' }, { status: 400 });
     }
 
-    // ✅ force integer multiplier (prevents ambiguous function matches)
     const multInt = Math.trunc(multNum);
     if (!Number.isFinite(multNum) || multInt < 1 || multInt > 1000 || multInt !== multNum) {
       return NextResponse.json(
@@ -248,31 +247,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'marketPrice must be a valid number' }, { status: 400 });
     }
 
-    // optional tier check
     const supabase = getSupabaseAdmin();
-    try {
-      const { data: tierData } = await supabase
-        .from('users')
-        .select('tier_level, tier_active')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      const tierLevel = Number(tierData?.tier_level ?? 0);
-      const tierActive = Boolean(tierData?.tier_active);
-
-      if (tierLevel < 1 || !tierActive) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Upgrade required: You need at least Starter tier to trade.',
-            requiresTier: 1,
-          },
-          { status: 403 }
-        );
-      }
-    } catch (tierErr) {
-      console.warn('[Trades API] Tier check skipped:', tierErr);
-    }
 
     // build engine trade
     const tradeParams: TradeOpenParams = {
@@ -282,7 +257,7 @@ export async function POST(request: NextRequest) {
       direction,
       investment: inv,
       multiplier: multInt,
-   marketMidPrice: price,
+      marketMidPrice: price,
       stopLoss: stopLoss != null ? Number(stopLoss) : undefined,
       takeProfit: takeProfit != null ? Number(takeProfit) : undefined,
     };
@@ -292,15 +267,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: createError || 'Failed to create trade' }, { status: 400 });
     }
 
-    // ✅ DB uuid id
     const dbTradeId = crypto.randomUUID();
 
-    // ✅ call your CURRENT function signature (matches what you pasted)
-    // open_trade_atomic(
-    //   p_asset text, p_direction text, p_entry_price numeric, p_investment numeric,
-    //   p_liquidation_price numeric, p_multiplier integer, p_trade_id uuid, p_user_id uuid,
-    //   p_stop_loss numeric default null, p_take_profit numeric default null
-    // )
     const { data: result, error: dbError } = await supabase.rpc('open_trade_atomic', {
       p_asset: trade.asset,
       p_direction: trade.direction === 1 ? 'buy' : 'sell',
@@ -318,7 +286,6 @@ export async function POST(request: NextRequest) {
       const msg = sanitizeDbErrorMessage(dbError.message);
       console.error('[Trades API] Atomic open failed:', dbError);
 
-      // make this one readable for the UI
       if (msg.includes('INSUFFICIENT_BALANCE')) {
         return NextResponse.json({ success: false, error: 'Trade execution failed: INSUFFICIENT_BALANCE' }, { status: 400 });
       }
@@ -330,7 +297,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: result?.error || 'Trade rejected' }, { status: 400 });
     }
 
-    // store idempotency (DB uuid)
+    // mark FX fields for this endpoint (safe extra update)
+    if (String(assetType).toLowerCase() === 'forex') {
+      try {
+        await supabase
+          .from('trades')
+          .update({
+            market_type: 'fx',
+            trade_type: 'margin',
+            leverage: multInt,
+            pair: asset,
+          })
+          .eq('id', dbTradeId)
+          .eq('user_id', user.id);
+      } catch (e) {
+        // non-fatal
+        console.warn('[Trades API] FX metadata update skipped', e);
+      }
+    }
+
     if (clientKey) setIdempotency(`${user.id}:${clientKey}`, dbTradeId);
     setIdempotency(serverKey, dbTradeId);
 
@@ -350,7 +335,6 @@ export async function POST(request: NextRequest) {
         stopLoss: trade.stopLoss,
         takeProfit: trade.takeProfit,
         spreadCost: trade.spreadCostUsd,
-
         status: 'active',
       },
       newBalance: newBal ?? undefined,
@@ -376,7 +360,6 @@ export async function PATCH(request: NextRequest) {
     if (!tradeId) return NextResponse.json({ success: false, error: 'Trade ID required' }, { status: 400 });
     if (action !== 'close') return NextResponse.json({ success: false, error: 'Unsupported action' }, { status: 400 });
 
-    // quick uuid format check
     const uuidOk =
       typeof tradeId === 'string' &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tradeId);
@@ -399,11 +382,8 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Trade is not active' }, { status: 400 });
     }
 
-    const investment = toNumber(trade.investment ?? trade.amount ?? 0, 0);
-    const multiplier = toNumber(trade.multiplier ?? trade.leverage ?? 1, 1);
     const entryPrice = toNumber(trade.entry_price ?? trade.entryPrice, NaN);
 
-    // ✅ guard exit price (prevents NaN PnL and weird DB errors)
     const exit = exitPrice ?? trade.current_price ?? trade.exit_price;
     const finalExitPrice = toNumber(exit, NaN);
 
@@ -414,14 +394,46 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Exit price must be a valid number > 0' }, { status: 400 });
     }
 
-    const direction =
+    const directionInt =
       toNumber(trade.direction_int, NaN) === 1 ? 1 :
       toNumber(trade.direction_int, NaN) === -1 ? -1 :
-      String(trade.direction).toLowerCase() === 'buy' ? 1 : -1;
+      String(trade.direction).toLowerCase() === 'sell' ? -1 : 1;
 
-    const relativeChange = (finalExitPrice - entryPrice) / entryPrice;
-    let finalPnL = direction * investment * multiplier * relativeChange;
-    if (finalPnL < -investment) finalPnL = -investment;
+    const isFxMargin =
+      String(trade.market_type || '').toLowerCase() === 'fx' &&
+      String(trade.trade_type || '').toLowerCase() === 'margin';
+
+    let principal = toNumber(trade.investment, 0);
+    let finalPnL = toNumber(trade.pnl, 0);
+
+    if (isFxMargin) {
+      const amount = toNumber(trade.amount, 0);        // notional
+      const qty = toNumber(trade.quantity, 0);
+      const lev = toNumber(trade.leverage ?? trade.multiplier, 0);
+
+      // principal (margin) guess: investment/margin_used/amount/leverage
+      const marginUsed = toNumber(trade.margin_used, 0);
+      if (principal <= 0) principal = marginUsed > 0 ? marginUsed : (amount > 0 && lev > 0 ? amount / lev : 0);
+
+      // notional for pnl: prefer amount, else qty*entry
+      const notional = amount > 0 ? amount : (qty > 0 ? qty * entryPrice : (principal > 0 && lev > 0 ? principal * lev : 0));
+
+      const rel = (finalExitPrice - entryPrice) / entryPrice;
+      finalPnL = directionInt * notional * rel;
+
+      // cap loss to -principal (if principal known)
+      if (principal > 0 && finalPnL < -principal) finalPnL = -principal;
+    } else {
+      // olymp-style
+      const investment = toNumber(trade.investment ?? trade.amount ?? 0, 0);
+      const multiplier = toNumber(trade.multiplier ?? trade.leverage ?? 1, 1);
+      const relativeChange = (finalExitPrice - entryPrice) / entryPrice;
+
+      principal = investment;
+      finalPnL = directionInt * investment * multiplier * relativeChange;
+
+      if (finalPnL < -investment) finalPnL = -investment;
+    }
 
     const newStatus =
       closeReason === 'liquidated'
@@ -437,7 +449,7 @@ export async function PATCH(request: NextRequest) {
       p_user_id: user.id,
       p_exit_price: finalExitPrice,
       p_final_pnl: finalPnL,
-      p_investment: investment,
+      p_investment: principal,
       p_status: newStatus,
     });
 
@@ -453,6 +465,7 @@ export async function PATCH(request: NextRequest) {
 
     const newBal = normalizeNewBalance(result);
     const creditAmt = toNumber(result?.credit_amount, 0);
+    const dbFinalPnL = toNumber(result?.final_pnl, finalPnL);
 
     return NextResponse.json({
       success: true,
@@ -460,16 +473,16 @@ export async function PATCH(request: NextRequest) {
         id: tradeId,
         status: newStatus,
         exitPrice: finalExitPrice,
-        finalPnL,
+        finalPnL: dbFinalPnL,
         creditAmount: creditAmt,
       },
       newBalance: newBal ?? undefined,
       result: {
-        isWin: finalPnL > 0,
-        profit: finalPnL,
-        percentReturn: investment > 0 ? (finalPnL / investment) * 100 : 0,
+        isWin: dbFinalPnL > 0,
+        profit: dbFinalPnL,
+        percentReturn: principal > 0 ? (dbFinalPnL / principal) * 100 : 0,
       },
-      message: `Trade closed: ${finalPnL >= 0 ? '+' : ''}$${finalPnL.toFixed(2)}`,
+      message: `Trade closed: ${dbFinalPnL >= 0 ? '+' : ''}$${dbFinalPnL.toFixed(2)}`,
     });
   } catch (e: any) {
     console.error('[Trades API] PATCH Exception:', e);
