@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { useStore } from '@/lib/supabase/store-supabase';
 import {
   RefreshCw,
   TrendingUp,
@@ -20,44 +21,46 @@ type TradeRow = {
   id: string;
   user_id?: string;
 
-  asset?: string;
-  pair?: string;
-  symbol?: string;
+  asset?: string | null;
+  pair?: string | null;
+  symbol?: string | null;
 
-  asset_type?: string;
-  market_type?: string;
+  asset_type?: string | null;
+  market_type?: string | null;
 
-  trade_type?: string;
-  direction?: string;
-  type?: string;
-  direction_int?: number;
+  trade_type?: string | null;
+  direction?: string | null;
+  type?: string | null;
+  direction_int?: number | null;
 
-  investment?: number;
-  margin_used?: number;
-  amount?: number;
+  investment?: number | string | null;
+  margin_used?: number | string | null;
+  amount?: number | string | null;
 
-  multiplier?: number;
-  leverage?: number;
+  multiplier?: number | string | null;
+  leverage?: number | string | null;
 
-  entry_price?: number;
-  current_price?: number;
-  exit_price?: number;
+  entry_price?: number | string | null;
+  current_price?: number | string | null;
+  exit_price?: number | string | null;
 
-  liquidation_price?: number;
-  stop_loss?: number | null;
-  take_profit?: number | null;
+  liquidation_price?: number | string | null;
+  stop_loss?: number | string | null;
+  take_profit?: number | string | null;
 
-  floating_pnl?: number;
-  pnl?: number;
-  profit_loss?: number;
-  final_pnl?: number;
+  floating_pnl?: number | string | null;
+  pnl?: number | string | null;
+  profit_loss?: number | string | null;
+  final_pnl?: number | string | null;
 
-  spread_cost?: number;
-  status?: string;
+  pnl_percentage?: number | string | null;
 
-  opened_at?: string;
+  spread_cost?: number | string | null;
+  status?: string | null;
+
+  opened_at?: string | null;
   closed_at?: string | null;
-  updated_at?: string;
+  updated_at?: string | null;
 };
 
 type FxUiTrade = {
@@ -67,10 +70,10 @@ type FxUiTrade = {
   direction: 'buy' | 'sell';
   directionInt: 1 | -1;
 
-  investment: number;
-  multiplier: number;
+  investment: number; // margin/stake
+  multiplier: number; // leverage
 
-  notional: number;
+  notional: number; // exposure
   entryPrice: number;
   currentPrice: number;
 
@@ -94,7 +97,7 @@ type Candle = {
   high: number;
   low: number;
   close: number;
-  volume?: number; // IMPORTANT: omit if unknown (exactOptionalPropertyTypes)
+  volume?: number;
 };
 
 const FX_PAIRS = [
@@ -175,13 +178,17 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
   const notionalFromDb = clampNum(row.amount, 0);
 
   let stake =
-    clampNum(row.margin_used, 0) > 0 ? clampNum(row.margin_used, 0) : clampNum(row.investment, 0);
+    clampNum(row.margin_used, 0) > 0
+      ? clampNum(row.margin_used, 0)
+      : clampNum(row.investment, 0);
 
   if (!(stake > 0) && isFxMargin && notionalFromDb > 0 && leverage > 0) {
     stake = notionalFromDb / leverage;
   }
 
-  const notional = isFxMargin ? (notionalFromDb > 0 ? notionalFromDb : stake * leverage) : clampNum(row.investment, 0) * clampNum(row.multiplier, 1);
+  const notional = isFxMargin
+    ? (notionalFromDb > 0 ? notionalFromDb : stake * leverage)
+    : clampNum(row.investment, 0) * clampNum(row.multiplier, 1);
 
   const status = normStatus(row.status);
 
@@ -199,7 +206,9 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
   const exposure = isFxMargin ? notional : stake * clampNum(row.multiplier, 1);
 
   const calc =
-    entryPrice > 0 ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice) : 0;
+    entryPrice > 0
+      ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice)
+      : 0;
 
   const pnl = pnlFromDb !== 0 ? pnlFromDb : calc;
   const pnlPercent = stake > 0 ? (pnl / stake) * 100 : 0;
@@ -220,9 +229,9 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
     pnl,
     pnlPercent,
     status,
-    openedAt: row.opened_at,
+    openedAt: row.opened_at ?? undefined,
     closedAt: row.closed_at ?? undefined,
-    updatedAt: row.updated_at,
+    updatedAt: row.updated_at ?? undefined,
   };
 }
 
@@ -234,6 +243,7 @@ function makeIdempotencyKey(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/** --------- token helpers (robust) ---------- */
 function decodeJwtPayload(token: string): any | null {
   try {
     const parts = token.split('.');
@@ -333,6 +343,7 @@ function readStoredAccessToken(): string | null {
   return pick(window.sessionStorage) || pick(window.localStorage);
 }
 
+/** --------- candles fetch ---------- */
 async function fetchFxCandles(
   display: string,
   tf: TF,
@@ -358,10 +369,8 @@ async function fetchFxCandles(
 
   const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
 
-  const out: Candle[] = [];
-
-  for (const r of rows) {
-    if (!r || typeof r !== 'object') continue;
+  const mapped: (Candle | null)[] = rows.map((r) => {
+    if (!r || typeof r !== 'object') return null;
 
     const t = (r.time ?? r.t ?? r.timestamp ?? r.ts ?? r.open_time ?? r.openTime) as any;
     let timeSec = 0;
@@ -377,25 +386,24 @@ async function fetchFxCandles(
     const low = clampNum((r.low ?? r.l) as any, NaN);
     const close = clampNum((r.close ?? r.c) as any, NaN);
 
-    if (!Number.isFinite(timeSec) || timeSec <= 0) continue;
-    if (![open, high, low, close].every((x) => Number.isFinite(x))) continue;
+    const volRaw = r.volume ?? r.v;
+    const vol = volRaw != null ? clampNum(volRaw, 0) : undefined;
 
-    const candle: Candle = { time: timeSec, open, high, low, close };
+    if (!Number.isFinite(timeSec) || timeSec <= 0) return null;
+    if (![open, high, low, close].every((x) => Number.isFinite(x))) return null;
 
-    const volRaw = (r.volume ?? r.v) as any;
-    if (volRaw != null) {
-      const v = clampNum(volRaw, NaN);
-      if (Number.isFinite(v)) candle.volume = v;
-    }
+    const base: Candle = { time: timeSec, open, high, low, close };
+    return vol != null ? { ...base, volume: vol } : base;
+  });
 
-    out.push(candle);
-  }
-
-  out.sort((a, b) => a.time - b.time);
-  return out;
+  return mapped
+    .filter((x): x is Candle => x !== null)
+    .sort((a, b) => a.time - b.time);
 }
 
 export default function FXTradePage() {
+  const { refreshUser } = useStore();
+
   const [mode, setMode] = useState<Mode>('active');
   const [loading, setLoading] = useState(false);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
@@ -405,6 +413,7 @@ export default function FXTradePage() {
   const [trades, setTrades] = useState<FxUiTrade[]>([]);
   const [exitDraft, setExitDraft] = useState<Record<string, string>>({});
 
+  // ticket
   const [asset, setAsset] = useState<string>('EUR/USD');
   const [direction, setDirection] = useState<'buy' | 'sell'>('buy');
   const [investment, setInvestment] = useState<string>('50');
@@ -413,10 +422,12 @@ export default function FXTradePage() {
   const [stopLoss, setStopLoss] = useState<string>('');
   const [takeProfit, setTakeProfit] = useState<string>('');
 
+  // chart
   const [tf, setTf] = useState<TF>('5m');
   const [chartNote, setChartNote] = useState<string | null>(null);
   const [lastClose, setLastClose] = useState<number | null>(null);
 
+  // chart refs
   const chartWrapRef = useRef<HTMLDivElement | null>(null);
   const chartApiRef = useRef<any>(null);
   const candleSeriesRef = useRef<any>(null);
@@ -424,6 +435,7 @@ export default function FXTradePage() {
   const chartAbortRef = useRef<AbortController | null>(null);
   const chartInFlightRef = useRef(false);
 
+  // price push throttle
   const lastPushAtRef = useRef<number>(0);
   const lastPushedPriceRef = useRef<number | null>(null);
 
@@ -465,13 +477,16 @@ export default function FXTradePage() {
       lastPushAtRef.current = now;
       lastPushedPriceRef.current = px;
 
+      // ✅ server will now call revalue_fx_trades() and update pnl + SL/TP
       await fetch('/api/trades', {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'mark_price', asset: pair, price: px }),
         cache: 'no-store',
       });
-    } catch {}
+    } catch {
+      // silent
+    }
   };
 
   const loadTrades = async (nextMode: Mode = mode) => {
@@ -482,7 +497,7 @@ export default function FXTradePage() {
       const token = await headerAuthToken();
       if (!token) throw new Error('Missing API token. Please sign in again.');
 
-      const res = await fetch(`/api/trades?limit=200`, {
+      const res = await fetch(`/api/trades?limit=200&mode=all`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
@@ -500,7 +515,7 @@ export default function FXTradePage() {
         throw new Error(json?.error || `Failed to load trades (${res.status})`);
       }
 
-      setBalance(clampNum(json?.balance ?? json?.newBalance ?? 0));
+      setBalance(clampNum(json?.balance ?? json?.balance_available ?? 0));
 
       const rows: TradeRow[] = Array.isArray(json?.trades) ? (json.trades as TradeRow[]) : [];
       const fxRows = rows.filter((r) => String(r.market_type ?? '').toLowerCase() === 'fx');
@@ -508,6 +523,11 @@ export default function FXTradePage() {
       const parsed = fxRows.map(dbRowToUi).filter((t) => !!t.asset);
 
       setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
+
+      // ✅ refresh global user so top header balance updates everywhere
+      try {
+        await refreshUser();
+      } catch {}
     } catch (e: any) {
       setError(e?.message || 'Failed to load');
     } finally {
@@ -515,6 +535,7 @@ export default function FXTradePage() {
     }
   };
 
+  /** ---------- CHART INIT (dynamic import) ---------- */
   const initChartIfNeeded = async () => {
     const el = chartWrapRef.current;
     if (!el) return;
@@ -600,7 +621,7 @@ export default function FXTradePage() {
     try {
       await initChartIfNeeded();
 
-      const candles = await fetchFxCandles(asset, tf, 360, ac.signal);
+      const candles = await fetchFxCandles(asset, tf, 320, ac.signal);
       if (ac.signal.aborted) return;
 
       if (!candles.length) {
@@ -616,7 +637,9 @@ export default function FXTradePage() {
         setMarketPrice(lc.toFixed(5));
 
         setTrades((prev) =>
-          prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
+          prev.map((t) =>
+            t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t
+          )
         );
 
         void pushPriceToServer(asset, lc);
@@ -644,6 +667,9 @@ export default function FXTradePage() {
   useEffect(() => {
     void loadTrades('active');
     void loadChart();
+
+    // also refresh user on mount so header is correct
+    void refreshUser().catch(() => {});
 
     return () => {
       try {
@@ -678,6 +704,9 @@ export default function FXTradePage() {
   const onRefresh = async () => {
     await loadTrades(mode);
     await loadChart();
+    try {
+      await refreshUser();
+    } catch {}
   };
 
   const openTrade = async () => {
@@ -732,11 +761,16 @@ export default function FXTradePage() {
 
       if (!res.ok || !json?.success) throw new Error(json?.error || `Trade open failed (${res.status})`);
 
-      if (json?.newBalance != null) setBalance(clampNum(json.newBalance, balance));
+      setBalance(clampNum(json?.balance ?? json?.balance_available ?? balance));
 
       await loadTrades(mode);
 
       if (lastClose != null && lastClose > 0) void pushPriceToServer(asset, lastClose);
+
+      // ✅ update global header balance everywhere
+      try {
+        await refreshUser();
+      } catch {}
     } catch (e: any) {
       setError(e?.message || 'Failed to open trade');
     } finally {
@@ -777,7 +811,7 @@ export default function FXTradePage() {
 
       if (!res.ok || !json?.success) throw new Error(json?.error || `Trade close failed (${res.status})`);
 
-      if (json?.newBalance != null) setBalance(clampNum(json.newBalance, balance));
+      setBalance(clampNum(json?.balance ?? json?.balance_available ?? balance));
 
       setExitDraft((prev) => {
         const next = { ...prev };
@@ -786,6 +820,11 @@ export default function FXTradePage() {
       });
 
       await loadTrades(mode);
+
+      // ✅ update global header balance everywhere
+      try {
+        await refreshUser();
+      } catch {}
     } catch (e: any) {
       setError(e?.message || 'Failed to close trade');
     } finally {
@@ -807,6 +846,7 @@ export default function FXTradePage() {
   return (
     <div className="min-h-screen bg-[#07070b] text-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-7 space-y-6">
+        {/* Header */}
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3">
             <div className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
@@ -814,7 +854,7 @@ export default function FXTradePage() {
             </div>
             <div>
               <div className="text-xl font-semibold">FX Trading</div>
-              <div className="text-xs text-white/60">Live chart + margin trades</div>
+              <div className="text-xs text-white/60">Real-time chart + margin trading</div>
             </div>
           </div>
 
@@ -836,6 +876,7 @@ export default function FXTradePage() {
           </div>
         </div>
 
+        {/* Error */}
         {error ? (
           <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 flex items-start gap-2">
             <AlertTriangle className="h-5 w-5 text-red-200 mt-0.5" />
@@ -843,7 +884,9 @@ export default function FXTradePage() {
           </div>
         ) : null}
 
+        {/* Main grid (PC-friendly) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {/* Chart card */}
           <div className="lg:col-span-8 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
             <div className="px-4 py-3 border-b border-white/10 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
@@ -867,7 +910,7 @@ export default function FXTradePage() {
                   ))}
                 </select>
 
-                <div className="flex flex-wrap items-center gap-1">
+                <div className="flex items-center gap-1">
                   {TIMEFRAMES.map((t) => (
                     <button
                       key={t.value}
@@ -891,13 +934,15 @@ export default function FXTradePage() {
               </div>
             ) : null}
 
+            {/* Taller chart */}
             <div className="p-4">
               <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
-                <div ref={chartWrapRef} className="w-full h-[460px] sm:h-[560px] lg:h-[700px]" />
+                <div ref={chartWrapRef} className="w-full h-[420px] sm:h-[520px] lg:h-[640px]" />
               </div>
             </div>
           </div>
 
+          {/* Trade ticket */}
           <div className="lg:col-span-4 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
             <div className="px-4 py-3 border-b border-white/10">
               <div className="font-semibold">New Order</div>
@@ -1018,6 +1063,7 @@ export default function FXTradePage() {
           </div>
         </div>
 
+        {/* Tabs */}
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -1048,6 +1094,7 @@ export default function FXTradePage() {
           </button>
         </div>
 
+        {/* Trades */}
         <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
           <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
             <div className="font-semibold">{mode === 'active' ? 'Open Positions' : 'Trade History'}</div>
