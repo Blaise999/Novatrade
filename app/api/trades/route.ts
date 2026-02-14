@@ -282,7 +282,7 @@ export async function POST(request: NextRequest) {
       direction,
       investment: inv,
       multiplier: multInt,
-      marketPrice: price,
+   marketMidPrice: price,
       stopLoss: stopLoss != null ? Number(stopLoss) : undefined,
       takeProfit: takeProfit != null ? Number(takeProfit) : undefined,
     };
@@ -349,7 +349,8 @@ export async function POST(request: NextRequest) {
         liquidationPrice: trade.liquidationPrice,
         stopLoss: trade.stopLoss,
         takeProfit: trade.takeProfit,
-        spreadCost: trade.spreadCost,
+        spreadCost: trade.spreadCostUsd,
+
         status: 'active',
       },
       newBalance: newBal ?? undefined,
