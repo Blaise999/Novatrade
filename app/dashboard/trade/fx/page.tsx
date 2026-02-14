@@ -1,11 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { RefreshCw, TrendingUp, TrendingDown, XCircle, History, ShieldAlert } from 'lucide-react';
-
-
-
 
 type Mode = 'active' | 'history';
 
@@ -22,17 +19,17 @@ type TradeRow = {
   user_id?: string;
 
   // asset fields (varies)
-  asset?: string; // some systems
-  pair?: string; // fx engine wrote pair
+  asset?: string;
+  pair?: string;
   symbol?: string;
 
-  asset_type?: string; // "forex"
-  market_type?: string; // "fx"
+  asset_type?: string;
+  market_type?: string;
 
   // direction fields (varies)
-  direction?: string; // "buy"/"sell"
-  type?: string; // also "buy"/"sell"
-  direction_int?: number; // 1 / -1
+  direction?: string;
+  type?: string;
+  direction_int?: number;
 
   // money
   investment?: number;
@@ -95,9 +92,12 @@ type FxUiTrade = {
   updatedAt?: string;
 };
 
+// ======================
+// UTIL
+// ======================
+
 function makeIdempotencyKey(): string {
   try {
-    // optional chaining avoids the “always true” function check
     const key = globalThis.crypto?.randomUUID?.();
     if (key) return key;
   } catch {
@@ -131,7 +131,6 @@ function normStatus(s: unknown): FxUiTrade['status'] {
   if (v === 'liquidated') return 'liquidated';
   if (v === 'stopped_out') return 'stopped_out';
   if (v === 'take_profit') return 'take_profit';
-  // default: treat unknown as history-safe
   return 'closed';
 }
 
@@ -207,6 +206,274 @@ function fmt(n: number, dp = 2) {
   return n.toFixed(dp);
 }
 
+function dpForPair(pair: string) {
+  return pair.includes('JPY') ? 3 : 5;
+}
+
+// ======================
+// CHART
+// ======================
+
+type TF = '1m' | '5m' | '15m' | '1h';
+
+type Candle = {
+  time: number; // unix seconds
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+};
+
+function mapCandleRow(row: any): Candle | null {
+  // support many possible schemas
+  const tRaw =
+    row.time ?? row.t ?? row.ts ?? row.timestamp ?? row.created_at ?? row.opened_at ?? row.date;
+
+  const tMs =
+    typeof tRaw === 'number'
+      ? (tRaw > 2_000_000_000 ? tRaw : tRaw * 1000) // if ms keep, if seconds convert
+      : Date.parse(String(tRaw));
+
+  if (!Number.isFinite(tMs)) return null;
+
+  const o = clampNum(row.open ?? row.o, NaN);
+  const h = clampNum(row.high ?? row.h, NaN);
+  const l = clampNum(row.low ?? row.l, NaN);
+  const c = clampNum(row.close ?? row.c, NaN);
+
+  if (![o, h, l, c].every((x) => Number.isFinite(x))) return null;
+
+  const v = row.volume ?? row.v;
+  const vol = v == null ? undefined : clampNum(v, undefined as any);
+
+  return {
+    time: Math.floor(tMs / 1000),
+    open: o,
+    high: h,
+    low: l,
+    close: c,
+    volume: Number.isFinite(vol as any) ? (vol as number) : undefined,
+  };
+}
+
+async function fetchCandles(symbol: string, tf: TF, limit = 240): Promise<Candle[]> {
+  // 1) Try an API route if you already have it.
+  try {
+    const res = await fetch(
+      `/api/market/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=${limit}`,
+      { method: 'GET', cache: 'no-store' }
+    );
+    if (res.ok) {
+      const json = await res.json().catch(() => ({}));
+      const rows = Array.isArray(json?.candles) ? json.candles : Array.isArray(json) ? json : [];
+      const mapped = rows.map(mapCandleRow).filter((x): x is Candle => !!x);
+      if (mapped.length) return mapped.sort((a, b) => a.time - b.time);
+    }
+  } catch {
+    // ignore and fallback
+  }
+
+  // 2) Fallback: read from Supabase `candles` table (best effort).
+  if (isSupabaseConfigured() && supabase) {
+    const { data, error } = await supabase
+      .from('candles')
+      .select('*')
+      .eq('symbol', symbol)
+      .order('time', { ascending: false })
+      .limit(limit);
+
+    if (!error && Array.isArray(data)) {
+      const mapped = data.map(mapCandleRow).filter((x): x is Candle => !!x);
+      if (mapped.length) return mapped.sort((a, b) => a.time - b.time);
+    }
+  }
+
+  throw new Error('No candle source available. Wire /api/market/candles or expose candles table.');
+}
+
+function FXChartCard({
+  symbol,
+  tf,
+  onPickPrice,
+}: {
+  symbol: string;
+  tf: TF;
+  onPickPrice: (price: number) => void;
+}) {
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<any>(null);
+  const seriesRef = useRef<any>(null);
+
+  const [loading, setLoading] = useState(false);
+  const [last, setLast] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setErr(null);
+    setLoading(true);
+    try {
+      const candles = await fetchCandles(symbol, tf, 280);
+      if (candles.length) {
+        const lastClose = candles[candles.length - 1].close;
+        setLast(lastClose);
+        onPickPrice(lastClose);
+      }
+      // push to chart if ready
+      if (seriesRef.current) {
+        seriesRef.current.setData(
+          candles.map((c) => ({
+            time: c.time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }))
+        );
+      }
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to load chart');
+    } finally {
+      setLoading(false);
+    }
+  }, [symbol, tf, onPickPrice]);
+
+  useEffect(() => {
+    let destroyed = false;
+    let cleanup = () => {};
+
+    (async () => {
+      if (!wrapRef.current) return;
+      const { createChart, ColorType } = await import('lightweight-charts');
+
+      if (destroyed) return;
+
+      // destroy any previous chart
+      if (chartRef.current) {
+        try {
+          chartRef.current.remove();
+        } catch {
+          // ignore
+        }
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
+
+      const chart = createChart(wrapRef.current, {
+        layout: {
+          background: { type: ColorType.Solid, color: 'transparent' },
+          textColor: 'rgba(255,255,255,0.75)',
+        },
+        grid: {
+          vertLines: { color: 'rgba(255,255,255,0.06)' },
+          horzLines: { color: 'rgba(255,255,255,0.06)' },
+        },
+        rightPriceScale: {
+          borderColor: 'rgba(255,255,255,0.10)',
+        },
+        timeScale: {
+          borderColor: 'rgba(255,255,255,0.10)',
+        },
+        crosshair: {
+          vertLine: { color: 'rgba(255,255,255,0.20)' },
+          horzLine: { color: 'rgba(255,255,255,0.20)' },
+        },
+        height: 320,
+        width: wrapRef.current.clientWidth,
+      });
+
+      const series = chart.addCandlestickSeries({
+        upColor: 'rgba(34,197,94,1)',
+        downColor: 'rgba(244,63,94,1)',
+        borderUpColor: 'rgba(34,197,94,1)',
+        borderDownColor: 'rgba(244,63,94,1)',
+        wickUpColor: 'rgba(34,197,94,1)',
+        wickDownColor: 'rgba(244,63,94,1)',
+      });
+
+      chartRef.current = chart;
+      seriesRef.current = series;
+
+      const onResize = () => {
+        if (!wrapRef.current || !chartRef.current) return;
+        chartRef.current.applyOptions({ width: wrapRef.current.clientWidth });
+      };
+
+      window.addEventListener('resize', onResize);
+
+      cleanup = () => {
+        window.removeEventListener('resize', onResize);
+        try {
+          chart.remove();
+        } catch {
+          // ignore
+        }
+      };
+
+      // after chart is ready, load candles
+      await load();
+    })();
+
+    const poll = setInterval(() => {
+      load();
+    }, 15000);
+
+    return () => {
+      destroyed = true;
+      clearInterval(poll);
+      cleanup();
+    };
+  }, [symbol, tf, load]);
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+        <div className="font-semibold">Chart</div>
+        <div className="flex items-center gap-2">
+          <div className="text-xs text-white/60">{symbol} · {tf}</div>
+          <button
+            type="button"
+            onClick={load}
+            disabled={loading}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            <span className="text-sm">Reload</span>
+          </button>
+        </div>
+      </div>
+
+      {err ? (
+        <div className="px-4 py-3 text-sm text-rose-100 bg-rose-500/10 border-b border-rose-500/20">
+          {err}
+        </div>
+      ) : null}
+
+      <div className="px-4 py-3 flex items-center justify-between">
+        <div className="text-xs text-white/60">
+          Last: <span className="text-white/80 font-semibold">{last == null ? '—' : last.toFixed(dpForPair(symbol))}</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => last != null && onPickPrice(last)}
+          disabled={last == null}
+          className="px-3 py-2 rounded-xl bg-white text-black font-semibold text-xs hover:opacity-90 transition disabled:opacity-50"
+        >
+          Use last price
+        </button>
+      </div>
+
+      <div className="p-3">
+        <div ref={wrapRef} className="w-full rounded-xl bg-black/30 border border-white/10" />
+      </div>
+    </div>
+  );
+}
+
+// ======================
+// PAGE
+// ======================
+
 const FX_PAIRS = [
   'EUR/USD',
   'GBP/USD',
@@ -237,7 +504,7 @@ export default function FXTradePage() {
   const [trades, setTrades] = useState<FxUiTrade[]>([]);
   const [exitDraft, setExitDraft] = useState<Record<string, string>>({});
 
-  // Open form (TV screen only — server is judge)
+  // Open form
   const [asset, setAsset] = useState<string>('EUR/USD');
   const [direction, setDirection] = useState<'buy' | 'sell'>('buy');
   const [investment, setInvestment] = useState<string>('50');
@@ -246,63 +513,77 @@ export default function FXTradePage() {
   const [stopLoss, setStopLoss] = useState<string>('');
   const [takeProfit, setTakeProfit] = useState<string>('');
 
+  const [tf, setTf] = useState<TF>('5m');
+
   const firstLoadRef = useRef(false);
-const canUseSupabase = isSupabaseConfigured() && !!supabase;
 
-  const headerAuthToken = async (): Promise<string | null> => {
-    if (!canUseSupabase) return null;
-    const { data, error: sErr } = await supabase.auth.getSession();
-    if (sErr) return null;
-    const token = data.session?.access_token ?? null;
-    return token;
-  };
+  const canUseSupabase = isSupabaseConfigured() && !!supabase;
 
-  const loadTrades = async (nextMode: Mode = mode) => {
-    setError(null);
-    setLoading(true);
+  const getAccessToken = useCallback(async (): Promise<string> => {
+    if (!canUseSupabase) throw new Error('Supabase client not configured');
 
+    // try session
+    const s1 = await supabase.auth.getSession();
+    const token1 = s1.data.session?.access_token;
+    if (token1) return token1;
+
+    // try refresh (in case session is stale)
     try {
-      const token = await headerAuthToken();
-      if (!token) throw new Error('Not signed in (missing access token)');
-
-      const res = await fetch(`/api/trades?limit=200`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        cache: 'no-store',
-      });
-
-      const json = await res.json().catch(() => ({}));
-
-      if (!res.ok || !json?.success) {
-        throw new Error(json?.error || `Failed to load trades (${res.status})`);
-      }
-
-      setBalance(clampNum(json.balance ?? json.newBalance ?? 0));
-
-      const rows: TradeRow[] = Array.isArray(json.trades) ? (json.trades as TradeRow[]) : [];
-
-      // ✅ typed map + type-guard filter (no implicit any)
-      const parsed = rows
-        .map(dbRowToUi)
-        .filter((t): t is FxUiTrade => t.assetType === 'forex' && !!t.asset);
-
-      // active tab => only active; history => everything
-      setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
-    } catch (e: any) {
-      setError(e?.message || 'Failed to load');
-    } finally {
-      setLoading(false);
+      await supabase.auth.refreshSession();
+    } catch {
+      // ignore
     }
-  };
+
+    const s2 = await supabase.auth.getSession();
+    const token2 = s2.data.session?.access_token;
+    if (token2) return token2;
+
+    throw new Error('Missing API token (no Supabase session). Please log in again.');
+  }, [canUseSupabase]);
+
+  const loadTrades = useCallback(
+    async (nextMode: Mode = mode) => {
+      setError(null);
+      setLoading(true);
+
+      try {
+        const token = await getAccessToken();
+
+        const res = await fetch(`/api/trades?limit=200`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        });
+
+        const json = await res.json().catch(() => ({}));
+
+        if (!res.ok || !json?.success) {
+          throw new Error(json?.error || `Failed to load trades (${res.status})`);
+        }
+
+        setBalance(clampNum(json.balance ?? json.newBalance ?? 0));
+
+        const rows: TradeRow[] = Array.isArray(json.trades) ? (json.trades as TradeRow[]) : [];
+
+        const parsed = rows
+          .map(dbRowToUi)
+          .filter((t): t is FxUiTrade => t.assetType === 'forex' && !!t.asset);
+
+        setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
+      } catch (e: any) {
+        setError(e?.message || 'Failed to load');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [getAccessToken, mode]
+  );
 
   useEffect(() => {
     if (firstLoadRef.current) return;
     firstLoadRef.current = true;
     loadTrades('active');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadTrades]);
 
   const onRefresh = async () => {
     await loadTrades(mode);
@@ -313,8 +594,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
     setLoading(true);
 
     try {
-      const token = await headerAuthToken();
-      if (!token) throw new Error('Not signed in (missing access token)');
+      const token = await getAccessToken();
 
       const inv = clampNum(investment, 0);
       const mp = clampNum(marketPrice, 0);
@@ -328,8 +608,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
         throw new Error('Multiplier must be between 1 and 1000');
       }
 
-   const idempotencyKey = makeIdempotencyKey();
-
+      const idempotencyKey = makeIdempotencyKey();
 
       const res = await fetch('/api/trades', {
         method: 'POST',
@@ -341,7 +620,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
         body: JSON.stringify({
           asset,
           assetType: 'forex',
-          direction, // 'buy' | 'sell'
+          direction,
           investment: inv,
           multiplier,
           marketPrice: mp,
@@ -356,10 +635,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
         throw new Error(json?.error || `Trade open failed (${res.status})`);
       }
 
-      // server is judge: trust server balance
       if (json?.newBalance != null) setBalance(clampNum(json.newBalance, balance));
-
-      // reload list from server
       await loadTrades(mode);
     } catch (e: any) {
       setError(e?.message || 'Failed to open trade');
@@ -373,8 +649,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
     setActionLoadingId(t.id);
 
     try {
-      const token = await headerAuthToken();
-      if (!token) throw new Error('Not signed in (missing access token)');
+      const token = await getAccessToken();
 
       const draft = (exitDraft[t.id] ?? '').trim();
       const exit = draft ? clampNum(draft, 0) : clampNum(t.currentPrice, 0);
@@ -414,7 +689,8 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
     }
   };
 
-  const headerIcon = mode === 'active' ? <TrendingUp className="h-4 w-4" /> : <History className="h-4 w-4" />;
+  const headerIcon =
+    mode === 'active' ? <TrendingUp className="h-4 w-4" /> : <History className="h-4 w-4" />;
 
   const sortedTrades = useMemo(() => {
     return [...trades].sort((a, b) => {
@@ -465,144 +741,166 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
           </div>
         ) : null}
 
-        {/* Open trade card */}
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-5">
-          <div className="flex items-center justify-between gap-4 mb-4">
-            <div>
-              <div className="font-semibold">Open Trade</div>
-              <div className="text-xs text-white/60">Deduction happens atomically on the server.</div>
-            </div>
-          </div>
+        {/* Chart + Open trade */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <FXChartCard
+            symbol={asset}
+            tf={tf}
+            onPickPrice={(p) => setMarketPrice(p.toFixed(dpForPair(asset)))}
+          />
 
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-            <div className="md:col-span-2">
-              <label className="text-xs text-white/60">Pair</label>
-              <select
-                value={asset}
-                onChange={(e) => setAsset(e.target.value)}
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
-              >
-                {FX_PAIRS.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </div>
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-5">
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <div>
+                <div className="font-semibold">Open Trade</div>
+                <div className="text-xs text-white/60">Deduction happens atomically on the server.</div>
+              </div>
 
-            <div>
-              <label className="text-xs text-white/60">Direction</label>
-              <div className="mt-1 grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDirection('buy')}
-                  className={`rounded-xl border px-3 py-2 text-sm transition ${
-                    direction === 'buy'
-                      ? 'bg-emerald-500/20 border-emerald-500/40'
-                      : 'bg-black/30 border-white/10 hover:bg-white/10'
-                  }`}
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-white/60">TF</label>
+                <select
+                  value={tf}
+                  onChange={(e) => setTf(e.target.value as TF)}
+                  className="rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none text-sm"
                 >
-                  <span className="inline-flex items-center gap-2">
-                    <TrendingUp className="h-4 w-4" /> Buy
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDirection('sell')}
-                  className={`rounded-xl border px-3 py-2 text-sm transition ${
-                    direction === 'sell'
-                      ? 'bg-rose-500/20 border-rose-500/40'
-                      : 'bg-black/30 border-white/10 hover:bg-white/10'
-                  }`}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <TrendingDown className="h-4 w-4" /> Sell
-                  </span>
-                </button>
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="1h">1h</option>
+                </select>
               </div>
             </div>
 
-            <div>
-              <label className="text-xs text-white/60">Investment ($)</label>
-              <input
-                value={investment}
-                onChange={(e) => setInvestment(e.target.value)}
-                inputMode="decimal"
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
-                placeholder="50"
-              />
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+              <div className="md:col-span-2">
+                <label className="text-xs text-white/60">Pair</label>
+                <select
+                  value={asset}
+                  onChange={(e) => setAsset(e.target.value)}
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                >
+                  {FX_PAIRS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs text-white/60">Direction</label>
+                <div className="mt-1 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDirection('buy')}
+                    className={`rounded-xl border px-3 py-2 text-sm transition ${
+                      direction === 'buy'
+                        ? 'bg-emerald-500/20 border-emerald-500/40'
+                        : 'bg-black/30 border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <TrendingUp className="h-4 w-4" /> Buy
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDirection('sell')}
+                    className={`rounded-xl border px-3 py-2 text-sm transition ${
+                      direction === 'sell'
+                        ? 'bg-rose-500/20 border-rose-500/40'
+                        : 'bg-black/30 border-white/10 hover:bg-white/10'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <TrendingDown className="h-4 w-4" /> Sell
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-white/60">Investment ($)</label>
+                <input
+                  value={investment}
+                  onChange={(e) => setInvestment(e.target.value)}
+                  inputMode="decimal"
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                  placeholder="50"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-white/60">Multiplier</label>
+                <select
+                  value={multiplier}
+                  onChange={(e) => setMultiplier(Number(e.target.value))}
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                >
+                  {MULTIPLIERS.map((m) => (
+                    <option key={m} value={m}>
+                      x{m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs text-white/60">Market Price</label>
+                <input
+                  value={marketPrice}
+                  onChange={(e) => setMarketPrice(e.target.value)}
+                  inputMode="decimal"
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                  placeholder="1.00000"
+                />
+              </div>
+
+              <div className="md:col-span-3">
+                <label className="text-xs text-white/60">Stop Loss (optional)</label>
+                <input
+                  value={stopLoss}
+                  onChange={(e) => setStopLoss(e.target.value)}
+                  inputMode="decimal"
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                  placeholder="e.g. 0.99500"
+                />
+              </div>
+
+              <div className="md:col-span-3">
+                <label className="text-xs text-white/60">Take Profit (optional)</label>
+                <input
+                  value={takeProfit}
+                  onChange={(e) => setTakeProfit(e.target.value)}
+                  inputMode="decimal"
+                  className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+                  placeholder="e.g. 1.01000"
+                />
+              </div>
             </div>
 
-            <div>
-              <label className="text-xs text-white/60">Multiplier</label>
-              <select
-                value={multiplier}
-                onChange={(e) => setMultiplier(Number(e.target.value))}
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <div className="text-xs text-white/60">
+                Tip: Use chart “Use last price” to auto-fill Market Price.
+              </div>
+
+              <button
+                onClick={openTrade}
+                disabled={loading || !canUseSupabase}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white text-black font-semibold hover:opacity-90 transition disabled:opacity-50"
+                type="button"
               >
-                {MULTIPLIERS.map((m) => (
-                  <option key={m} value={m}>
-                    x{m}
-                  </option>
-                ))}
-              </select>
+                Open Trade
+              </button>
             </div>
 
-            <div>
-              <label className="text-xs text-white/60">Market Price</label>
-              <input
-                value={marketPrice}
-                onChange={(e) => setMarketPrice(e.target.value)}
-                inputMode="decimal"
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
-                placeholder="1.00000"
-              />
-            </div>
-
-            <div className="md:col-span-3">
-              <label className="text-xs text-white/60">Stop Loss (optional)</label>
-              <input
-                value={stopLoss}
-                onChange={(e) => setStopLoss(e.target.value)}
-                inputMode="decimal"
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
-                placeholder="e.g. 0.99500"
-              />
-            </div>
-
-            <div className="md:col-span-3">
-              <label className="text-xs text-white/60">Take Profit (optional)</label>
-              <input
-                value={takeProfit}
-                onChange={(e) => setTakeProfit(e.target.value)}
-                inputMode="decimal"
-                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
-                placeholder="e.g. 1.01000"
-              />
-            </div>
+            {!canUseSupabase ? (
+              <div className="mt-3 text-xs text-yellow-200/80 flex items-center gap-2">
+                <XCircle className="h-4 w-4" />
+                Supabase client not configured — cannot fetch session token to call /api/trades.
+              </div>
+            ) : null}
           </div>
-
-          <div className="mt-4 flex items-center justify-between gap-3">
-            <div className="text-xs text-white/60">
-              Tip: set <span className="text-white/80">Market Price</span> to your live quote source if you have one.
-            </div>
-
-            <button
-              onClick={openTrade}
-              disabled={loading || !canUseSupabase}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white text-black font-semibold hover:opacity-90 transition disabled:opacity-50"
-              type="button"
-            >
-              Open Trade
-            </button>
-          </div>
-
-          {!canUseSupabase ? (
-            <div className="mt-3 text-xs text-yellow-200/80 flex items-center gap-2">
-              <XCircle className="h-4 w-4" />
-              Supabase client not configured — cannot fetch session token to call /api/trades.
-            </div>
-          ) : null}
         </div>
 
         {/* Tabs */}
@@ -686,15 +984,19 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
                                 : 'bg-rose-500/15 border-rose-500/30 text-rose-100'
                             }`}
                           >
-                            {t.direction === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                            {t.direction === 'buy' ? (
+                              <TrendingUp className="h-3 w-3" />
+                            ) : (
+                              <TrendingDown className="h-3 w-3" />
+                            )}
                             {t.direction.toUpperCase()}
                           </span>
                         </td>
 
                         <td className="px-4 py-3 text-right">${fmt(t.investment, 2)}</td>
                         <td className="px-4 py-3 text-right">x{fmt(t.multiplier, 0)}</td>
-                        <td className="px-4 py-3 text-right">{t.entryPrice ? fmt(t.entryPrice, 5) : '-'}</td>
-                        <td className="px-4 py-3 text-right">{t.currentPrice ? fmt(t.currentPrice, 5) : '-'}</td>
+                        <td className="px-4 py-3 text-right">{t.entryPrice ? fmt(t.entryPrice, dpForPair(t.asset)) : '-'}</td>
+                        <td className="px-4 py-3 text-right">{t.currentPrice ? fmt(t.currentPrice, dpForPair(t.asset)) : '-'}</td>
 
                         <td className={`px-4 py-3 text-right font-semibold ${pnlColor}`}>
                           {t.pnl >= 0 ? '+' : ''}
@@ -719,7 +1021,7 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
                                 onChange={(e) => setExitDraft((p) => ({ ...p, [t.id]: e.target.value }))}
                                 inputMode="decimal"
                                 className="w-28 rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none text-xs"
-                                placeholder={fmt(t.currentPrice || 0, 5)}
+                                placeholder={fmt(t.currentPrice || 0, dpForPair(t.asset))}
                                 title="Exit price (optional). If empty, uses current."
                               />
                               <button
@@ -745,7 +1047,8 @@ const canUseSupabase = isSupabaseConfigured() && !!supabase;
         </div>
 
         <div className="text-xs text-white/50">
-          Note: P/L shown is display-only. Final credit/debit is applied by the server via <code className="text-white/70">close_trade_atomic</code>.
+          Note: P/L shown is display-only. Final credit/debit is applied by the server via{' '}
+          <code className="text-white/70">close_trade_atomic</code>.
         </div>
       </div>
     </div>
