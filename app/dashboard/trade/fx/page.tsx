@@ -247,8 +247,7 @@ export default function FXTradePage() {
   const [takeProfit, setTakeProfit] = useState<string>('');
 
   const firstLoadRef = useRef(false);
-
-  const canUseSupabase = isSupabaseConfigured && !!supabase;
+const canUseSupabase = isSupabaseConfigured() && !!supabase;
 
   const headerAuthToken = async (): Promise<string | null> => {
     if (!canUseSupabase) return null;
