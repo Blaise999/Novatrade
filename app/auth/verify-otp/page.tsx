@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { Suspense, useEffect, useRef, useState, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -9,7 +9,6 @@ import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from 'lucide-react';
 
 // ✅ FIX: import BOTH stores
 import { useOtpStore, useStore, supabase } from '@/lib/auth/store';
-
 import { useEmail } from '@/hooks/useEmail';
 
 const REF_KEY = 'novatrade_signup_ref';
@@ -38,7 +37,31 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
+function PageFallback() {
+  return (
+    <div className="min-h-[70vh] flex items-center justify-center">
+      <div className="flex items-center gap-2 text-gold">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        <span>Loading…</span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * ✅ IMPORTANT:
+ * Next export/prerender requires useSearchParams to be INSIDE Suspense.
+ * So the default export is a wrapper, and the inner component uses the hook.
+ */
 export default function VerifyOTPPage() {
+  return (
+    <Suspense fallback={<PageFallback />}>
+      <VerifyOTPInner />
+    </Suspense>
+  );
+}
+
+function VerifyOTPInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -241,7 +264,7 @@ export default function VerifyOTPPage() {
     try {
       if (source === 'auto') lastAutoSubmittedCodeRef.current = code;
 
-      // 1) Verify OTP (typed cast fixes TS2339 on success/error)
+      // 1) Verify OTP
       const result = (await withTimeout(verifyOTP(otpEmail, code), 25000, 'verifyOTP')) as OtpResult;
 
       const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -271,16 +294,13 @@ export default function VerifyOTPPage() {
       pushLog('signup result', { signupResult });
 
       if (!signupResult?.success) {
-        setError(
-          signupResult?.error ||
-            'Account creation failed. If this email already exists, go to Login.'
-        );
+        setError(signupResult?.error || 'Account creation failed. If this email already exists, go to Login.');
         pushLog('signup failed -> redirect login in 2s');
         setTimeout(() => router.push('/auth/login'), 2000);
         return;
       }
 
-      // ✅ get userId from current session (store.signup returns only success/error)
+      // ✅ get userId from current session
       try {
         const sess = await supabase.auth.getSession();
         const userId = sess.data.session?.user?.id || '';
@@ -300,7 +320,6 @@ export default function VerifyOTPPage() {
         }
       }
 
-      // ✅ FIX: setOtpPassword expects string, not null
       setOtpPassword('');
 
       setTimeout(() => {
@@ -373,9 +392,7 @@ export default function VerifyOTPPage() {
         </motion.div>
         <div>
           <h2 className="text-2xl font-display font-bold text-cream">Email Verified!</h2>
-          <p className="mt-2 text-slate-400">
-            Your account has been created successfully. Redirecting...
-          </p>
+          <p className="mt-2 text-slate-400">Your account has been created successfully. Redirecting...</p>
         </div>
         <div className="flex items-center justify-center gap-2 text-gold">
           <Loader2 className="w-5 h-5 animate-spin" />
