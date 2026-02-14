@@ -8,6 +8,8 @@
 export {
   useStore,
   useAdminStore,
+  useOtpStore,
+  useKYCStore,
   supabase,
   isSupabaseConfigured,
   getRegistrationRedirect,

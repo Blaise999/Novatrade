@@ -1,258 +1,250 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowUpRight,
-  Search,
-  Filter,
-  Download,
-  RefreshCw,
-  X,
-  Eye,
+  Shield,
   CheckCircle,
   XCircle,
   Clock,
+  Search,
   User,
-  DollarSign,
-  Wallet,
+  RefreshCw,
   AlertCircle,
-  Copy,
   ExternalLink,
 } from 'lucide-react';
-import { useAdminAuthStore } from '@/lib/admin-store';
-import { adminService, type User as UserType } from '@/lib/services/admin-service';
 
-interface Withdrawal {
+import { useAdminAuthStore } from '@/lib/admin-store';
+
+interface KYCUser {
   id: string;
-  user_id: string;
-  amount: number;
-  fee: number;
-  net_amount: number;
-  method: string;
-  wallet_address?: string;
-  wallet_network?: string;
-  bank_name?: string;
-  account_name?: string;
-  account_number?: string;
-  status: 'pending' | 'processing' | 'completed' | 'rejected' | 'cancelled';
-  tx_hash?: string;
-  processed_by?: string;
-  processed_at?: string;
-  admin_note?: string;
-  rejection_reason?: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  kyc_status: string;
   created_at: string;
-  user?: UserType;
+  kyc_submitted_at?: string;
+  kyc_data?: {
+    date_of_birth?: string;
+    nationality?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    postal_code?: string;
+    country?: string;
+    id_type?: string;
+    id_number?: string;
+    id_front_doc?: string;
+    id_back_doc?: string;
+    selfie_doc?: string;
+    proof_of_address_doc?: string;
+  };
+  kyc_docs?: {
+    id_front?: string | null;
+    id_back?: string | null;
+    selfie?: string | null;
+    proof?: string | null;
+  };
 }
 
-// Mock withdrawals for demo
-const MOCK_WITHDRAWALS: Withdrawal[] = [
-  {
-    id: 'wd-1',
-    user_id: 'user-1',
-    amount: 500,
-    fee: 5,
-    net_amount: 495,
-    method: 'crypto',
-    wallet_address: '0x742d35Cc6634C0532925a3b844Bc454e4438f44e',
-    wallet_network: 'ERC-20',
-    status: 'pending',
-    created_at: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-    user: { id: 'user-1', email: 'john@example.com', first_name: 'John', last_name: 'Doe' } as UserType,
-  },
-  {
-    id: 'wd-2',
-    user_id: 'user-2',
-    amount: 1000,
-    fee: 10,
-    net_amount: 990,
-    method: 'crypto',
-    wallet_address: 'TKsLPHbmE7CJPFJhMuJW9HxGfmZWHd2Uxj',
-    wallet_network: 'TRC-20',
-    status: 'pending',
-    created_at: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
-    user: { id: 'user-2', email: 'jane@example.com', first_name: 'Jane', last_name: 'Smith' } as UserType,
-  },
-  {
-    id: 'wd-3',
-    user_id: 'user-3',
-    amount: 2500,
-    fee: 25,
-    net_amount: 2475,
-    method: 'bank',
-    bank_name: 'Chase Bank',
-    account_name: 'Alice Brown',
-    account_number: '****4567',
-    status: 'completed',
-    tx_hash: '0x123abc...',
-    processed_at: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-    created_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-    user: { id: 'user-3', email: 'alice@example.com', first_name: 'Alice', last_name: 'Brown' } as UserType,
-  },
-  {
-    id: 'wd-4',
-    user_id: 'user-4',
-    amount: 300,
-    fee: 3,
-    net_amount: 297,
-    method: 'crypto',
-    wallet_address: 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh',
-    wallet_network: 'Bitcoin',
-    status: 'rejected',
-    rejection_reason: 'Insufficient verification',
-    processed_at: new Date(Date.now() - 1000 * 60 * 60 * 12).toISOString(),
-    created_at: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-    user: { id: 'user-4', email: 'bob@example.com', first_name: 'Bob', last_name: 'Wilson' } as UserType,
-  },
-];
+type Filter = 'all' | 'pending' | 'verified' | 'rejected' | 'none';
 
-export default function AdminWithdrawalsPage() {
-  const { admin, isAuthenticated } = useAdminAuthStore();
-  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>(MOCK_WITHDRAWALS);
+export default function AdminKYCPage() {
+  const { admin, isAuthenticated, sessionToken, logout } = useAdminAuthStore();
+
+  // ✅ The ONLY token you actually create + persist in your store
+  const token = sessionToken;
+
+  // ✅ token-based guard
+  const tokenOk = Boolean(isAuthenticated && admin && token);
+
+  const [allUsers, setAllUsers] = useState<KYCUser[]>([]);
   const [loading, setLoading] = useState(true);
-  
-  // Filters
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [methodFilter, setMethodFilter] = useState('');
-  
-  // Modal states
-  const [showDetailModal, setShowDetailModal] = useState(false);
-  const [showApproveModal, setShowApproveModal] = useState(false);
-  const [showRejectModal, setShowRejectModal] = useState(false);
-  const [selectedWithdrawal, setSelectedWithdrawal] = useState<Withdrawal | null>(null);
-  const [txHash, setTxHash] = useState('');
-  const [approveNote, setApproveNote] = useState('');
-  const [rejectReason, setRejectReason] = useState('');
-  const [processing, setProcessing] = useState(false);
-  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [filter, setFilter] = useState<Filter>('pending');
+  const [search, setSearch] = useState('');
+  const [processing, setProcessing] = useState<string | null>(null);
+  const [notification, setNotification] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [selectedUser, setSelectedUser] = useState<KYCUser | null>(null);
 
   useEffect(() => {
-    if (admin?.id) {
-      adminService.setAdminId(admin.id);
-    }
-    loadWithdrawals();
-  }, [admin]);
+    if (!tokenOk) return;
+    void loadUsers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tokenOk]);
 
-  const loadWithdrawals = async () => {
+  useEffect(() => {
+    if (!notification) return;
+    const t = setTimeout(() => setNotification(null), 3000);
+    return () => clearTimeout(t);
+  }, [notification]);
+
+  const apiFetch = async (path: string, init?: RequestInit) => {
+    if (!token) throw new Error('Missing admin token. Please log in again.');
+
+    const res = await fetch(path, {
+      ...init,
+      headers: {
+        ...(init?.headers || {}),
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    });
+
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const msg = json?.error || `Request failed (${res.status})`;
+      // ✅ If token is invalid, auto logout
+      if (res.status === 401 || res.status === 403) {
+        await logout();
+      }
+      throw new Error(msg);
+    }
+
+    return json;
+  };
+
+  const loadUsers = async () => {
     setLoading(true);
     try {
-      const { data, error } = await adminService.getAllWithdrawals({ limit: 100 });
-      if (data && data.length > 0) {
-        setWithdrawals(data as Withdrawal[]);
+      const q = new URLSearchParams();
+      q.set('status', 'all');
+
+      const json = await apiFetch(`/api/admin/kyc?${q.toString()}`);
+      const kycs = Array.isArray(json?.kycs) ? (json.kycs as KYCUser[]) : [];
+      setAllUsers(kycs);
+    } catch (e: any) {
+      console.error('[AdminKYC] loadUsers error:', e);
+      setAllUsers([]);
+      setNotification({
+        type: 'error',
+        message: e?.message || 'Failed to load KYCs',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateKYC = async (userId: string, status: 'verified' | 'rejected') => {
+    setProcessing(userId);
+    try {
+      if (status === 'verified') {
+        await apiFetch(`/api/admin/kyc/${userId}/approve`, { method: 'POST' });
       } else {
-        setWithdrawals(MOCK_WITHDRAWALS);
+        await apiFetch(`/api/admin/kyc/${userId}/reject`, { method: 'POST' });
       }
-    } catch (error) {
-      setWithdrawals(MOCK_WITHDRAWALS);
-    }
-    setLoading(false);
-  };
 
-  const filteredWithdrawals = withdrawals.filter(wd => {
-    if (statusFilter && wd.status !== statusFilter) return false;
-    if (methodFilter && wd.method !== methodFilter) return false;
-    if (searchQuery) {
-      const user = wd.user;
-      const searchLower = searchQuery.toLowerCase();
-      return (
-        user?.email?.toLowerCase().includes(searchLower) ||
-        wd.wallet_address?.toLowerCase().includes(searchLower) ||
-        wd.id.toLowerCase().includes(searchLower)
+      setAllUsers((prev) =>
+        prev.map((u) => (u.id === userId ? { ...u, kyc_status: status } : u))
       );
-    }
-    return true;
-  });
 
-  const pendingWithdrawals = filteredWithdrawals.filter(w => w.status === 'pending');
-  const totalPendingAmount = pendingWithdrawals.reduce((sum, w) => sum + w.amount, 0);
-  const totalCompletedAmount = filteredWithdrawals
-    .filter(w => w.status === 'completed')
-    .reduce((sum, w) => sum + w.amount, 0);
+      const email = allUsers.find((u) => u.id === userId)?.email || 'user';
+      setNotification({
+        type: status === 'verified' ? 'success' : 'error',
+        message: `KYC ${status === 'verified' ? 'approved' : 'rejected'} for ${email}`,
+      });
 
-  const handleApprove = async () => {
-    if (!selectedWithdrawal) return;
-    
-    setProcessing(true);
-    try {
-      await adminService.approveWithdrawal(selectedWithdrawal.id, txHash || undefined, approveNote || undefined);
-      setNotification({ type: 'success', message: 'Withdrawal approved successfully' });
-      setShowApproveModal(false);
-      setSelectedWithdrawal(null);
-      setTxHash('');
-      setApproveNote('');
-      
-      // Update locally for demo
-      setWithdrawals(prev => prev.map(w => 
-        w.id === selectedWithdrawal.id 
-          ? { ...w, status: 'completed' as const, tx_hash: txHash, processed_at: new Date().toISOString() }
-          : w
-      ));
-    } catch (error) {
-      // Update locally anyway for demo
-      setWithdrawals(prev => prev.map(w => 
-        w.id === selectedWithdrawal.id 
-          ? { ...w, status: 'completed' as const, tx_hash: txHash, processed_at: new Date().toISOString() }
-          : w
-      ));
-      setNotification({ type: 'success', message: 'Withdrawal approved locally' });
-      setShowApproveModal(false);
-      setSelectedWithdrawal(null);
-      setTxHash('');
-      setApproveNote('');
-    }
-    setProcessing(false);
-  };
-
-  const handleReject = async () => {
-    if (!selectedWithdrawal || !rejectReason) return;
-    
-    setProcessing(true);
-    try {
-      await adminService.rejectWithdrawal(selectedWithdrawal.id, rejectReason);
-      setNotification({ type: 'success', message: 'Withdrawal rejected' });
-      setShowRejectModal(false);
-      setSelectedWithdrawal(null);
-      setRejectReason('');
-      
-      // Update locally for demo
-      setWithdrawals(prev => prev.map(w => 
-        w.id === selectedWithdrawal.id 
-          ? { ...w, status: 'rejected' as const, rejection_reason: rejectReason, processed_at: new Date().toISOString() }
-          : w
-      ));
-    } catch (error) {
-      // Update locally anyway for demo
-      setWithdrawals(prev => prev.map(w => 
-        w.id === selectedWithdrawal.id 
-          ? { ...w, status: 'rejected' as const, rejection_reason: rejectReason, processed_at: new Date().toISOString() }
-          : w
-      ));
-      setNotification({ type: 'success', message: 'Withdrawal rejected locally' });
-      setShowRejectModal(false);
-      setSelectedWithdrawal(null);
-      setRejectReason('');
-    }
-    setProcessing(false);
-  };
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setNotification({ type: 'success', message: 'Copied to clipboard' });
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'pending': return 'bg-gold/20 text-gold';
-      case 'processing': return 'bg-electric/20 text-electric';
-      case 'completed': return 'bg-profit/20 text-profit';
-      case 'rejected': return 'bg-loss/20 text-loss';
-      case 'cancelled': return 'bg-slate-500/20 text-slate-400';
-      default: return 'bg-white/10 text-slate-400';
+      if (selectedUser?.id === userId) {
+        setSelectedUser((p) => (p ? { ...p, kyc_status: status } : p));
+      }
+    } catch (e: any) {
+      console.error('[AdminKYC] updateKYC error:', e);
+      setNotification({
+        type: 'error',
+        message: e?.message || 'Failed to update KYC',
+      });
+    } finally {
+      setProcessing(null);
     }
   };
 
-  if (!isAuthenticated || !admin) {
+  const counts = useMemo(() => {
+    const norm = (s?: string) => (s || 'none').toLowerCase();
+
+    return {
+      all: allUsers.length,
+      pending: allUsers.filter((u) => norm(u.kyc_status) === 'pending').length,
+      verified: allUsers.filter((u) => ['verified', 'approved'].includes(norm(u.kyc_status))).length,
+      rejected: allUsers.filter((u) => norm(u.kyc_status) === 'rejected').length,
+      none: allUsers.filter((u) => {
+        const s = norm(u.kyc_status);
+        return !u.kyc_status || s === 'none' || s === 'not_started';
+      }).length,
+    };
+  }, [allUsers]);
+
+  const statusConfig: Record<
+    string,
+    { color: string; bg: string; Icon: any; label: string }
+  > = {
+    pending: {
+      color: 'text-yellow-400',
+      bg: 'bg-yellow-500/10',
+      Icon: Clock,
+      label: 'Pending Review',
+    },
+    verified: {
+      color: 'text-profit',
+      bg: 'bg-profit/10',
+      Icon: CheckCircle,
+      label: 'Verified',
+    },
+    approved: {
+      color: 'text-profit',
+      bg: 'bg-profit/10',
+      Icon: CheckCircle,
+      label: 'Verified',
+    },
+    rejected: {
+      color: 'text-loss',
+      bg: 'bg-loss/10',
+      Icon: XCircle,
+      label: 'Rejected',
+    },
+    none: {
+      color: 'text-slate-400',
+      bg: 'bg-white/5',
+      Icon: AlertCircle,
+      label: 'Not Submitted',
+    },
+    not_started: {
+      color: 'text-slate-400',
+      bg: 'bg-white/5',
+      Icon: AlertCircle,
+      label: 'Not Submitted',
+    },
+  };
+
+  const filtered = useMemo(() => {
+    const norm = (s?: string) => (s || 'none').toLowerCase();
+
+    return allUsers.filter((u) => {
+      const s = norm(u.kyc_status);
+
+      if (filter !== 'all') {
+        if (filter === 'pending' && s !== 'pending') return false;
+        if (filter === 'rejected' && s !== 'rejected') return false;
+        if (filter === 'verified' && !['verified', 'approved'].includes(s)) return false;
+        if (filter === 'none' && !(s === 'none' || s === 'not_started' || !u.kyc_status)) return false;
+      }
+
+      if (search) {
+        const q = search.toLowerCase();
+        return (
+          u.email.toLowerCase().includes(q) ||
+          `${u.first_name} ${u.last_name}`.toLowerCase().includes(q)
+        );
+      }
+
+      return true;
+    });
+  }, [allUsers, filter, search]);
+
+  if (!tokenOk) {
     return (
       <div className="flex items-center justify-center h-full">
         <p className="text-slate-400">Please log in to access this page.</p>
@@ -262,544 +254,220 @@ export default function AdminWithdrawalsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Notification */}
       <AnimatePresence>
         {notification && (
           <motion.div
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className={`fixed top-4 right-4 z-50 p-4 rounded-xl flex items-center gap-3 ${
-              notification.type === 'success' ? 'bg-profit/20 border border-profit/30' : 'bg-loss/20 border border-loss/30'
+            className={`p-4 rounded-xl border ${
+              notification.type === 'success'
+                ? 'bg-profit/10 border-profit/20 text-profit'
+                : 'bg-loss/10 border-loss/20 text-loss'
             }`}
           >
-            {notification.type === 'success' ? (
-              <CheckCircle className="w-5 h-5 text-profit" />
-            ) : (
-              <AlertCircle className="w-5 h-5 text-loss" />
-            )}
-            <span className={notification.type === 'success' ? 'text-profit' : 'text-loss'}>
-              {notification.message}
-            </span>
-            <button onClick={() => setNotification(null)} className="ml-2">
-              <X className="w-4 h-4" />
-            </button>
+            {notification.message}
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-cream">Withdrawal Management</h1>
-          <p className="text-slate-400 mt-1">Review and process withdrawal requests</p>
+          <h1 className="text-2xl font-bold text-cream">KYC Verification</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            Review and manage user identity verification
+          </p>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={loadWithdrawals}
-            className="flex items-center gap-2 px-4 py-2 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
-          <button className="flex items-center gap-2 px-4 py-2 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all">
-            <Download className="w-4 h-4" />
-            Export
-          </button>
-        </div>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-gradient-to-br from-gold/20 to-gold/5 rounded-xl border border-gold/20 p-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-gold/20 rounded-lg">
-              <Clock className="w-5 h-5 text-gold" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">Pending</p>
-              <p className="text-xl font-bold text-cream">{pendingWithdrawals.length}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-gradient-to-br from-loss/20 to-loss/5 rounded-xl border border-loss/20 p-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-loss/20 rounded-lg">
-              <DollarSign className="w-5 h-5 text-loss" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">Pending Amount</p>
-              <p className="text-xl font-bold text-cream">${totalPendingAmount.toLocaleString()}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-gradient-to-br from-profit/20 to-profit/5 rounded-xl border border-profit/20 p-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-profit/20 rounded-lg">
-              <CheckCircle className="w-5 h-5 text-profit" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">Completed</p>
-              <p className="text-xl font-bold text-cream">
-                {filteredWithdrawals.filter(w => w.status === 'completed').length}
-              </p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-gradient-to-br from-electric/20 to-electric/5 rounded-xl border border-electric/20 p-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-electric/20 rounded-lg">
-              <ArrowUpRight className="w-5 h-5 text-electric" />
-            </div>
-            <div>
-              <p className="text-sm text-slate-400">Total Processed</p>
-              <p className="text-xl font-bold text-cream">${totalCompletedAmount.toLocaleString()}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <div className="flex flex-col md:flex-row gap-4">
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by email or wallet address..."
-            className="w-full pl-10 pr-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
-          />
-        </div>
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+        <button
+          onClick={loadUsers}
+          className="p-2 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
         >
-          <option value="">All Status</option>
-          <option value="pending">Pending</option>
-          <option value="processing">Processing</option>
-          <option value="completed">Completed</option>
-          <option value="rejected">Rejected</option>
-        </select>
-        <select
-          value={methodFilter}
-          onChange={(e) => setMethodFilter(e.target.value)}
-          className="px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
-        >
-          <option value="">All Methods</option>
-          <option value="crypto">Crypto</option>
-          <option value="bank">Bank Transfer</option>
-        </select>
+          <RefreshCw className={`w-5 h-5 text-cream/60 ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
-      {/* Withdrawals Table */}
-      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr className="text-xs text-slate-400 border-b border-white/5">
-                <th className="text-left p-4">Date</th>
-                <th className="text-left p-4">User</th>
-                <th className="text-left p-4">Method</th>
-                <th className="text-left p-4">Destination</th>
-                <th className="text-right p-4">Amount</th>
-                <th className="text-right p-4">Fee</th>
-                <th className="text-right p-4">Net</th>
-                <th className="text-center p-4">Status</th>
-                <th className="text-center p-4">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={9} className="p-8 text-center text-slate-400">
-                    <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
-                    Loading withdrawals...
-                  </td>
-                </tr>
-              ) : filteredWithdrawals.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="p-8 text-center text-slate-400">
-                    No withdrawals found
-                  </td>
-                </tr>
-              ) : (
-                filteredWithdrawals.map((wd) => {
-                  const user = wd.user;
-                  return (
-                    <tr key={wd.id} className="border-b border-white/5 hover:bg-white/5">
-                      <td className="p-4">
-                        <div className="text-sm">
-                          <p className="text-cream">{new Date(wd.created_at).toLocaleDateString()}</p>
-                          <p className="text-slate-500">{new Date(wd.created_at).toLocaleTimeString()}</p>
-                        </div>
-                      </td>
-                      <td className="p-4">
-                        <p className="text-cream text-sm">{user?.email || 'Unknown'}</p>
-                        <p className="text-xs text-slate-500">{user?.first_name} {user?.last_name}</p>
-                      </td>
-                      <td className="p-4">
-                        <span className={`px-2 py-1 rounded-lg text-xs font-medium ${
-                          wd.method === 'crypto' ? 'bg-orange-500/20 text-orange-400' : 'bg-electric/20 text-electric'
-                        }`}>
-                          {wd.method === 'crypto' ? 'Crypto' : 'Bank'}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        {wd.method === 'crypto' ? (
-                          <div className="flex items-center gap-2">
-                            <span className="text-cream text-sm font-mono truncate max-w-[150px]">
-                              {wd.wallet_address}
-                            </span>
-                            <button
-                              onClick={() => copyToClipboard(wd.wallet_address || '')}
-                              className="p-1 hover:bg-white/10 rounded"
-                            >
-                              <Copy className="w-3 h-3 text-slate-400" />
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="text-sm">
-                            <p className="text-cream">{wd.bank_name}</p>
-                            <p className="text-slate-500">{wd.account_number}</p>
-                          </div>
-                        )}
-                        {wd.wallet_network && (
-                          <p className="text-xs text-slate-500">{wd.wallet_network}</p>
-                        )}
-                      </td>
-                      <td className="p-4 text-right font-mono text-cream">
-                        ${wd.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td className="p-4 text-right font-mono text-slate-400">
-                        ${wd.fee.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td className="p-4 text-right font-mono text-cream">
-                        ${wd.net_amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </td>
-                      <td className="p-4 text-center">
-                        <span className={`px-2 py-1 rounded-lg text-xs font-medium ${getStatusColor(wd.status)}`}>
-                          {wd.status.toUpperCase()}
-                        </span>
-                      </td>
-                      <td className="p-4">
-                        <div className="flex items-center justify-center gap-2">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        {(['all', 'pending', 'verified', 'rejected', 'none'] as Filter[]).map((key) => {
+          const sc =
+            key === 'all'
+              ? { color: 'text-cream', bg: 'bg-white/5', Icon: User, label: 'All Users' }
+              : statusConfig[key];
+
+          return (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              className={`p-4 rounded-xl border transition-all text-left ${
+                filter === key ? 'border-gold/50 bg-gold/5' : 'border-white/5 bg-white/5 hover:border-white/10'
+              }`}
+            >
+              <p className="text-2xl font-bold text-cream">{counts[key]}</p>
+              <p className={`text-xs ${sc.color}`}>{sc.label}</p>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name or email..."
+          className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
+        />
+      </div>
+
+      <div className="space-y-3">
+        {loading ? (
+          <div className="text-center py-12">
+            <div className="w-8 h-8 border-2 border-gold/20 border-t-gold rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-cream/50">Loading...</p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="text-center py-12">
+            <Shield className="w-12 h-12 text-cream/20 mx-auto mb-3" />
+            <p className="text-cream/50">No users match the current filter</p>
+          </div>
+        ) : (
+          filtered.map((u) => {
+            const s = (u.kyc_status || 'none').toLowerCase();
+            const sc = statusConfig[s] || statusConfig.none;
+
+            return (
+              <motion.div
+                key={u.id}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="bg-white/5 rounded-xl border border-white/5 p-4"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-gradient-to-br from-electric/20 to-gold/20 rounded-xl flex items-center justify-center text-cream font-bold text-sm">
+                      {(u.first_name?.[0] || u.email[0]).toUpperCase()}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-cream">
+                        {u.first_name} {u.last_name}
+                      </p>
+                      <p className="text-xs text-cream/40">{u.email}</p>
+                      <p className="text-[10px] text-cream/30 mt-0.5">
+                        Joined {new Date(u.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${sc.bg} ${sc.color}`}>
+                      <sc.Icon className="w-3.5 h-3.5" /> {sc.label}
+                    </span>
+
+                    {(s === 'pending' || s === 'none' || s === 'rejected' || s === 'not_started') && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => updateKYC(u.id, 'verified')}
+                          disabled={processing === u.id}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-profit/20 text-profit text-xs font-semibold rounded-lg hover:bg-profit/30 transition-all border border-profit/20 disabled:opacity-50"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" /> Approve
+                        </button>
+
+                        {s !== 'rejected' && (
                           <button
-                            onClick={() => {
-                              setSelectedWithdrawal(wd);
-                              setShowDetailModal(true);
-                            }}
-                            className="p-1.5 bg-white/5 text-slate-400 rounded-lg hover:bg-white/10 transition-all"
-                            title="View Details"
+                            onClick={() => updateKYC(u.id, 'rejected')}
+                            disabled={processing === u.id}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-loss/20 text-loss text-xs font-semibold rounded-lg hover:bg-loss/30 transition-all border border-loss/20 disabled:opacity-50"
                           >
-                            <Eye className="w-4 h-4" />
+                            <XCircle className="w-3.5 h-3.5" /> Reject
                           </button>
-                          {wd.status === 'pending' && (
-                            <>
-                              <button
-                                onClick={() => {
-                                  setSelectedWithdrawal(wd);
-                                  setShowApproveModal(true);
-                                }}
-                                className="p-1.5 bg-profit/10 text-profit rounded-lg hover:bg-profit/20 transition-all"
-                                title="Approve"
-                              >
-                                <CheckCircle className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setSelectedWithdrawal(wd);
-                                  setShowRejectModal(true);
-                                }}
-                                className="p-1.5 bg-loss/10 text-loss rounded-lg hover:bg-loss/20 transition-all"
-                                title="Reject"
-                              >
-                                <XCircle className="w-4 h-4" />
-                              </button>
-                            </>
+                        )}
+                      </div>
+                    )}
+
+                    {(u.kyc_data || u.kyc_docs) && (
+                      <button
+                        onClick={() => setSelectedUser(selectedUser?.id === u.id ? null : u)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 text-cream/60 text-xs font-medium rounded-lg hover:bg-white/10 transition-all border border-white/5"
+                      >
+                        <User className="w-3.5 h-3.5" /> {selectedUser?.id === u.id ? 'Hide' : 'View'} Details
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <AnimatePresence>
+                  {selectedUser?.id === u.id && (u.kyc_data || u.kyc_docs) && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mt-4 pt-4 border-t border-white/5"
+                    >
+                      <div className="mt-3 space-y-2">
+                        <p className="text-[10px] text-slate-500 uppercase tracking-wider">
+                          Documents
+                        </p>
+
+                        <div className="flex flex-wrap gap-2">
+                          {u.kyc_docs?.id_front && (
+                            <a
+                              href={u.kyc_docs.id_front}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 px-2 py-1 bg-electric/10 text-electric text-xs rounded-md"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" /> ID Front
+                            </a>
+                          )}
+
+                          {u.kyc_docs?.id_back && (
+                            <a
+                              href={u.kyc_docs.id_back}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 px-2 py-1 bg-electric/10 text-electric text-xs rounded-md"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" /> ID Back
+                            </a>
+                          )}
+
+                          {u.kyc_docs?.selfie && (
+                            <a
+                              href={u.kyc_docs.selfie}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 px-2 py-1 bg-electric/10 text-electric text-xs rounded-md"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" /> Selfie
+                            </a>
+                          )}
+
+                          {u.kyc_docs?.proof && (
+                            <a
+                              href={u.kyc_docs.proof}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1.5 px-2 py-1 bg-electric/10 text-electric text-xs rounded-md"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" /> Proof of Address
+                            </a>
+                          )}
+
+                          {!u.kyc_docs?.id_front && !u.kyc_docs?.selfie && (
+                            <span className="px-2 py-1 bg-yellow-500/10 text-yellow-400 text-xs rounded-md">
+                              ⚠ No signed document links returned
+                            </span>
                           )}
                         </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Detail Modal */}
-      <AnimatePresence>
-        {showDetailModal && selectedWithdrawal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-charcoal rounded-2xl border border-white/10 p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream">Withdrawal Details</h3>
-                <button
-                  onClick={() => setShowDetailModal(false)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
-                  <X className="w-5 h-5 text-slate-400" />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-3 bg-white/5 rounded-xl">
-                    <p className="text-xs text-slate-400">ID</p>
-                    <p className="text-cream font-mono text-sm truncate">{selectedWithdrawal.id}</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl">
-                    <p className="text-xs text-slate-400">Status</p>
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusColor(selectedWithdrawal.status)}`}>
-                      {selectedWithdrawal.status.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl">
-                    <p className="text-xs text-slate-400">Amount</p>
-                    <p className="text-cream">${selectedWithdrawal.amount.toLocaleString()}</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl">
-                    <p className="text-xs text-slate-400">Net Amount</p>
-                    <p className="text-cream">${selectedWithdrawal.net_amount.toLocaleString()}</p>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-white/5 rounded-xl">
-                  <p className="text-xs text-slate-400">User</p>
-                  <p className="text-cream">{selectedWithdrawal.user?.email}</p>
-                </div>
-
-                {selectedWithdrawal.method === 'crypto' ? (
-                  <>
-                    <div className="p-3 bg-white/5 rounded-xl">
-                      <p className="text-xs text-slate-400">Wallet Address</p>
-                      <div className="flex items-center gap-2">
-                        <p className="text-cream font-mono text-sm break-all">{selectedWithdrawal.wallet_address}</p>
-                        <button
-                          onClick={() => copyToClipboard(selectedWithdrawal.wallet_address || '')}
-                          className="p-1 hover:bg-white/10 rounded flex-shrink-0"
-                        >
-                          <Copy className="w-4 h-4 text-slate-400" />
-                        </button>
                       </div>
-                    </div>
-                    <div className="p-3 bg-white/5 rounded-xl">
-                      <p className="text-xs text-slate-400">Network</p>
-                      <p className="text-cream">{selectedWithdrawal.wallet_network}</p>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="p-3 bg-white/5 rounded-xl">
-                      <p className="text-xs text-slate-400">Bank Name</p>
-                      <p className="text-cream">{selectedWithdrawal.bank_name}</p>
-                    </div>
-                    <div className="p-3 bg-white/5 rounded-xl">
-                      <p className="text-xs text-slate-400">Account</p>
-                      <p className="text-cream">{selectedWithdrawal.account_name} - {selectedWithdrawal.account_number}</p>
-                    </div>
-                  </>
-                )}
-
-                {selectedWithdrawal.tx_hash && (
-                  <div className="p-3 bg-profit/10 border border-profit/20 rounded-xl">
-                    <p className="text-xs text-profit">Transaction Hash</p>
-                    <p className="text-cream font-mono text-sm break-all">{selectedWithdrawal.tx_hash}</p>
-                  </div>
-                )}
-
-                {selectedWithdrawal.rejection_reason && (
-                  <div className="p-3 bg-loss/10 border border-loss/20 rounded-xl">
-                    <p className="text-xs text-loss">Rejection Reason</p>
-                    <p className="text-cream">{selectedWithdrawal.rejection_reason}</p>
-                  </div>
-                )}
-
-                <div className="p-3 bg-white/5 rounded-xl">
-                  <p className="text-xs text-slate-400">Requested At</p>
-                  <p className="text-cream">{new Date(selectedWithdrawal.created_at).toLocaleString()}</p>
-                </div>
-                
-                {selectedWithdrawal.processed_at && (
-                  <div className="p-3 bg-white/5 rounded-xl">
-                    <p className="text-xs text-slate-400">Processed At</p>
-                    <p className="text-cream">{new Date(selectedWithdrawal.processed_at).toLocaleString()}</p>
-                  </div>
-                )}
-              </div>
-
-              <div className="mt-6">
-                <button
-                  onClick={() => setShowDetailModal(false)}
-                  className="w-full py-3 bg-white/5 text-slate-400 font-semibold rounded-xl hover:bg-white/10 transition-all"
-                >
-                  Close
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            );
+          })
         )}
-      </AnimatePresence>
-
-      {/* Approve Modal */}
-      <AnimatePresence>
-        {showApproveModal && selectedWithdrawal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-charcoal rounded-2xl border border-white/10 p-6 max-w-md w-full"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream flex items-center gap-2">
-                  <CheckCircle className="w-5 h-5 text-profit" />
-                  Approve Withdrawal
-                </h3>
-                <button
-                  onClick={() => setShowApproveModal(false)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
-                  <X className="w-5 h-5 text-slate-400" />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="p-3 bg-white/5 rounded-xl">
-                  <p className="text-sm text-slate-400">Amount: <span className="text-cream">${selectedWithdrawal.net_amount}</span></p>
-                  <p className="text-sm text-slate-400 mt-1">To: <span className="text-cream font-mono text-xs">{selectedWithdrawal.wallet_address || selectedWithdrawal.account_number}</span></p>
-                </div>
-
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Transaction Hash (optional)</label>
-                  <input
-                    type="text"
-                    value={txHash}
-                    onChange={(e) => setTxHash(e.target.value)}
-                    placeholder="0x..."
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Note (optional)</label>
-                  <textarea
-                    value={approveNote}
-                    onChange={(e) => setApproveNote(e.target.value)}
-                    placeholder="Add a note..."
-                    rows={2}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold resize-none"
-                  />
-                </div>
-
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setShowApproveModal(false)}
-                    className="flex-1 py-3 bg-white/5 text-slate-400 font-semibold rounded-xl hover:bg-white/10 transition-all"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleApprove}
-                    disabled={processing}
-                    className="flex-1 py-3 bg-profit text-void font-semibold rounded-xl hover:bg-profit/90 transition-all disabled:opacity-50"
-                  >
-                    {processing ? 'Processing...' : 'Approve'}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Reject Modal */}
-      <AnimatePresence>
-        {showRejectModal && selectedWithdrawal && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-          >
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-charcoal rounded-2xl border border-white/10 p-6 max-w-md w-full"
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-semibold text-cream flex items-center gap-2">
-                  <XCircle className="w-5 h-5 text-loss" />
-                  Reject Withdrawal
-                </h3>
-                <button
-                  onClick={() => setShowRejectModal(false)}
-                  className="p-2 hover:bg-white/10 rounded-lg"
-                >
-                  <X className="w-5 h-5 text-slate-400" />
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="p-3 bg-white/5 rounded-xl">
-                  <p className="text-sm text-slate-400">Amount: <span className="text-cream">${selectedWithdrawal.amount}</span></p>
-                  <p className="text-sm text-slate-400 mt-1">User: <span className="text-cream">{selectedWithdrawal.user?.email}</span></p>
-                </div>
-
-                <div className="p-3 bg-loss/10 border border-loss/20 rounded-xl">
-                  <p className="text-xs text-loss">User's balance will be refunded</p>
-                </div>
-
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Rejection Reason *</label>
-                  <textarea
-                    value={rejectReason}
-                    onChange={(e) => setRejectReason(e.target.value)}
-                    placeholder="Enter the reason for rejection..."
-                    rows={3}
-                    className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold resize-none"
-                  />
-                </div>
-
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setShowRejectModal(false)}
-                    className="flex-1 py-3 bg-white/5 text-slate-400 font-semibold rounded-xl hover:bg-white/10 transition-all"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={handleReject}
-                    disabled={!rejectReason || processing}
-                    className="flex-1 py-3 bg-loss text-white font-semibold rounded-xl hover:bg-loss/90 transition-all disabled:opacity-50"
-                  >
-                    {processing ? 'Processing...' : 'Reject'}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      </div>
     </div>
   );
 }

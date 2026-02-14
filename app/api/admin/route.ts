@@ -15,12 +15,13 @@ function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-type GuardOk = { ok: true; adminId: string; role: string };
-type GuardFail = { ok: false; status: number; error: string };
-
-async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail> {
+async function requireAdmin(req: NextRequest): Promise<
+  | { ok: true; adminId: string }
+  | { ok: false; status: number; error: string }
+> {
   const auth = req.headers.get("authorization") || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+
   if (!token) return { ok: false, status: 401, error: "Missing admin token" };
 
   const tokenHash = hashToken(token);
@@ -32,101 +33,75 @@ async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail>
     .maybeSingle();
 
   if (error) return { ok: false, status: 500, error: error.message };
-  if (!session || session.revoked_at) return { ok: false, status: 401, error: "Invalid admin session" };
+  if (!session || session.revoked_at)
+    return { ok: false, status: 401, error: "Invalid admin session" };
 
   if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
     return { ok: false, status: 401, error: "Session expired" };
   }
 
-  const { data: adminUser, error: adminErr } = await supabaseAdmin
-    .from("users")
-    .select("id, role, is_active")
-    .eq("id", session.admin_id)
-    .maybeSingle();
+  // keep alive (non-blocking)
+ void Promise.resolve(
+  supabaseAdmin
+    .from("admin_sessions")
+    .update({ last_activity_at: new Date().toISOString() })
+    .eq("token_hash", tokenHash)
+).catch(() => {});
 
-  if (adminErr) return { ok: false, status: 500, error: adminErr.message };
-  if (!adminUser) return { ok: false, status: 401, error: "Admin not found" };
-  if (adminUser.is_active === false) return { ok: false, status: 403, error: "Admin account disabled" };
-
-  const role = String(adminUser.role || "").toLowerCase();
-  if (role !== "admin" && role !== "super_admin") {
-    return { ok: false, status: 403, error: "Admin privileges required" };
-  }
-
-  // keep alive
-  void Promise.resolve(
-    supabaseAdmin
-      .from("admin_sessions")
-      .update({ last_activity_at: new Date().toISOString() })
-      .eq("token_hash", tokenHash)
-  ).catch(() => {});
-
-  return { ok: true, adminId: String(session.admin_id), role };
+  return { ok: true, adminId: String(session.admin_id) };
 }
 
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const guard = await requireAdminWrite(req);
-  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { userId: string } }
+) {
+  const guard = await requireAdmin(req);
+  if (!guard.ok) {
+    return NextResponse.json({ error: guard.error }, { status: guard.status });
+  }
 
-  const { id: userId } = await ctx.params;
+  const userId = String(params.userId || "").trim();
+  if (!userId) return NextResponse.json({ error: "Missing userId" }, { status: 400 });
 
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch {}
+  const body = await req.json().catch(() => ({}));
+  const reason = String(body?.reason ?? "").trim();
 
-  const type = String(body?.type || "spot"); // "spot" | "bonus"
-  const action = String(body?.action || "add"); // "add" | "subtract" | "set"
-  const note = String(body?.note || "").trim();
-  const amount = Number(body?.amount);
+  const now = new Date().toISOString();
 
-  if (!userId) return NextResponse.json({ error: "Missing user id" }, { status: 400 });
-  if (!note) return NextResponse.json({ error: "Missing note" }, { status: 400 });
-  if (!Number.isFinite(amount) || amount <= 0) return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
-
-  const field = type === "bonus" ? "balance_bonus" : "balance_available";
-
-  // Load current balances
-  const { data: user, error: uErr } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("users")
-    .select(`id,email,first_name,last_name,${field}`)
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (uErr) return NextResponse.json({ error: uErr.message }, { status: 400 });
-  if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
-
-  const current = Number((user as any)[field] ?? 0);
-  let next = current;
-
-  if (action === "add") next = current + amount;
-  else if (action === "subtract") next = Math.max(0, current - amount);
-  else if (action === "set") next = amount;
-  else return NextResponse.json({ error: "Invalid action" }, { status: 400 });
-
-  const { data: updated, error: upErr } = await supabaseAdmin
-    .from("users")
-    .update({ [field]: next })
-    .eq("id", userId)
-    .select("*")
-    .maybeSingle();
-
-  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
-
-  // Optional audit insert (won’t crash if table not present)
-  void Promise.resolve(
-    supabaseAdmin.from("admin_audit_log").insert({
-      admin_id: guard.adminId,
-      target_user_id: userId,
-      action: "balance_adjustment",
-      meta: { type, action, amount, field, from: current, to: next, note },
-      created_at: new Date().toISOString(),
+    .update({
+      kyc_status: "rejected",
+      kyc_rejection_reason: reason || null,
+      kyc_reviewed_at: now,
+      kyc_reviewed_by: guard.adminId,
+      updated_at: now,
     })
-  ).catch(() => {});
+    .eq("id", userId)
+    .select("id, kyc_status")
+    .maybeSingle();
+
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+  if (!data) {
+    return NextResponse.json({ error: "User not found" }, { status: 404 });
+  }
+
+  // audit log (non-blocking)
+ void Promise.resolve(
+  supabaseAdmin
+    .from("admin_logs")
+    .insert({
+      admin_id: guard.adminId,
+      action: "kyc_rejected",
+      details: { user_id: userId, reason: reason || null },
+    })
+).catch(() => {});
+
 
   return NextResponse.json({
     ok: true,
-    user: updated,
-    adjustment: { type, action, amount, field, from: current, to: next, note },
+    user: data,
   });
 }
