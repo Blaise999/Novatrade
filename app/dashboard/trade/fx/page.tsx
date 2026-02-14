@@ -1,1899 +1,825 @@
 // app/dashboard/trade/fx/page.tsx
 'use client';
 
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import Link from 'next/link';
+/**
+ * FX PAGE (OLYMP-STYLE)
+ * --------------------
+ * UI = TV screen
+ * Server = Judge
+ *
+ * - Opens trades via POST /api/trades (atomic balance deduction)
+ * - Loads trades via GET /api/trades
+ * - Closes trades via PATCH /api/trades (atomic balance credit)
+ *
+ * IMPORTANT:
+ * - No local balance mutations (only trust server newBalance)
+ * - UI can compute floating PnL for display, but only server can settle
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { supabase } from '@/lib/supabase/client';
 import {
-  TrendingUp,
-  TrendingDown,
-  ChevronDown,
-  Plus,
-  Minus,
-  Search,
-  Star,
-  StarOff,
-  CheckCircle,
-  AlertCircle,
-  CandlestickChart,
-  LineChart as LineChartIcon,
-  Signal,
-  X,
-  Lock,
-  Crown,
-  Activity,
+  Loader2,
+  RefreshCcw,
+  ArrowUpRight,
+  ArrowDownRight,
+  XCircle,
+  AlertTriangle,
 } from 'lucide-react';
 
-import { useTradingAccountStore } from '@/lib/trading-store';
-import { useAdminSessionStore } from '@/lib/admin-store';
-import { useStore } from '@/lib/supabase/store-supabase';
-import KYCGate from '@/components/KYCGate';
-import { useAdminMarketStore, isAdminControlledPair, getMarketData } from '@/lib/admin-markets';
-import { useMembershipStore, TIER_CONFIG, canPerformAction } from '@/lib/membership-tiers';
-import { marketAssets } from '@/lib/data';
-import { MarginPosition } from '@/lib/trading-types';
+type DirectionLabel = 'buy' | 'sell';
+type CloseReason = 'manual' | 'liquidated' | 'stopped_out' | 'take_profit';
 
-/** Local FX type to avoid mismatch with MarketAsset requirements */
-type FXAsset = {
+type FxUiTrade = {
   id: string;
-  symbol: string;
-  name: string;
-  price: number;
-  change24h: number;
-  type: 'forex';
+  asset: string; // e.g. "EUR/USD"
+  assetType: 'forex';
+  directionInt: 1 | -1;
+  directionLabel: DirectionLabel;
+
+  investment: number;
+  multiplier: number;
+  volume: number;
+
+  entryPrice: number;
+  liquidationPrice: number;
+
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+
+  spreadCost?: number;
+
+  status: 'active' | 'closed' | 'liquidated' | 'stopped_out' | 'take_profit';
+
+  currentPrice: number;
+  floatingPnL: number;
+  floatingPnLPercent: number;
+
+  openedAt?: string;
+  updatedAt?: string;
 };
 
-const uid = () =>
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? // @ts-ignore
-      crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
-
-const toFxAsset = (a: any): FXAsset => ({
-  id: a?.id ?? a?.symbol ?? uid(),
-  symbol: String(a?.symbol ?? 'EUR/USD'),
-  name: String(a?.name ?? a?.symbol ?? 'FX Pair'),
-  price: Number(a?.price ?? 1),
-  change24h: Number(a?.change24h ?? 0),
-  type: 'forex',
-});
-
-// Filter forex assets
-const standardForexAssets: FXAsset[] = (marketAssets as any[])
-  .filter((a) => a?.type === 'forex')
-  .map(toFxAsset);
-
-// ✅ Rare/exotic pairs (admin-controlled UI)
-const rarePairs: FXAsset[] = [
-  { id: 'usd-try', symbol: 'USD/TRY', name: 'US Dollar / Turkish Lira', price: 32.15, change24h: 0.7, type: 'forex' },
-  { id: 'usd-zar', symbol: 'USD/ZAR', name: 'US Dollar / South African Rand', price: 19.05, change24h: -0.3, type: 'forex' },
-  { id: 'usd-brl', symbol: 'USD/BRL', name: 'US Dollar / Brazilian Real', price: 4.95, change24h: 0.1, type: 'forex' },
-  { id: 'usd-mxn', symbol: 'USD/MXN', name: 'US Dollar / Mexican Peso', price: 17.12, change24h: -0.2, type: 'forex' },
-  { id: 'usd-pln', symbol: 'USD/PLN', name: 'US Dollar / Polish Zloty', price: 4.01, change24h: 0.2, type: 'forex' },
-  { id: 'usd-isk', symbol: 'USD/ISK', name: 'US Dollar / Icelandic Krona', price: 138.2, change24h: -0.1, type: 'forex' },
+const DEFAULT_PAIRS: { symbol: string; name: string }[] = [
+  { symbol: 'EUR/USD', name: 'Euro / US Dollar' },
+  { symbol: 'GBP/USD', name: 'British Pound / US Dollar' },
+  { symbol: 'USD/JPY', name: 'US Dollar / Japanese Yen' },
+  { symbol: 'USD/CHF', name: 'US Dollar / Swiss Franc' },
+  { symbol: 'AUD/USD', name: 'Australian Dollar / US Dollar' },
+  { symbol: 'USD/CAD', name: 'US Dollar / Canadian Dollar' },
+  { symbol: 'NZD/USD', name: 'New Zealand Dollar / US Dollar' },
+  { symbol: 'EUR/GBP', name: 'Euro / British Pound' },
+  { symbol: 'EUR/JPY', name: 'Euro / Japanese Yen' },
+  { symbol: 'GBP/JPY', name: 'British Pound / Japanese Yen' },
 ];
 
-// Leverage options for forex
-const leverageOptions = [10, 20, 50, 100, 200, 500];
+function clampNum(n: any, fallback = 0) {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : fallback;
+}
 
-// Currency flag emojis (rare pairs only)
-const currencyFlags: Record<string, string> = {
-  USD: '🇺🇸',
-  TRY: '🇹🇷',
-  ZAR: '🇿🇦',
-  BRL: '🇧🇷',
-  MXN: '🇲🇽',
-  PLN: '🇵🇱',
-  ISK: '🇮🇸',
-  EUR: '🇪🇺',
-  GBP: '🇬🇧',
-  JPY: '🇯🇵',
-  CHF: '🇨🇭',
-  CAD: '🇨🇦',
-  AUD: '🇦🇺',
-  NZD: '🇳🇿',
-};
+function parseDirectionLabel(input: any): DirectionLabel {
+  const v = String(input || '').toLowerCase();
+  return v === 'sell' || v === 'short' || v === 'down' ? 'sell' : 'buy';
+}
 
-// Chart timeframes
-const timeframes = ['1m', '5m', '15m', '1h', '4h', '1D'] as const;
-type Timeframe = (typeof timeframes)[number];
+async function getAuthHeader() {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error('not_authenticated');
+  return { authorization: `Bearer ${token}` };
+}
 
-// Mobile tabs
-type MobileTab = 'chart' | 'trade' | 'positions';
+/**
+ * price can be:
+ * - number
+ * - { bid, ask, mid }
+ */
+function getMidPrice(p: any): number | null {
+  if (typeof p === 'number' && Number.isFinite(p)) return p;
+  if (!p) return null;
+  const bid = Number(p.bid);
+  const ask = Number(p.ask);
+  const mid =
+    p.mid != null ? Number(p.mid) : Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 : NaN;
+  return Number.isFinite(mid) ? mid : null;
+}
 
-// ==============================
-// FAST + TOLERANT MARKET PARSING
-// ==============================
-type ChartCandle = {
-  id: string;
-  pairId: string;
-  timestamp: number; // ms since epoch
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  isSimulated?: boolean;
-};
+// P/L = D × I × M × ((P - entry) / entry)
+function calcPnL(directionInt: 1 | -1, investment: number, multiplier: number, entry: number, price: number) {
+  if (!entry || entry <= 0) return 0;
+  const rel = (price - entry) / entry;
+  let pnl = directionInt * investment * multiplier * rel;
+  // cap loss at -investment
+  if (pnl < -investment) pnl = -investment;
+  return pnl;
+}
 
-const toFiniteNumber = (v: unknown): number | null => {
-  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
-  return Number.isFinite(n) ? n : null;
-};
+function shouldLiquidate(floatingPnL: number, investment: number) {
+  return floatingPnL <= -investment;
+}
+function shouldStopLoss(direction: 1 | -1, price: number, stopLoss?: number | null) {
+  if (!stopLoss) return false;
+  return direction === 1 ? price <= stopLoss : price >= stopLoss;
+}
+function shouldTakeProfit(direction: 1 | -1, price: number, takeProfit?: number | null) {
+  if (!takeProfit) return false;
+  return direction === 1 ? price >= takeProfit : price <= takeProfit;
+}
 
-const toMs = (input: unknown): number => {
-  if (typeof input === 'number' && Number.isFinite(input)) {
-    return input > 0 && input < 1e12 ? Math.round(input * 1000) : Math.round(input);
-  }
-  if (input instanceof Date) {
-    const ms = input.getTime();
-    return Number.isFinite(ms) ? ms : Date.now();
-  }
-  if (typeof input === 'string') {
-    const s = input.trim();
-    if (/^\d+(\.\d+)?$/.test(s)) {
-      const n = Number(s);
-      if (!Number.isFinite(n)) return Date.now();
-      return n > 0 && n < 1e12 ? Math.round(n * 1000) : Math.round(n);
+/**
+ * Convert DB row -> UI trade
+ * Your GET /api/trades returns rows from `trades` table
+ */
+function dbRowToUi(r: any): FxUiTrade {
+  const directionInt = (r.direction_int ??
+    (String(r.direction || r.type).toLowerCase() === 'buy' ? 1 : -1)) as 1 | -1;
+  const directionLabel: DirectionLabel = directionInt === 1 ? 'buy' : 'sell';
+
+  const investment = clampNum(r.investment ?? r.amount ?? 0);
+  const multiplier = clampNum(r.multiplier ?? r.leverage ?? 1, 1);
+  const entryPrice = clampNum(r.entry_price ?? r.entryPrice ?? 0);
+  const currentPrice = clampNum(r.current_price ?? entryPrice);
+
+  const floatingPnL = calcPnL(directionInt, investment, multiplier, entryPrice, currentPrice);
+  const floatingPnLPercent = investment > 0 ? (floatingPnL / investment) * 100 : 0;
+
+  return {
+    id: String(r.id),
+    asset: String(r.asset ?? r.symbol ?? r.pair ?? ''),
+    assetType: 'forex',
+    directionInt,
+    directionLabel,
+    investment,
+    multiplier,
+    volume: clampNum(r.volume ?? investment * multiplier),
+    entryPrice,
+    liquidationPrice: clampNum(r.liquidation_price ?? 0),
+    stopLoss: r.stop_loss ?? null,
+    takeProfit: r.take_profit ?? null,
+    spreadCost: clampNum(r.spread_cost ?? 0),
+    status:
+      r.status === 'open'
+        ? 'active'
+        : (String(r.status || 'active') as FxUiTrade['status']),
+    currentPrice,
+    floatingPnL,
+    floatingPnLPercent,
+    openedAt: r.opened_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+/**
+ * Convert POST response trade -> UI trade
+ * Your POST /api/trades returns `trade` object (not full DB row)
+ */
+function apiTradeToUi(t: any): FxUiTrade {
+  const directionLabel = parseDirectionLabel(t.direction);
+  const directionInt: 1 | -1 = directionLabel === 'buy' ? 1 : -1;
+
+  const investment = clampNum(t.investment, 0);
+  const multiplier = clampNum(t.multiplier, 1);
+  const entryPrice = clampNum(t.entryPrice, 0);
+
+  const spreadCost = clampNum(t.spreadCost ?? 0);
+
+  return {
+    id: String(t.id),
+    asset: String(t.asset ?? t.symbol ?? ''),
+    assetType: 'forex',
+    directionInt,
+    directionLabel,
+    investment,
+    multiplier,
+    volume: clampNum(t.volume ?? investment * multiplier),
+    entryPrice,
+    liquidationPrice: clampNum(t.liquidationPrice ?? 0),
+    stopLoss: t.stopLoss ?? null,
+    takeProfit: t.takeProfit ?? null,
+    spreadCost,
+    status: 'active',
+    currentPrice: entryPrice,
+    floatingPnL: spreadCost ? -spreadCost : 0,
+    floatingPnLPercent: investment > 0 ? ((spreadCost ? -spreadCost : 0) / investment) * 100 : 0,
+    openedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * OPTIONAL: price fetcher (safe, won’t crash if endpoint doesn’t exist)
+ * If you already have a live price system elsewhere, just replace this.
+ */
+async function fetchFxPrices(symbols: string[]): Promise<Record<string, any>> {
+  if (!symbols.length) return {};
+  const qs = encodeURIComponent(symbols.join(','));
+
+  const candidates = [
+    `/api/fx/prices?symbols=${qs}`,
+    `/api/prices?market=fx&symbols=${qs}`,
+    `/api/quotes?market=fx&symbols=${qs}`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const json = await res.json();
+      // accept either {prices:{SYM:...}} or direct {SYM:...}
+      const prices = (json?.prices && typeof json.prices === 'object') ? json.prices : json;
+      if (prices && typeof prices === 'object') return prices;
+    } catch {
+      // ignore
     }
-    const d = new Date(s);
-    const ms = d.getTime();
-    return Number.isFinite(ms) ? ms : Date.now();
   }
-  return Date.now();
-};
 
-const normalizePriceMap = (raw: unknown): Record<string, number> => {
-  if (!raw || typeof raw !== 'object') return {};
-  const obj = raw as Record<string, unknown>;
-  const out: Record<string, number> = {};
-  for (const k of Object.keys(obj)) {
-    const n = toFiniteNumber(obj[k]);
-    if (n !== null) out[String(k)] = n;
-  }
-  return out;
-};
+  return {};
+}
 
-const normalizeCandles = (raw: unknown, pairId: string): ChartCandle[] => {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((c: any) => {
-      const open = toFiniteNumber(c?.open ?? c?.open_price);
-      const high = toFiniteNumber(c?.high ?? c?.high_price);
-      const low = toFiniteNumber(c?.low ?? c?.low_price);
-      const close = toFiniteNumber(c?.close ?? c?.close_price);
-      if (open === null || high === null || low === null || close === null) return null;
+export default function FXPage() {
+  const [tab, setTab] = useState<'active' | 'history'>('active');
 
-      return {
-        id: String(c?.id ?? uid()),
-        pairId: String(c?.pairId ?? c?.pair_symbol ?? c?.symbol ?? pairId),
-        timestamp: toMs(c?.timestamp ?? c?.time ?? c?.t),
-        open,
-        high,
-        low,
-        close,
-        volume: toFiniteNumber(c?.volume) ?? 0,
-        isSimulated: !!c?.isSimulated,
-      } satisfies ChartCandle;
-    })
-    .filter(Boolean) as ChartCandle[];
-};
+  const [balance, setBalance] = useState<number>(0);
+  const [trades, setTrades] = useState<FxUiTrade[]>([]);
+  const [prices, setPrices] = useState<Record<string, any>>({});
 
-// ✅ Treat our rarePairs as admin-controlled
-const RARE_PAIR_SYMBOLS = new Set(rarePairs.map((p) => p.symbol));
-const isAdminPairSymbol = (sym: string) => RARE_PAIR_SYMBOLS.has(sym) || isAdminControlledPair(sym);
+  // trade form
+  const [pair, setPair] = useState(DEFAULT_PAIRS[0]?.symbol || 'EUR/USD');
+  const [direction, setDirection] = useState<DirectionLabel>('buy');
+  const [investment, setInvestment] = useState<number>(50);
+  const [multiplier, setMultiplier] = useState<number>(50);
+  const [stopLoss, setStopLoss] = useState<string>(''); // keep raw for empty
+  const [takeProfit, setTakeProfit] = useState<string>('');
 
-const TF_STEP_MS: Record<Timeframe, number> = {
-  '1m': 60_000,
-  '5m': 5 * 60_000,
-  '15m': 15 * 60_000,
-  '1h': 60 * 60_000,
-  '4h': 4 * 60 * 60_000,
-  '1D': 24 * 60 * 60_000,
-};
+  // ui state
+  const [loading, setLoading] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string>('');
 
-const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+  // prevent double-close spam
+  const closingRef = useRef<Set<string>>(new Set());
 
-export default function FXTradingPage() {
-  // ✅ HYDRATION FIX: zustand/persist rehydrates from localStorage on client,
-  // but server sees empty defaults. Guard with hasMounted to avoid mismatch.
-  const [hasMounted, setHasMounted] = useState(false);
-  useEffect(() => { setHasMounted(true); }, []);
-
-  const {
-    marginAccount,
-    marginPositions,
-    openMarginPosition,
-    closeMarginPosition,
-    updateMarginPositionPrice,
-  } = useTradingAccountStore();
-
-  const { refreshUser, user } = useStore();
-
-  // Debug: enable via ?debug=1
-  const debugEnabled = useMemo(() => {
-    if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('debug') === '1';
-  }, []);
-  const dbg = useCallback(
-    (...args: any[]) => {
-      if (!debugEnabled) return;
-      // eslint-disable-next-line no-console
-      console.log('[FX]', ...args);
-    },
-    [debugEnabled]
+  const activeTrades = useMemo(
+    () => trades.filter((t) => t.status === 'active'),
+    [trades]
   );
 
-  // Admin session store
-  const adminSession = useAdminSessionStore() as any;
-  const activeSignal = adminSession?.activeSignal ?? adminSession?.signal ?? null;
+  const symbolsForPrice = useMemo(() => {
+    const s = new Set<string>();
+    s.add(pair);
+    for (const t of activeTrades) s.add(t.asset);
+    return Array.from(s);
+  }, [pair, activeTrades]);
 
-  // Membership store
-  const membership = useMembershipStore() as any;
-  const currentTier = (membership?.currentTier ?? membership?.tier ?? 'free') as keyof typeof TIER_CONFIG;
-  const totalDeposited = Number(membership?.totalDeposited ?? membership?.totalDeposit ?? membership?.depositedTotal ?? 0);
+  const currentMid = useMemo(() => getMidPrice(prices?.[pair]), [prices, pair]);
 
-  const tierConfig =
-    ((TIER_CONFIG as any)[currentTier] as any) ?? {
-      maxLeverage: 0,
-      spreadDiscount: 0,
-      bgColor: 'bg-white/5',
-      borderColor: 'border-white/10',
-      color: 'text-cream',
-      icon: '⭐',
-      name: String(currentTier),
-    };
-  const tierName = tierConfig.displayName ?? tierConfig.name ?? String(currentTier);
+  async function loadTrades(mode: 'active' | 'history' = tab) {
+    setError('');
+    setLoading(true);
+    try {
+      const h = await getAuthHeader();
+      const url =
+        mode === 'active'
+          ? `/api/trades?status=active&limit=200&offset=0`
+          : `/api/trades?limit=200&offset=0`;
 
-  // Admin market store (admin-controlled pairs)
-  const adminMarket = useAdminMarketStore() as any;
-  const adminPrices = (adminMarket?.currentPrices ?? {}) as Record<string, { bid: number; ask: number }>;
-  const isPausedMap = (adminMarket?.isPaused ?? {}) as Record<string, boolean>;
+      const res = await fetch(url, { headers: { ...h }, cache: 'no-store' });
+      const json = await res.json();
 
-  // ======================
-  // STATE
-  // ======================
-  const [selectedAsset, setSelectedAsset] = useState<FXAsset>(() => {
-    return standardForexAssets[0] ?? rarePairs[0];
-  });
+      if (!json?.success) throw new Error(json?.error || 'failed_load_trades');
 
-  const [showAssetSelector, setShowAssetSelector] = useState(false);
-  const [favorites, setFavorites] = useState<string[]>(['EUR/USD', 'GBP/USD', 'USD/JPY']);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [chartTimeframe, setChartTimeframe] = useState<Timeframe>('15m');
-  const [chartType, setChartType] = useState<'candle' | 'line'>('candle');
+      setBalance(clampNum(json.balance ?? 0));
+      const rows = Array.isArray(json.trades) ? json.trades : [];
+      const parsed = rows.map(dbRowToUi).filter((t) => t.assetType === 'forex' && t.asset);
 
-  // candles + cache
-  const [chartCandles, setChartCandles] = useState<ChartCandle[]>([]);
-  const candleCacheRef = useRef<Map<string, ChartCandle[]>>(new Map());
+      // if history tab, keep all statuses; if active tab, keep active only
+      setTrades(mode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load trades');
+    } finally {
+      setLoading(false);
+    }
+  }
 
-  // Live prices (for header + list)
-  const [livePrices, setLivePrices] = useState<Record<string, number>>({});
-  const [bidPrice, setBidPrice] = useState(selectedAsset.price);
-  const [askPrice, setAskPrice] = useState(selectedAsset.price * 1.0001);
+  async function refreshPricesOnce() {
+    setRefreshing(true);
+    try {
+      const next = await fetchFxPrices(symbolsForPrice);
+      if (next && typeof next === 'object') {
+        setPrices((prev) => ({ ...prev, ...next }));
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
-  // Trading state
-  const [tradeDirection, setTradeDirection] = useState<'buy' | 'sell'>('buy');
-  const [lotSize, setLotSize] = useState(0.1);
-  const [tradeAmount, setTradeAmount] = useState<number>(50); // USD amount user wants to trade
-  const [inputMode, setInputMode] = useState<'amount' | 'lots'>('amount'); // default: simple amount mode
-  const [leverage, setLeverage] = useState(100);
-  const [stopLoss, setStopLoss] = useState<number | null>(null);
-  const [takeProfit, setTakeProfit] = useState<number | null>(null);
+  async function openTrade() {
+    setError('');
 
-  // UI state
-  const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [showCloseModal, setShowCloseModal] = useState(false);
-  const [positionToClose, setPositionToClose] = useState<MarginPosition | null>(null);
-  const [mobileTab, setMobileTab] = useState<MobileTab>('chart');
-
-  // Refs (avoid stale closures)
-  const selectedSymbolRef = useRef<string>(selectedAsset.symbol);
-  const bidRef = useRef<number>(bidPrice);
-  const askRef = useRef<number>(askPrice);
-  const positionsRef = useRef<MarginPosition[]>(marginPositions);
-  const adminPricesRef = useRef(adminPrices);
-  const pausedRef = useRef<boolean>(!!isPausedMap[selectedAsset.symbol]);
-  const livePricesRef = useRef<Record<string, number>>({});
-  const autoClosingIdsRef = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    selectedSymbolRef.current = selectedAsset.symbol;
-  }, [selectedAsset.symbol]);
-  useEffect(() => {
-    bidRef.current = bidPrice;
-  }, [bidPrice]);
-  useEffect(() => {
-    askRef.current = askPrice;
-  }, [askPrice]);
-  useEffect(() => {
-    positionsRef.current = marginPositions;
-  }, [marginPositions]);
-  useEffect(() => {
-    adminPricesRef.current = adminPrices;
-  }, [adminPrices]);
-  useEffect(() => {
-    pausedRef.current = !!isPausedMap[selectedAsset.symbol];
-  }, [isPausedMap, selectedAsset.symbol]);
-  useEffect(() => {
-    livePricesRef.current = livePrices;
-  }, [livePrices]);
-
-  // User balance (account currency)
-  // ✅ FIX: balance_available already includes bonus. Do NOT add bonusBalance again.
-  const userBalance = Number((user as any)?.balance ?? 0);
-
-  // Tier gating: tier-based OR if admin has set a balance
-  const canTrade = canPerformAction(currentTier as any, 'trade' as any) || userBalance > 0;
-
-  const isAdminPair = useMemo(() => isAdminPairSymbol(selectedAsset.symbol), [selectedAsset.symbol]);
-  const isPaused = !!isPausedMap[selectedAsset.symbol];
-
-  // Filter positions for this market
-  const forexPositions = useMemo(() => {
-    return marginPositions.filter((p) => {
-      const t = (p as any).assetType ?? (p as any).marketType ?? (p as any).type ?? (p as any).market;
-      return t === 'forex';
-    });
-  }, [marginPositions]);
-
-  // ======================
-  // FORMATTERS (NO "$")
-  // ======================
-  const formatPrice = useCallback((price: number) => {
-    if (!Number.isFinite(price)) return '—';
-    if (price >= 100) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(5);
-  }, []);
-
-  const formatMoney = useCallback((n: number, currency = 'USD') => {
-    const v = Number(n);
-    if (!Number.isFinite(v)) return `— ${currency}`;
-    const sign = v < 0 ? '-' : '';
-    const abs = Math.abs(v);
-    return `${sign}${abs.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })} ${currency}`;
-  }, []);
-
-  // pip sizing (simple)
-  const pipSize = useMemo(() => (selectedAsset.symbol.includes('JPY') ? 0.01 : 0.0001), [selectedAsset.symbol]);
-
-  // ======================
-  // RESIZE (FAST)
-  // ======================
-  const chartRef = useRef<HTMLDivElement>(null);
-  const [chartDimensions, setChartDimensions] = useState({ width: 300, height: 250 });
-
-  useEffect(() => {
-    const update = () => {
-      if (!chartRef.current) return;
-      const rect = chartRef.current.getBoundingClientRect();
-      const width = Math.max(rect.width || 300, 280);
-      const height = Math.max(rect.height || 250, 200);
-      setChartDimensions({ width, height });
-    };
-
-    update();
-    const t1 = setTimeout(update, 80);
-    const t2 = setTimeout(update, 240);
-
-    let ro: ResizeObserver | null = null;
-    if (chartRef.current && typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const { width, height } = entry.contentRect;
-          setChartDimensions({
-            width: Math.max(width || 300, 280),
-            height: Math.max(height || 250, 200),
-          });
-        }
-      });
-      ro.observe(chartRef.current);
+    const mid = currentMid;
+    if (!mid || mid <= 0) {
+      setError('No market price available for this pair yet. Refresh prices or add your FX price endpoint.');
+      return;
     }
 
-    window.addEventListener('resize', update);
-    window.addEventListener('orientationchange', update);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('orientationchange', update);
-      if (ro) ro.disconnect();
-    };
-  }, [mobileTab]);
+    const inv = clampNum(investment, 0);
+    const mult = clampNum(multiplier, 1);
 
-  // ======================
-  // CHART DATA (SNAPPY)
-  // ======================
+    if (inv <= 0) return setError('Investment must be positive');
+    if (mult < 1 || mult > 1000) return setError('Multiplier must be between 1 and 1000');
+
+    setOpening(true);
+    try {
+      const h = await getAuthHeader();
+
+      const idempotencyKey =
+        typeof crypto !== 'undefined' && (crypto as any).randomUUID
+          ? (crypto as any).randomUUID()
+          : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+      const res = await fetch('/api/trades', {
+        method: 'POST',
+        headers: {
+          ...h,
+          'content-type': 'application/json',
+          'x-idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify({
+          asset: pair,
+          assetType: 'forex',
+          direction, // 'buy'|'sell'
+          investment: inv,
+          multiplier: mult,
+          marketPrice: mid, // mid price
+          stopLoss: stopLoss.trim() ? Number(stopLoss) : undefined,
+          takeProfit: takeProfit.trim() ? Number(takeProfit) : undefined,
+          idempotencyKey,
+        }),
+      });
+
+      const json = await res.json();
+      if (!json?.success) throw new Error(json?.error || 'trade_open_failed');
+
+      setBalance(clampNum(json.newBalance ?? balance));
+      const ui = apiTradeToUi(json.trade);
+      setTrades((prev) => [ui, ...prev]);
+
+      // after opening, keep you on active tab
+      setTab('active');
+    } catch (e: any) {
+      setError(e?.message || 'Failed to open trade');
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  async function closeTrade(tradeId: string, exitPrice: number, closeReason: CloseReason = 'manual') {
+    if (closingRef.current.has(tradeId)) return;
+    closingRef.current.add(tradeId);
+
+    try {
+      const h = await getAuthHeader();
+
+      const res = await fetch('/api/trades', {
+        method: 'PATCH',
+        headers: { ...h, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          tradeId,
+          action: 'close',
+          exitPrice,
+          closeReason,
+        }),
+      });
+
+      const json = await res.json();
+      if (!json?.success) throw new Error(json?.error || 'trade_close_failed');
+
+      setBalance(clampNum(json.newBalance ?? balance));
+
+      // if viewing active: remove
+      if (tab === 'active') {
+        setTrades((prev) => prev.filter((t) => t.id !== tradeId));
+      } else {
+        // if viewing history: mark as closed status
+        setTrades((prev) =>
+          prev.map((t) =>
+            t.id === tradeId
+              ? {
+                  ...t,
+                  status:
+                    closeReason === 'liquidated'
+                      ? 'liquidated'
+                      : closeReason === 'stopped_out'
+                      ? 'stopped_out'
+                      : closeReason === 'take_profit'
+                      ? 'take_profit'
+                      : 'closed',
+                }
+              : t
+          )
+        );
+      }
+    } finally {
+      // release after a moment
+      setTimeout(() => closingRef.current.delete(tradeId), 1200);
+    }
+  }
+
+  // initial load
   useEffect(() => {
-    const key = `${selectedAsset.symbol}|${chartTimeframe}`;
+    loadTrades('active');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const cached = candleCacheRef.current.get(key);
-    if (cached && cached.length) setChartCandles(cached);
-    else setChartCandles([]);
+  // tab change -> reload
+  useEffect(() => {
+    loadTrades(tab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
-    const ac = new AbortController();
+  // poll prices (optional)
+  useEffect(() => {
+    let alive = true;
 
     (async () => {
-      try {
-        const result = await getMarketData(selectedAsset.symbol);
-        if (ac.signal.aborted) return;
-
-        const raw = (result as any)?.candles ?? (result as any)?.data?.candles ?? result;
-        const candles = normalizeCandles(raw, selectedAsset.symbol).slice(-50);
-
-        candleCacheRef.current.set(key, candles);
-        setChartCandles(candles);
-        dbg('candles loaded', { symbol: selectedAsset.symbol, tf: chartTimeframe, n: candles.length });
-      } catch (e) {
-        dbg('candles load failed', e);
-      }
+      const next = await fetchFxPrices(symbolsForPrice);
+      if (!alive) return;
+      if (next && typeof next === 'object') setPrices((prev) => ({ ...prev, ...next }));
     })();
 
-    return () => ac.abort();
-  }, [selectedAsset.symbol, chartTimeframe, dbg]);
-
-  // ======================
-  // LIVE PRICES
-  // ======================
-  useEffect(() => {
-    let alive = true;
-    const ac = new AbortController();
-
-    const allSymbols = [...rarePairs.map((a) => a.symbol), ...standardForexAssets.map((a) => a.symbol)];
-    const uniqueAll = Array.from(new Set(allSymbols));
-
-    const tickSelected = async () => {
-      const symbol = selectedSymbolRef.current;
-
-      // Admin controlled pair: prefer adminPrices (zero network)
-      if (isAdminPairSymbol(symbol)) {
-        if (pausedRef.current) return;
-        const p = adminPricesRef.current?.[symbol];
-        if (p?.bid && p?.ask) {
-          const bid = Number(p.bid);
-          const ask = Number(p.ask);
-          if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
-          requestAnimationFrame(() => {
-            if (!alive) return;
-            setBidPrice(bid);
-            setAskPrice(ask);
-          });
-          return;
-        }
-      }
-
-      // Try real prices endpoint
-      try {
-        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(symbol)}`, {
-          cache: 'no-store',
-          signal: ac.signal,
-        });
-        if (!res.ok) throw new Error('bad_status');
-        const json = await res.json();
-
-        const map = normalizePriceMap(json?.prices ?? json?.data?.prices ?? json);
-        const mid = map?.[symbol];
-
-        if (typeof mid === 'number' && Number.isFinite(mid)) {
-          const spread = Math.max(mid * 0.00006, 0.00001);
-          const bid = mid - spread / 2;
-          const ask = mid + spread / 2;
-
-          requestAnimationFrame(() => {
-            if (!alive) return;
-            setLivePrices((prev) => {
-              const next = prev[symbol] === mid ? prev : { ...prev, [symbol]: mid };
-              livePricesRef.current = next;
-              return next;
-            });
-            setBidPrice(bid);
-            setAskPrice(ask);
-          });
-          return;
-        }
-      } catch (e) {
-        dbg('tickSelected fetch failed', { symbol, e });
-      }
-
-      // Fallback simulation
-      requestAnimationFrame(() => {
-        if (!alive) return;
-        const base =
-          livePricesRef.current?.[symbol] ??
-          (standardForexAssets.find((a) => a.symbol === symbol)?.price ??
-            rarePairs.find((a) => a.symbol === symbol)?.price ??
-            1);
-
-        const volatility = Math.max(base * 0.00004, 0.00001);
-        const change = (Math.random() - 0.5) * volatility;
-        const mid = Math.max(0.00001, base + change);
-        const spread = Math.max(mid * 0.00006, 0.00001);
-
-        setLivePrices((prev) => {
-          const next = { ...prev, [symbol]: mid };
-          livePricesRef.current = next;
-          return next;
-        });
-        setBidPrice(mid - spread / 2);
-        setAskPrice(mid + spread / 2);
-      });
-    };
-
-    const tickAll = async () => {
-      try {
-        const q = uniqueAll.join(',');
-        const res = await fetch(`/api/market/prices?symbols=${encodeURIComponent(q)}`, {
-          cache: 'no-store',
-          signal: ac.signal,
-        });
-        if (!res.ok) return;
-        const json = await res.json();
-        const map = normalizePriceMap(json?.prices ?? json?.data?.prices ?? json);
-
-        if (!alive || !Object.keys(map).length) return;
-
-        requestAnimationFrame(() => {
-          if (!alive) return;
-          setLivePrices((prev) => {
-            let changed = false;
-            const next = { ...prev };
-            for (const k of Object.keys(map)) {
-              const v = map[k];
-              if (typeof v === 'number' && Number.isFinite(v) && next[k] !== v) {
-                next[k] = v;
-                changed = true;
-              }
-            }
-            if (!changed) return prev;
-            livePricesRef.current = next;
-            return next;
-          });
-        });
-      } catch (e) {
-        dbg('tickAll failed', e);
-      }
-    };
-
-    tickSelected();
-    tickAll();
-
-    const idSelected = setInterval(tickSelected, 750);
-    const idAll = setInterval(tickAll, 7000);
-
-    return () => {
-      alive = false;
-      ac.abort();
-      clearInterval(idSelected);
-      clearInterval(idAll);
-    };
-  }, [dbg]);
-
-  // ======================
-  // FX PIPS + APPROX PNL (DISPLAY)
-  // ======================
-  const calcPips = useCallback((symbol: string, entry: number, current: number, side: 'long' | 'short') => {
-    const ps = symbol.includes('JPY') ? 0.01 : 0.0001;
-    const raw = (current - entry) / ps;
-    return side === 'long' ? raw : -raw;
-  }, []);
-
-  const approxPnlInUsd = useCallback(
-    (symbol: string, pips: number, lots: number, currentPx: number) => {
-      // For most USD-quote majors: 1 lot ~ 10 USD per pip
-      if (!symbol.includes('JPY')) return pips * lots * 10;
-
-      // JPY quote pairs: 1 lot pip value ~ 1000 JPY; convert JPY->USD using USD/JPY if available
-      const usdJpy = livePricesRef.current['USD/JPY'] ?? (symbol === 'USD/JPY' ? currentPx : null);
-      if (typeof usdJpy === 'number' && usdJpy > 0) {
-        const pipValueUsdPerLot = 1000 / usdJpy; // USD per pip per 1 lot
-        return pips * lots * pipValueUsdPerLot;
-      }
-
-      // If we can't convert, return NaN so UI can hide USD estimate
-      return NaN;
-    },
-    []
-  );
-
-  // ======================
-  // POSITION MARK-TO-MARKET + SL/TP AUTO-CLOSE
-  // ======================
-  const handleAutoClose = useCallback(
-    async (trigger: { id: string; symbol: string; side: string; reason: 'sl' | 'tp'; triggerPrice: number; pnl: number }) => {
-      const id = trigger.id;
-      if (autoClosingIdsRef.current.has(id)) return;
-      autoClosingIdsRef.current.add(id);
-
-      try {
-        const stateNow = useTradingAccountStore.getState();
-        const pos = stateNow.marginPositions.find((p: any) => String(p.id) === String(id));
-        if (!pos) return;
-
-        const side = (pos as any).side as 'long' | 'short';
-        const px = Number(trigger.triggerPrice);
-        if (!Number.isFinite(px)) return;
-
-        const qty = Number((pos as any).qty ?? 0);
-        const fee = qty * px * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
-
-        const result = (closeMarginPosition as any)((pos as any).id, px, fee);
-        if (!(result as any)?.success) {
-          dbg('auto-close failed', { id, result });
-          return;
-        }
-
-        const pnl = Number((result as any).realizedPnL ?? trigger.pnl ?? 0);
-
-        await refreshUser?.();
-
-        // ✅ Close trade in DB via server API (service role key)
-        fetch('/api/user/trades', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
-          body: JSON.stringify({
-            tradeId: (pos as any).id,
-            userId: user?.id,
-            exitPrice: px,
-            pnl,
-            status: 'closed',
-          }),
-        }).catch((e) => console.error('[FX] Auto-close DB save failed:', e));
-
-        setNotification({
-          type: 'success',
-          message: `${trigger.reason === 'sl' ? 'Stop Loss' : 'Take Profit'} hit • ${(pos as any).symbol} • ${
-            pnl >= 0 ? '+' : ''
-          }${formatMoney(pnl)}`,
-        });
-        setTimeout(() => setNotification(null), 3500);
-      } finally {
-        // allow future triggers if position remains for any reason
-        setTimeout(() => autoClosingIdsRef.current.delete(id), 2000);
-      }
-    },
-    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, formatMoney, user?.id]
-  );
-
-  useEffect(() => {
-    let alive = true;
-
-    const id = setInterval(() => {
+    const t = setInterval(async () => {
+      const next = await fetchFxPrices(symbolsForPrice);
       if (!alive) return;
-
-      const symbolSelected = selectedSymbolRef.current;
-      const currentBid = bidRef.current;
-      const currentAsk = askRef.current;
-
-      const all = positionsRef.current || [];
-      const triggersToHandle: any[] = [];
-
-      // ✅ FIX: Deduplicate per symbol, call updateMarginPositionPrice ONCE per symbol
-      const symbolsProcessed = new Set<string>();
-
-      for (const pos of all as any[]) {
-        const t = pos.assetType ?? pos.marketType ?? pos.type ?? pos.market;
-        if (t !== 'forex') continue;
-
-        const sym = String(pos.symbol);
-        if (symbolsProcessed.has(sym)) continue;
-        symbolsProcessed.add(sym);
-
-        // ✅ FIX: For selected symbol, use real bid for longs, ask for shorts.
-        // For other symbols use mid price.
-        // updateMarginPositionPrice receives a single price; the SL/TP checks inside
-        // will use this price. For accurate SL/TP we pass the appropriate price.
-        let priceForUpdate: any;
-        if (sym === symbolSelected) {
-          // Use mid for the general update (PnL calc), SL/TP checks inside store
-          // already compare against the price we pass. For longs, SL triggers when
-          // price drops (bid), for shorts SL triggers when price rises (ask).
-          // Using bid as the baseline is more conservative for both.
-          priceForUpdate = {
-            bid: currentBid,
-            ask: currentAsk,
-            mid: (currentBid + currentAsk) / 2,
-          };
-        } else {
-          const midOther = livePricesRef.current?.[sym];
-          priceForUpdate = typeof midOther === 'number' ? midOther : Number(pos.currentPrice ?? 0);
-        }
-
-        if (!Number.isFinite(priceForUpdate)) continue;
-
-        const hit = updateMarginPositionPrice(sym, priceForUpdate);
-        if (Array.isArray(hit) && hit.length) triggersToHandle.push(...hit);
-      }
-
-      if (triggersToHandle.length) {
-        for (const tr of triggersToHandle) handleAutoClose(tr);
-      }
-    }, 850);
+      if (next && typeof next === 'object') setPrices((prev) => ({ ...prev, ...next }));
+    }, 1200);
 
     return () => {
       alive = false;
-      clearInterval(id);
+      clearInterval(t);
     };
-  }, [updateMarginPositionPrice, handleAutoClose]);
+  }, [symbolsForPrice.join('|')]);
 
-  // ======================
-  // HELPERS
-  // ======================
-  const toggleFavorite = useCallback((symbol: string) => {
-    setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
-  }, []);
+  // update floating pnl + auto-trigger closes (UI checks, server settles)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTrades((prev) =>
+        prev.map((t) => {
+          if (t.status !== 'active') return t;
 
-  const findJustOpenedPositionId = useCallback(
-    (symbol: string, qty: number, entry: number) => {
-      const st = useTradingAccountStore.getState();
-      const matches = (st.marginPositions as any[]).filter((p) => {
-        const t = p.assetType ?? p.marketType ?? p.type ?? p.market;
-        if (t !== 'forex') return false;
-        if (String(p.symbol) !== String(symbol)) return false;
-        const q = Number(p.qty ?? 0);
-        const a = Number(p.avgEntry ?? 0);
-        return Math.abs(q - qty) < 1e-6 && Math.abs(a - entry) <= Math.max(entry * 0.0002, 0.00001);
-      });
-      if (!matches.length) return undefined;
-      matches.sort((a, b) => {
-        const ta = new Date(a.openedAt ?? a.createdAt ?? 0).getTime();
-        const tb = new Date(b.openedAt ?? b.createdAt ?? 0).getTime();
-        return tb - ta;
-      });
-      return matches[0]?.id as string | undefined;
-    },
-    []
-  );
+          const mid = getMidPrice(prices?.[t.asset]);
+          if (!mid || mid <= 0) return t;
 
-  const handleTrade = useCallback(async () => {
-    if (!canTrade) {
-      setNotification({ type: 'error', message: 'Upgrade tier (or deposit) to trade' });
-      setTimeout(() => setNotification(null), 3000);
-      return;
-    }
+          const pnl = calcPnL(t.directionInt, t.investment, t.multiplier, t.entryPrice, mid);
+          const pnlPct = t.investment > 0 ? (pnl / t.investment) * 100 : 0;
 
-    const maxLev = Number(tierConfig.maxLeverage ?? 0);
-    if (maxLev > 0 && leverage > maxLev) {
-      setNotification({ type: 'error', message: `Max leverage for ${tierName} is 1:${maxLev}` });
-      setTimeout(() => setNotification(null), 3000);
-      return;
-    }
+          const liquidate = shouldLiquidate(pnl, t.investment);
+          const sl = shouldStopLoss(t.directionInt, mid, t.stopLoss);
+          const tp = shouldTakeProfit(t.directionInt, mid, t.takeProfit);
 
-    // Compute sizing from $ amount (exact margin) or direct lot input
-const entryPrice = tradeDirection === 'buy' ? askPrice : bidPrice;
+          const reason: CloseReason | null = liquidate
+            ? 'liquidated'
+            : sl
+            ? 'stopped_out'
+            : tp
+            ? 'take_profit'
+            : null;
 
-let effLotSize = lotSize;
-let qty = 0; // units
-let requiredMarginUsd = 0;
+          if (reason && !closingRef.current.has(t.id)) {
+            // fire and forget, but guarded
+            closeTrade(t.id, mid, reason).catch(() => {});
+          }
 
-if (inputMode === 'amount') {
-  requiredMarginUsd = tradeAmount;
-  qty = entryPrice > 0 ? (requiredMarginUsd * leverage) / entryPrice : 0;
-  effLotSize = qty / 100000;
-} else {
-  effLotSize = lotSize;
-  qty = effLotSize * 100000;
-  requiredMarginUsd = leverage > 0 ? (qty * entryPrice) / leverage : qty * entryPrice;
-}
+          return {
+            ...t,
+            currentPrice: mid,
+            floatingPnL: pnl,
+            floatingPnLPercent: pnlPct,
+            updatedAt: new Date().toISOString(),
+          };
+        })
+      );
+    }, 500);
 
-if (!Number.isFinite(effLotSize) || effLotSize <= 0 || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(requiredMarginUsd) || requiredMarginUsd <= 0) {
-  setNotification({ type: 'error', message: 'Invalid trade amount' });
-  setTimeout(() => setNotification(null), 3000);
-  return;
-}
-
-
-    // Notional (quote currency)
-    const notional = qty * entryPrice;
-
-    // Fee is a simple model (you can refine later)
-    const fee = notional * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
-
-    const result = (openMarginPosition as any)(
-      selectedAsset.symbol,
-      selectedAsset.name,
-      'forex',
-      tradeDirection === 'buy' ? 'long' : 'short',
-      qty,
-      entryPrice,
-      leverage,
-      fee,
-      stopLoss || undefined,
-      takeProfit || undefined
-    );
-
-    if ((result as any)?.success) {
-      await refreshUser?.();
-
-      // ✅ Save trade to DB via server API (service role key — bypasses RLS)
-      const positionId = (result as any).positionId;
-      fetch('/api/user/trades', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
-        body: JSON.stringify({
-          id: positionId,
-          userId: user?.id,
-          marketType: 'fx',
-          assetType: 'forex',
-          pair: selectedAsset.symbol,
-          direction: tradeDirection === 'buy' ? 'buy' : 'sell',
-          quantity: qty,
-          lotSize: effLotSize,
-          leverage,
-          entryPrice,
-          stopLoss: stopLoss || null,
-          takeProfit: takeProfit || null,
-          amount: requiredMarginUsd,
-          isSimulated: true,
-        }),
-      }).catch((e) => console.error('[FX] Server trade save failed:', e));
-
-      setNotification({
-        type: 'success',
-        message: `${tradeDirection.toUpperCase()} $${(qty * entryPrice / leverage).toFixed(2)} • ${selectedAsset.symbol} @ ${formatPrice(entryPrice)}`,
-      });
-    } else {
-      setNotification({ type: 'error', message: (result as any)?.error || 'Trade failed' });
-    }
-
-    setTimeout(() => setNotification(null), 3000);
-  }, [
-    canTrade,
-    leverage,
-    tierConfig.maxLeverage,
-    tierConfig.spreadDiscount,
-    tierName,
-    tradeDirection,
-    askPrice,
-    bidPrice,
-    lotSize,
-    tradeAmount,
-    inputMode,
-    selectedAsset.symbol,
-    selectedAsset.name,
-    openMarginPosition,
-    stopLoss,
-    takeProfit,
-    refreshUser,
-    formatPrice,
-    user?.id,
-  ]);
-
-  // ✅ Alias for button onClick
-  const executeTrade = handleTrade;
-
-  const handleClosePosition = useCallback(
-    async (position: MarginPosition) => {
-      const side = (position as any).side as 'long' | 'short';
-      const exitPrice = side === 'long' ? bidPrice : askPrice;
-
-      const qty = Number((position as any).qty ?? 0);
-      const fee = qty * exitPrice * 0.00007 * (1 - Number(tierConfig.spreadDiscount ?? 0) / 100);
-
-      const result = (closeMarginPosition as any)((position as any).id, exitPrice, fee);
-
-      if ((result as any)?.success) {
-        const pnl = Number((result as any).realizedPnL ?? 0);
-        await refreshUser?.();
-
-        // ✅ Close trade in DB via server API (service role key — bypasses RLS)
-        fetch('/api/user/trades', {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
-          body: JSON.stringify({
-            tradeId: (position as any).id,
-            userId: user?.id,
-            exitPrice,
-            pnl,
-            pnlPercent: (position as any).requiredMargin > 0
-              ? (pnl / (position as any).requiredMargin) * 100
-              : null,
-            status: 'closed',
-          }),
-        }).catch((e) => console.error('[FX] Server trade close failed:', e));
-
-        setNotification({
-          type: 'success',
-          message: `Closed ${(position as any).symbol} • ${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}`,
-        });
-      } else {
-        setNotification({ type: 'error', message: (result as any)?.error || 'Close failed' });
-      }
-
-      setShowCloseModal(false);
-      setPositionToClose(null);
-      setTimeout(() => setNotification(null), 3000);
-    },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, formatMoney, user?.id]
-  );
-
-  const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;
-
-  // Used margin / equity from store values
-  const usedMargin = useMemo(
-    () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).requiredMargin ?? 0), 0),
-    [forexPositions]
-  );
-  const unrealizedPnL = useMemo(
-    () => forexPositions.reduce((sum, pos) => sum + Number((pos as any).unrealizedPnL ?? 0), 0),
-    [forexPositions]
-  );
-
-  const equity = accountBalance + unrealizedPnL;
-  const freeMargin = equity - usedMargin;
-  const marginLevel = usedMargin > 0 ? (equity / usedMargin) * 100 : 0;
-
-  const isSignalActive = activeSignal?.asset === selectedAsset.symbol && !!activeSignal?.isActive;
-
-  // ======================
-  // POSITION / TRADE METRICS (LOTS-BASED)
-  // ======================
-  const entryPx = tradeDirection === 'buy' ? askPrice : bidPrice;
-
-  // ✅ Amount-based: auto-compute lots from user's dollar amount
-  // margin = notional / leverage → notional = margin * leverage → units = notional / price → lots = units / 100000
-  // ✅ Amount-based: user enters exact margin ($) OR user enters lot size.
-// margin = notional / leverage → notional = margin * leverage → units = notional / price → lots = units / 100000
-let effectiveLotSize = lotSize;
-let units = effectiveLotSize * 100000;
-let positionNotional = units * entryPx;
-let requiredMargin = leverage > 0 ? positionNotional / leverage : positionNotional;
-
-if (inputMode === 'amount') {
-  requiredMargin = tradeAmount;
-  positionNotional = requiredMargin * leverage;
-  units = entryPx > 0 ? positionNotional / entryPx : 0;
-  effectiveLotSize = units / 100000;
-}
-
-
-  // SL/TP dollar risk calculations
-  const slRisk = (() => {
-    if (!stopLoss || !entryPx || entryPx === 0) return null;
-    const priceDiff = tradeDirection === 'buy' ? entryPx - stopLoss : stopLoss - entryPx;
-    return priceDiff * units;
-  })();
-  const tpReward = (() => {
-    if (!takeProfit || !entryPx || entryPx === 0) return null;
-    const priceDiff = tradeDirection === 'buy' ? takeProfit - entryPx : entryPx - takeProfit;
-    return priceDiff * units;
-  })();
-  const spreadValue = askPrice - bidPrice;
-  const spreadCost = spreadValue * units;
-
-  const spreadPips = useMemo(() => (askPrice - bidPrice) / pipSize, [askPrice, bidPrice, pipSize]);
-
-  // ======================
-  // ASSET LIST FILTERS
-  // ======================
-  const filteredRare = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return rarePairs;
-    return rarePairs.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
-  }, [searchQuery]);
-
-  const filteredFavorites = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return standardForexAssets
-      .filter((a) => favorites.includes(a.symbol))
-      .filter((a) => !q || a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
-  }, [favorites, searchQuery]);
-
-  const filteredAll = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return standardForexAssets
-      .filter((a) => !favorites.includes(a.symbol))
-      .filter((a) => !q || a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
-  }, [favorites, searchQuery]);
-
-  // ======================
-  // CHART GEOMETRY
-  // ======================
-  const chartData = useMemo(() => {
-    const { width, height } = chartDimensions;
-    const isMobile = width < 400;
-
-    const padding = {
-      top: isMobile ? 15 : 20,
-      right: isMobile ? 50 : 60,
-      bottom: isMobile ? 25 : 30,
-      left: isMobile ? 5 : 10,
-    };
-
-    const chartWidth = width - padding.left - padding.right;
-    const chartHeight = height - padding.top - padding.bottom;
-
-    const stepMs = TF_STEP_MS[chartTimeframe] ?? 60_000;
-    const count = chartCandles.length > 0 ? chartCandles.length : isMobile ? 30 : 50;
-
-    const baseMid = (livePrices[selectedAsset.symbol] ?? selectedAsset.price) || 1;
-
-    const candlesRaw: ChartCandle[] =
-      chartCandles.length > 0
-        ? chartCandles
-        : Array.from({ length: count }, (_, i) => {
-            const swing = Math.sin(i * 0.2) * 0.02;
-            const open = baseMid * (1 + swing);
-            const close = baseMid * (1 + Math.sin((i + 1) * 0.2) * 0.02);
-            const high = Math.max(open, close) * (1 + Math.random() * 0.002);
-            const low = Math.min(open, close) * (1 - Math.random() * 0.002);
-
-            return {
-              id: `placeholder_${i}`,
-              pairId: selectedAsset.symbol,
-              timestamp: Date.now() - (count - i) * stepMs,
-              open,
-              high,
-              low,
-              close,
-              volume: Math.random() * 1_000_000,
-              isSimulated: true,
-            };
-          });
-
-    if (!candlesRaw.length) {
-      return { candles: [], minPrice: 0, maxPrice: 0, priceRange: 1, padding, chartHeight };
-    }
-
-    const prices = candlesRaw.flatMap((c) => [c.high, c.low]);
-    const minPrice = Math.min(...prices);
-    const maxPrice = Math.max(...prices);
-    const priceRange = maxPrice - minPrice || 1;
-
-    const candleWidth = Math.max((chartWidth / candlesRaw.length) * 0.65, isMobile ? 3 : 2);
-    const gap = (chartWidth / candlesRaw.length) * 0.35;
-
-    return {
-      candles: candlesRaw.map((candle, i) => {
-        const x = padding.left + i * (candleWidth + gap) + candleWidth / 2;
-        const openY = padding.top + ((maxPrice - candle.open) / priceRange) * chartHeight;
-        const closeY = padding.top + ((maxPrice - candle.close) / priceRange) * chartHeight;
-        const highY = padding.top + ((maxPrice - candle.high) / priceRange) * chartHeight;
-        const lowY = padding.top + ((maxPrice - candle.low) / priceRange) * chartHeight;
-        const isGreen = candle.close >= candle.open;
-        return { x, openY, closeY, highY, lowY, width: candleWidth, isGreen, candle };
-      }),
-      minPrice,
-      maxPrice,
-      priceRange,
-      padding,
-      chartHeight,
-    };
-  }, [chartCandles, chartDimensions, selectedAsset.symbol, selectedAsset.price, livePrices, chartTimeframe]);
-
-  // ✅ HYDRATION FIX: render nothing meaningful until client has mounted
-  // to prevent server/client mismatch from zustand/persist rehydration
-  if (!hasMounted) {
-    return (
-      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex items-center justify-center bg-void">
-        <div className="animate-pulse text-slate-500 text-sm">Loading FX trading…</div>
-      </div>
-    );
-  }
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prices]);
 
   return (
-    <KYCGate action="trade forex">
-      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
+    <div className="min-h-screen bg-void text-white">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {/* Header */}
-        <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
-          <div className="flex items-center justify-between gap-2 sm:gap-4">
-            {/* Asset Selector */}
+        <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">FX Trading</h1>
+            <p className="text-white/60 text-sm mt-1">
+              Olymp-style: server executes, UI displays. Balance is authoritative from server.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="rounded-xl bg-white/5 border border-white/10 px-4 py-3">
+              <div className="text-xs text-white/60">Balance Available</div>
+              <div className="text-lg font-semibold tabular-nums">${balance.toFixed(2)}</div>
+            </div>
+
             <button
-              onClick={() => setShowAssetSelector(true)}
-              className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
+              onClick={async () => {
+                setError('');
+                await refreshPricesOnce();
+              }}
+              className="inline-flex items-center gap-2 rounded-xl px-4 py-3 bg-white/5 border border-white/10 hover:bg-white/10 transition"
+              disabled={refreshing}
+              title="Refresh market prices"
             >
-              <div className="flex items-center gap-1 sm:gap-2">
-                <span className="text-lg sm:text-xl">
-                  {currencyFlags[selectedAsset.symbol.split('/')[0]] || '💱'}
-                </span>
-                <div className="text-left">
-                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedAsset.symbol}</p>
-                  <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset.name}</p>
-                </div>
-              </div>
-              <ChevronDown className="w-4 h-4 text-cream/50 flex-shrink-0" />
+              {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+              <span className="text-sm">Refresh</span>
             </button>
-
-            {/* Price Display */}
-            <div className="flex items-center gap-3 sm:gap-6">
-              <div className="text-center">
-                <p className="text-xs text-cream/50">Bid</p>
-                <p className="text-sm sm:text-lg font-mono font-semibold text-loss">{formatPrice(bidPrice)}</p>
-              </div>
-              <div className="text-center">
-                <p className="text-xs text-cream/50">Ask</p>
-                <p className="text-sm sm:text-lg font-mono font-semibold text-profit">{formatPrice(askPrice)}</p>
-              </div>
-              <div className="text-center hidden sm:block">
-                <p className="text-xs text-cream/50">Spread</p>
-                <p className="text-sm font-mono text-cream">{spreadPips.toFixed(1)} pips</p>
-              </div>
-            </div>
-
-            {/* Badges */}
-            <div className="hidden sm:flex items-center gap-2">
-              {isAdminPair && (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-lg">
-                  <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
-                </div>
-              )}
-
-              {isSignalActive && (
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-gold/20 border border-gold/30 rounded-lg animate-pulse">
-                  <Signal className="w-4 h-4 text-gold" />
-                  <span className="text-xs text-gold font-medium">Signal Active</span>
-                </div>
-              )}
-            </div>
           </div>
         </div>
 
-        {/* Mobile Tab Navigation */}
-        <div className="lg:hidden flex-shrink-0 flex border-b border-white/10 bg-obsidian">
-          {(['chart', 'trade', 'positions'] as MobileTab[]).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setMobileTab(tab)}
-              className={`flex-1 py-3 text-sm font-medium transition-colors ${
-                mobileTab === tab ? 'text-gold border-b-2 border-gold bg-gold/5' : 'text-cream/50'
-              }`}
-            >
-              {tab === 'chart' && 'Chart'}
-              {tab === 'trade' && 'Trade'}
-              {tab === 'positions' && `Positions (${forexPositions.length})`}
-            </button>
-          ))}
+        {/* Error */}
+        {error ? (
+          <div className="mt-5 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 flex items-start gap-2">
+            <AlertTriangle className="h-5 w-5 text-red-300 mt-0.5" />
+            <div className="text-sm text-red-100">{error}</div>
+          </div>
+        ) : null}
+
+        {/* Tabs */}
+        <div className="mt-6 flex gap-2">
+          <button
+            onClick={() => setTab('active')}
+            className={`px-4 py-2 rounded-lg text-sm border transition ${
+              tab === 'active' ? 'bg-white/10 border-white/20' : 'bg-white/5 border-white/10 hover:bg-white/10'
+            }`}
+          >
+            Active
+          </button>
+          <button
+            onClick={() => setTab('history')}
+            className={`px-4 py-2 rounded-lg text-sm border transition ${
+              tab === 'history' ? 'bg-white/10 border-white/20' : 'bg-white/5 border-white/10 hover:bg-white/10'
+            }`}
+          >
+            History
+          </button>
         </div>
 
-        {/* Main Content */}
-        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
-          {/* Chart Section */}
-          <div className={`${mobileTab === 'chart' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-h-0 h-full`}>
-            {/* Chart Controls */}
-            <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 border-b border-white/10 bg-charcoal/50">
-              <div className="flex items-center gap-1 overflow-x-auto">
-                {timeframes.map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setChartTimeframe(tf)}
-                    className={`px-2 sm:px-3 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                      chartTimeframe === tf ? 'bg-gold text-void' : 'text-cream/50 hover:text-cream hover:bg-white/5'
-                    }`}
-                  >
-                    {tf}
-                  </button>
-                ))}
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setChartType('candle')}
-                  className={`p-1.5 rounded-lg ${chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
-                >
-                  <CandlestickChart className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => setChartType('line')}
-                  className={`p-1.5 rounded-lg ${chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
-                >
-                  <LineChartIcon className="w-4 h-4" />
-                </button>
+        {/* Open Trade */}
+        <div className="mt-6 rounded-2xl bg-white/5 border border-white/10 p-5">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-semibold">Open Trade</div>
+              <div className="text-xs text-white/60 mt-1">
+                Entry uses server engine. This form only sends parameters to <code className="text-white/80">/api/trades</code>.
               </div>
             </div>
 
-            {/* Chart Area */}
-            <div
-              ref={chartRef}
-              className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
-              style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
-            >
-              {isAdminPair && (
-                <div className="absolute top-2 left-2 z-10 px-2 py-1 bg-white/5 border border-white/10 rounded-lg lg:hidden">
-                  <span className="text-xs text-cream/70 font-medium">Admin Controlled</span>
-                </div>
-              )}
+            <div className="text-sm text-white/70">
+              Market price:{' '}
+              <span className="font-semibold tabular-nums text-white">
+                {currentMid ? currentMid.toFixed(pair.includes('JPY') ? 3 : 5) : '--'}
+              </span>
+            </div>
+          </div>
 
-              {isPaused && isAdminPair && (
-                <div className="absolute inset-0 bg-void/50 flex items-center justify-center z-20">
-                  <div className="px-4 py-2 bg-yellow-500/20 border border-yellow-500/30 rounded-lg">
-                    <span className="text-yellow-500 font-medium">⏸️ Market Paused by Admin</span>
-                  </div>
-                </div>
-              )}
-
-              <svg
-                className="w-full h-full block"
-                viewBox={`0 0 ${chartDimensions.width} ${chartDimensions.height}`}
-                preserveAspectRatio="xMidYMid meet"
-                style={{ display: 'block' }}
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-12 gap-3">
+            {/* Pair */}
+            <div className="md:col-span-4">
+              <label className="text-xs text-white/60">Pair</label>
+              <select
+                value={pair}
+                onChange={(e) => setPair(e.target.value)}
+                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 text-sm outline-none focus:border-white/20"
               >
-                <defs>
-                  <linearGradient id="chartGradientFx" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="rgb(0, 217, 165)" stopOpacity="0.3" />
-                    <stop offset="100%" stopColor="rgb(0, 217, 165)" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-
-                {[...Array(10)].map((_, i) => (
-                  <line
-                    key={`h-${i}`}
-                    x1="0"
-                    y1={i * (chartDimensions.height / 10)}
-                    x2={chartDimensions.width}
-                    y2={i * (chartDimensions.height / 10)}
-                    stroke="rgba(255,255,255,0.05)"
-                  />
+                {DEFAULT_PAIRS.map((p) => (
+                  <option key={p.symbol} value={p.symbol}>
+                    {p.symbol} — {p.name}
+                  </option>
                 ))}
-                {[...Array(20)].map((_, i) => (
-                  <line
-                    key={`v-${i}`}
-                    x1={i * (chartDimensions.width / 20)}
-                    y1="0"
-                    x2={i * (chartDimensions.width / 20)}
-                    y2={chartDimensions.height}
-                    stroke="rgba(255,255,255,0.05)"
-                  />
+              </select>
+            </div>
+
+            {/* Direction */}
+            <div className="md:col-span-3">
+              <label className="text-xs text-white/60">Direction</label>
+              <div className="mt-1 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDirection('buy')}
+                  className={`rounded-xl px-3 py-2 text-sm border transition inline-flex items-center justify-center gap-2 ${
+                    direction === 'buy'
+                      ? 'bg-emerald-500/15 border-emerald-500/30'
+                      : 'bg-white/5 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <ArrowUpRight className="h-4 w-4" /> Buy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDirection('sell')}
+                  className={`rounded-xl px-3 py-2 text-sm border transition inline-flex items-center justify-center gap-2 ${
+                    direction === 'sell'
+                      ? 'bg-rose-500/15 border-rose-500/30'
+                      : 'bg-white/5 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <ArrowDownRight className="h-4 w-4" /> Sell
+                </button>
+              </div>
+            </div>
+
+            {/* Investment */}
+            <div className="md:col-span-2">
+              <label className="text-xs text-white/60">Investment ($)</label>
+              <input
+                type="number"
+                value={investment}
+                onChange={(e) => setInvestment(Number(e.target.value))}
+                min={1}
+                step={1}
+                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 text-sm outline-none focus:border-white/20"
+              />
+            </div>
+
+            {/* Multiplier */}
+            <div className="md:col-span-3">
+              <label className="text-xs text-white/60">Multiplier (x)</label>
+              <select
+                value={multiplier}
+                onChange={(e) => setMultiplier(Number(e.target.value))}
+                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 text-sm outline-none focus:border-white/20"
+              >
+                {[10, 25, 50, 75, 100, 150, 200, 300, 500, 1000].map((m) => (
+                  <option key={m} value={m}>
+                    x{m}
+                  </option>
                 ))}
-
-                {chartType === 'candle' &&
-                  chartData.candles.map((c, i) => (
-                    <g key={i}>
-                      <line
-                        x1={c.x}
-                        y1={c.highY}
-                        x2={c.x}
-                        y2={c.lowY}
-                        stroke={c.isGreen ? '#00d9a5' : '#ef4444'}
-                        strokeWidth="1"
-                      />
-                      <rect
-                        x={c.x - c.width / 2}
-                        y={Math.min(c.openY, c.closeY)}
-                        width={c.width}
-                        height={Math.abs(c.closeY - c.openY) || 1}
-                        fill={c.isGreen ? '#00d9a5' : '#ef4444'}
-                        rx="1"
-                      />
-                    </g>
-                  ))}
-
-                {chartType === 'line' && chartData.candles.length > 0 && (
-                  <>
-                    <path
-                      d={`M ${chartData.candles[0]?.x || 0} ${chartData.candles[0]?.closeY || 0} ${chartData.candles
-                        .slice(1)
-                        .map((c) => `L ${c.x} ${c.closeY}`)
-                        .join(' ')}`}
-                      fill="none"
-                      stroke="#00d9a5"
-                      strokeWidth="2"
-                    />
-                    <path
-                      d={`M ${chartData.candles[0]?.x || 0} ${chartData.candles[0]?.closeY || 0} ${chartData.candles
-                        .slice(1)
-                        .map((c) => `L ${c.x} ${c.closeY}`)
-                        .join(' ')} L ${chartData.candles[chartData.candles.length - 1]?.x || 0} ${chartDimensions.height} L ${
-                        chartData.candles[0]?.x || 0
-                      } ${chartDimensions.height} Z`}
-                      fill="url(#chartGradientFx)"
-                    />
-                  </>
-                )}
-
-                <line
-                  x1="0"
-                  y1={chartDimensions.height / 2}
-                  x2={chartDimensions.width}
-                  y2={chartDimensions.height / 2}
-                  stroke="#d4af37"
-                  strokeDasharray="4"
-                />
-                <rect x={chartDimensions.width - 70} y={chartDimensions.height / 2 - 10} width="65" height="20" fill="#d4af37" rx="3" />
-                <text x={chartDimensions.width - 37} y={chartDimensions.height / 2 + 4} textAnchor="middle" fill="#0a0a0f" fontSize="11" fontFamily="monospace">
-                  {formatPrice(askPrice)}
-                </text>
-
-                {chartData.maxPrice > 0 && (
-                  <>
-                    <text x={chartDimensions.width - 5} y={25} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
-                      {formatPrice(chartData.maxPrice)}
-                    </text>
-                    <text x={chartDimensions.width - 5} y={chartDimensions.height - 10} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
-                      {formatPrice(chartData.minPrice)}
-                    </text>
-                  </>
-                )}
-              </svg>
-            </div>
-          </div>
-
-          {/* Trading Panel */}
-          <div className={`${mobileTab === 'trade' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}>
-            {!canTrade && (
-              <div className="p-4 m-3 bg-gold/10 border border-gold/30 rounded-xl">
-                <div className="flex items-center gap-3 mb-2">
-                  <Lock className="w-5 h-5 text-gold" />
-                  <span className="font-semibold text-cream">Trading Locked</span>
-                </div>
-                <p className="text-sm text-cream/70 mb-3">
-                  Deposit to unlock trading. Current deposit: {totalDeposited.toLocaleString()} USD
-                </p>
-                <Link
-                  href="/dashboard/wallet"
-                  className="flex items-center justify-center gap-2 w-full py-2 bg-gold text-void font-semibold rounded-lg hover:bg-gold/90 transition-colors"
-                >
-                  <Crown className="w-4 h-4" />
-                  Make a Deposit
-                </Link>
-              </div>
-            )}
-
-            <div className="px-3 py-2 border-b border-white/10">
-              <div className={`flex items-center gap-2 px-3 py-1.5 ${tierConfig.bgColor} ${tierConfig.borderColor} border rounded-lg`}>
-                <span className="text-lg">{tierConfig.icon}</span>
-                <div>
-                  <span className={`text-sm font-medium ${tierConfig.color}`}>{tierName} Tier</span>
-                  <p className="text-xs text-cream/50">Max leverage: 1:{tierConfig.maxLeverage || '—'}</p>
-                </div>
-              </div>
+              </select>
             </div>
 
-            <div className="p-3 border-b border-white/10">
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-2 bg-white/5 rounded-lg">
-                  <p className="text-xs text-cream/50">Balance</p>
-                  <p className="text-sm font-semibold text-cream">{formatMoney(accountBalance)}</p>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg">
-                  <p className="text-xs text-cream/50">Equity</p>
-                  <p className={`text-sm font-semibold ${equity >= accountBalance ? 'text-profit' : 'text-loss'}`}>
-                    {formatMoney(equity)}
-                  </p>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg">
-                  <p className="text-xs text-cream/50">Free Margin</p>
-                  <p className="text-sm font-semibold text-cream">{formatMoney(freeMargin)}</p>
-                </div>
-                <div className="p-2 bg-white/5 rounded-lg">
-                  <p className="text-xs text-cream/50">Margin Level</p>
-                  <p className={`text-sm font-semibold ${marginLevel > 100 ? 'text-profit' : 'text-loss'}`}>
-                    {usedMargin > 0 ? `${marginLevel.toFixed(0)}%` : '—'}
-                  </p>
-                </div>
-              </div>
+            {/* Stop Loss */}
+            <div className="md:col-span-3">
+              <label className="text-xs text-white/60">Stop Loss (optional)</label>
+              <input
+                type="number"
+                value={stopLoss}
+                onChange={(e) => setStopLoss(e.target.value)}
+                step="any"
+                placeholder="e.g. 1.08210"
+                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 text-sm outline-none focus:border-white/20"
+              />
             </div>
 
-            <div className="p-3 border-b border-white/10">
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setTradeDirection('buy')}
-                  disabled={!canTrade}
-                  className={`flex-1 py-3 rounded-xl font-semibold transition-all ${
-                    tradeDirection === 'buy' ? 'bg-profit text-void' : 'bg-white/5 text-profit hover:bg-profit/10'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  <TrendingUp className="w-4 h-4 inline mr-2" />
-                  BUY
-                </button>
-                <button
-                  onClick={() => setTradeDirection('sell')}
-                  disabled={!canTrade}
-                  className={`flex-1 py-3 rounded-xl font-semibold transition-all ${
-                    tradeDirection === 'sell' ? 'bg-loss text-white' : 'bg-white/5 text-loss hover:bg-loss/10'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  <TrendingDown className="w-4 h-4 inline mr-2" />
-                  SELL
-                </button>
-              </div>
+            {/* Take Profit */}
+            <div className="md:col-span-3">
+              <label className="text-xs text-white/60">Take Profit (optional)</label>
+              <input
+                type="number"
+                value={takeProfit}
+                onChange={(e) => setTakeProfit(e.target.value)}
+                step="any"
+                placeholder="e.g. 1.09150"
+                className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 text-sm outline-none focus:border-white/20"
+              />
             </div>
 
-            {/* Amount / Lot Mode Toggle */}
-            <div className="p-3 border-b border-white/10 space-y-3">
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs text-cream/50">Trade Size</label>
-                <button
-                  onClick={() => setInputMode(inputMode === 'amount' ? 'lots' : 'amount')}
-                  className="text-[10px] text-electric hover:text-electric/80 transition-colors"
-                >
-                  {inputMode === 'amount' ? 'Switch to Lots ›' : '‹ Switch to Amount'}
-                </button>
-              </div>
-
-              {inputMode === 'amount' ? (
-                <>
-                  {/* Amount (USD) Input */}
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cream/40 text-sm font-medium">$</span>
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      value={tradeAmount}
-                      onChange={(e) => setTradeAmount(Math.max(0, Number(e.target.value) || 0))}
-                      disabled={!canTrade}
-                      className="w-full bg-white/5 border border-white/10 rounded-lg pl-7 pr-3 py-2.5 text-cream text-lg font-semibold focus:border-gold/50 focus:outline-none disabled:opacity-50"
-                      placeholder="50"
-                    />
-                  </div>
-                  <div className="flex gap-1.5">
-                    {[10, 25, 50, 100, 250, 500].map((v) => (
-                      <button
-                        key={v}
-                        onClick={() => setTradeAmount(v)}
-                        disabled={!canTrade}
-                        className={`flex-1 text-xs py-1.5 rounded-lg font-medium transition-all ${tradeAmount === v ? 'bg-gold/20 text-gold border border-gold/30' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
-                      >
-                        ${v}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  {/* Lot Size Input (advanced) */}
-                  <div className="relative">
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={lotSize}
-                      onChange={(e) => setLotSize(Number(e.target.value) || 0.01)}
-                      disabled={!canTrade}
-                      className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-cream text-sm focus:border-gold/50 focus:outline-none disabled:opacity-50"
-                      placeholder="0.10"
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-cream/30">lots</span>
-                  </div>
-                  <div className="flex gap-1">
-                    {[0.01, 0.05, 0.1, 0.5, 1.0].map((v) => (
-                      <button
-                        key={v}
-                        onClick={() => setLotSize(v)}
-                        disabled={!canTrade}
-                        className={`flex-1 text-xs py-1 rounded ${lotSize === v ? 'bg-gold/20 text-gold' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
-                      >
-                        {v}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* Leverage Selector */}
-              <div>
-                <label className="text-xs text-cream/50 mb-1 block">Leverage</label>
-                <div className="flex gap-1 flex-wrap">
-                  {leverageOptions.filter((lv) => {
-                    const maxLev = Number(tierConfig.maxLeverage ?? 0);
-                    return maxLev <= 0 || lv <= maxLev;
-                  }).map((lv) => (
-                    <button
-                      key={lv}
-                      onClick={() => setLeverage(lv)}
-                      disabled={!canTrade}
-                      className={`px-2.5 py-1.5 text-xs rounded-lg font-medium transition-all ${leverage === lv ? 'bg-electric/20 text-electric border border-electric/30' : 'bg-white/5 text-cream/40 hover:bg-white/10'} disabled:opacity-50`}
-                    >
-                      1:{lv}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* SL/TP with Dollar Risk Display */}
-            <div className="p-3 border-b border-white/10 space-y-2">
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs text-cream/50">Stop Loss (optional)</label>
-                  {slRisk !== null && slRisk > 0 && (
-                    <span className="text-[10px] text-loss font-medium">Risk: -${Math.abs(slRisk).toFixed(2)}</span>
-                  )}
-                </div>
-                <input
-                  type="number"
-                  step="any"
-                  value={stopLoss ?? ''}
-                  onChange={(e) => setStopLoss(e.target.value ? Number(e.target.value) : null)}
-                  disabled={!canTrade}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-cream text-sm focus:border-loss/50 focus:outline-none disabled:opacity-50"
-                  placeholder={`e.g. ${(entryPx * (tradeDirection === 'buy' ? 0.995 : 1.005)).toFixed(selectedAsset.symbol.includes('JPY') ? 3 : 5)}`}
-                />
-              </div>
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs text-cream/50">Take Profit (optional)</label>
-                  {tpReward !== null && tpReward > 0 && (
-                    <span className="text-[10px] text-profit font-medium">Target: +${Math.abs(tpReward).toFixed(2)}</span>
-                  )}
-                </div>
-                <input
-                  type="number"
-                  step="any"
-                  value={takeProfit ?? ''}
-                  onChange={(e) => setTakeProfit(e.target.value ? Number(e.target.value) : null)}
-                  disabled={!canTrade}
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-cream text-sm focus:border-profit/50 focus:outline-none disabled:opacity-50"
-                  placeholder={`e.g. ${(entryPx * (tradeDirection === 'buy' ? 1.01 : 0.99)).toFixed(selectedAsset.symbol.includes('JPY') ? 3 : 5)}`}
-                />
-              </div>
-              {/* Risk:Reward Ratio */}
-              {slRisk !== null && slRisk > 0 && tpReward !== null && tpReward > 0 && (
-                <div className="flex items-center justify-between p-2 bg-white/5 rounded-lg">
-                  <span className="text-[10px] text-cream/40">Risk : Reward</span>
-                  <span className="text-xs font-semibold text-cream">
-                    1 : {(tpReward / slRisk).toFixed(1)}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Order Preview */}
-            <div className="p-3 border-b border-white/10">
-              <p className="text-[10px] text-cream/40 uppercase tracking-wider mb-2">Order Preview</p>
-              <div className="space-y-1.5">
-                <div className="flex justify-between">
-                  <span className="text-[11px] text-cream/50">Amount (margin)</span>
-                  <span className="text-[11px] text-cream font-medium">{formatMoney(requiredMargin)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[11px] text-cream/50">Position size</span>
-                  <span className="text-[11px] text-cream font-medium">{formatMoney(positionNotional)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[11px] text-cream/50">Leverage</span>
-                  <span className="text-[11px] text-electric font-medium">1:{leverage}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[11px] text-cream/50">Lots / Units</span>
-                  <span className="text-[11px] text-cream/70">{effectiveLotSize.toFixed(2)} / {units.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[11px] text-cream/50">Spread cost</span>
-                  <span className="text-[11px] text-cream/70">≈ {formatMoney(spreadCost)}</span>
-                </div>
-                {slRisk !== null && slRisk > 0 && (
-                  <div className="flex justify-between">
-                    <span className="text-[11px] text-loss/70">Max loss (SL)</span>
-                    <span className="text-[11px] text-loss font-medium">-{formatMoney(Math.abs(slRisk))}</span>
-                  </div>
-                )}
-                {tpReward !== null && tpReward > 0 && (
-                  <div className="flex justify-between">
-                    <span className="text-[11px] text-profit/70">Target profit (TP)</span>
-                    <span className="text-[11px] text-profit font-medium">+{formatMoney(Math.abs(tpReward))}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Execute Button */}
-            <div className="p-3">
+            {/* CTA */}
+            <div className="md:col-span-6 flex items-end justify-end">
               <button
-                onClick={executeTrade}
-                disabled={!canTrade || requiredMargin > freeMargin}
-                className={`w-full py-3.5 rounded-xl font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                  tradeDirection === 'buy'
-                    ? 'bg-profit text-void hover:brightness-110'
-                    : 'bg-loss text-white hover:brightness-110'
-                }`}
+                onClick={openTrade}
+                disabled={opening}
+                className="w-full md:w-auto rounded-xl px-5 py-3 bg-white text-black font-semibold hover:bg-white/90 transition disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
               >
-                {tradeDirection === 'buy' ? 'BUY' : 'SELL'} {selectedAsset.symbol} — {formatMoney(requiredMargin)}
+                {opening ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Open Trade
               </button>
-              {requiredMargin > freeMargin && (
-                <p className="text-[10px] text-loss text-center mt-1">Insufficient margin (need {formatMoney(requiredMargin)}, have {formatMoney(freeMargin)})</p>
-              )}
             </div>
-          </div>
-
-          {/* Positions Panel */}
-          <div className={`${mobileTab === 'positions' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}>
-            <div className="px-3 py-3 border-b border-white/10">
-              <h3 className="text-sm font-semibold text-cream">Open Positions ({forexPositions.length})</h3>
-            </div>
-
-            {forexPositions.length === 0 ? (
-              <div className="flex-1 flex items-center justify-center p-6">
-                <div className="text-center">
-                  <Activity className="w-8 h-8 text-cream/20 mx-auto mb-2" />
-                  <p className="text-sm text-cream/40">No open FX positions</p>
-                  <p className="text-xs text-cream/30 mt-1">Open a trade to see it here</p>
-                </div>
-              </div>
-            ) : (
-              <div className="divide-y divide-white/5">
-                {forexPositions.map((pos: any) => {
-                  const side = String(pos.side ?? 'long');
-                  const isLong = side === 'long';
-                  const entry = Number(pos.avgEntry ?? pos.entryPrice ?? 0);
-                  const current = Number(pos.currentPrice ?? 0);
-                  const pnl = Number(pos.unrealizedPnL ?? 0);
-                  const pnlPct = Number(pos.unrealizedPnLPercent ?? 0);
-                  const lots = Number(pos.qty ?? 0) / 100000;
-                  const lev = Number(pos.leverage ?? 0);
-                  const openTime = pos.openedAt ? new Date(pos.openedAt) : null;
-
-                  return (
-                    <div key={pos.id} className="p-3 hover:bg-white/5 transition-colors">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-profit/20 text-profit' : 'bg-loss/20 text-loss'}`}>
-                            {isLong ? 'BUY' : 'SELL'}
-                          </span>
-                          <span className="text-sm font-semibold text-cream">{pos.symbol}</span>
-                          {lev > 0 && <span className="text-[10px] text-electric">x{lev}</span>}
-                        </div>
-                        <button
-                          onClick={() => {
-                            setPositionToClose(pos);
-                            setShowCloseModal(true);
-                          }}
-                          className="text-xs px-2 py-1 bg-loss/20 text-loss rounded hover:bg-loss/30 transition-colors"
-                        >
-                          Close
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                        <div className="flex justify-between">
-                          <span className="text-cream/40">Entry</span>
-                          <span className="text-cream font-mono">{formatPrice(entry)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-cream/40">Current</span>
-                          <span className="text-cream font-mono">{formatPrice(current)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-cream/40">Lots</span>
-                          <span className="text-cream">{lots.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="text-cream/40">P&L</span>
-                          <span className={`font-semibold ${pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                            {pnl >= 0 ? '+' : ''}{formatMoney(pnl)}
-                          </span>
-                        </div>
-                        {pos.stopLoss != null && (
-                          <div className="flex justify-between">
-                            <span className="text-cream/40">SL</span>
-                            <span className="text-loss font-mono">{formatPrice(pos.stopLoss)}</span>
-                          </div>
-                        )}
-                        {pos.takeProfit != null && (
-                          <div className="flex justify-between">
-                            <span className="text-cream/40">TP</span>
-                            <span className="text-profit font-mono">{formatPrice(pos.takeProfit)}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {openTime && (
-                        <p className="text-[10px] text-cream/30 mt-1.5">
-                          Opened {openTime.toLocaleDateString()} {openTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </div>
 
-        {/* Close Position Modal */}
-        <AnimatePresence>
-          {showCloseModal && positionToClose && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-center justify-center bg-void/80 backdrop-blur-sm p-4"
-              onClick={() => { setShowCloseModal(false); setPositionToClose(null); }}
+        {/* Trades Table */}
+        <div className="mt-6 rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
+          <div className="px-5 py-4 flex items-center justify-between">
+            <div>
+              <div className="text-sm font-semibold">{tab === 'active' ? 'Active Trades' : 'Trade History'}</div>
+              <div className="text-xs text-white/60 mt-1">
+                Trades are read from <code className="text-white/80">/api/trades</code>.
+              </div>
+            </div>
+
+            <button
+              onClick={() => loadTrades(tab)}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-xl px-4 py-2 bg-white/5 border border-white/10 hover:bg-white/10 transition disabled:opacity-60"
             >
-              <motion.div
-                initial={{ scale: 0.95, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.95, opacity: 0 }}
-                onClick={(e) => e.stopPropagation()}
-                className="bg-obsidian border border-white/10 rounded-2xl p-6 max-w-sm w-full"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-lg font-semibold text-cream">Close Position</h3>
-                  <button onClick={() => { setShowCloseModal(false); setPositionToClose(null); }} className="text-cream/40 hover:text-cream">
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCcw className="h-4 w-4" />}
+              <span className="text-sm">Reload</span>
+            </button>
+          </div>
 
-                <div className="space-y-3 mb-6">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Symbol</span>
-                    <span className="text-cream font-semibold">{(positionToClose as any).symbol}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Side</span>
-                    <span className={`font-semibold ${(positionToClose as any).side === 'long' ? 'text-profit' : 'text-loss'}`}>
-                      {(positionToClose as any).side === 'long' ? 'BUY' : 'SELL'}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Entry Price</span>
-                    <span className="text-cream font-mono">{formatPrice(Number((positionToClose as any).avgEntry ?? 0))}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Close Price</span>
-                    <span className="text-cream font-mono">
-                      {formatPrice((positionToClose as any).side === 'long' ? bidPrice : askPrice)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-cream/50">Unrealized P&L</span>
-                    <span className={`font-semibold ${Number((positionToClose as any).unrealizedPnL ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {formatMoney(Number((positionToClose as any).unrealizedPnL ?? 0))}
-                    </span>
-                  </div>
-                </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-black/25 text-white/70">
+                <tr>
+                  <th className="text-left px-5 py-3 font-medium">Pair</th>
+                  <th className="text-left px-5 py-3 font-medium">Side</th>
+                  <th className="text-right px-5 py-3 font-medium">Invest</th>
+                  <th className="text-right px-5 py-3 font-medium">x</th>
+                  <th className="text-right px-5 py-3 font-medium">Entry</th>
+                  <th className="text-right px-5 py-3 font-medium">Price</th>
+                  <th className="text-right px-5 py-3 font-medium">P/L</th>
+                  <th className="text-left px-5 py-3 font-medium">Status</th>
+                  <th className="text-right px-5 py-3 font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading ? (
+                  <tr>
+                    <td colSpan={9} className="px-5 py-10 text-center text-white/60">
+                      <Loader2 className="h-5 w-5 animate-spin inline-block mr-2" />
+                      Loading trades...
+                    </td>
+                  </tr>
+                ) : trades.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-5 py-10 text-center text-white/60">
+                      No trades found.
+                    </td>
+                  </tr>
+                ) : (
+                  trades.map((t) => {
+                    const isBuy = t.directionLabel === 'buy';
+                    const pnl = t.floatingPnL;
+                    const pnlColor = pnl > 0 ? 'text-emerald-300' : pnl < 0 ? 'text-rose-300' : 'text-white/80';
 
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => { setShowCloseModal(false); setPositionToClose(null); }}
-                    className="flex-1 py-2.5 bg-white/10 text-cream rounded-xl font-medium hover:bg-white/15 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => handleClosePosition(positionToClose)}
-                    className="flex-1 py-2.5 bg-loss text-white rounded-xl font-bold hover:brightness-110 transition-all"
-                  >
-                    Close Position
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                    const decimals = t.asset.includes('JPY') ? 3 : 5;
 
-        {/* Asset Selector Modal */}
-        <AnimatePresence>
-          {showAssetSelector && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-void/80 backdrop-blur-sm"
-              onClick={() => setShowAssetSelector(false)}
-            >
-              <motion.div
-                initial={{ y: 50, opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: 50, opacity: 0 }}
-                onClick={(e) => e.stopPropagation()}
-                className="bg-obsidian border border-white/10 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[70vh] overflow-hidden"
-              >
-                <div className="p-4 border-b border-white/10">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-lg font-semibold text-cream">Select Pair</h3>
-                    <button onClick={() => setShowAssetSelector(false)} className="text-cream/40 hover:text-cream">
-                      <X className="w-5 h-5" />
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/40" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search pairs..."
-                      className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-cream text-sm focus:border-gold/50 focus:outline-none"
-                    />
-                  </div>
-                </div>
+                    return (
+                      <tr key={t.id} className="border-t border-white/10">
+                        <td className="px-5 py-4">
+                          <div className="font-semibold">{t.asset}</div>
+                          <div className="text-xs text-white/50">ID: {t.id.slice(0, 8)}…</div>
+                        </td>
 
-                <div className="overflow-y-auto max-h-[50vh] divide-y divide-white/5">
-                  {filteredFavorites.length > 0 && (
-                    <div className="p-2">
-                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">Favorites</p>
-                      {filteredFavorites.map((asset) => (
-                        <button
-                          key={asset.symbol}
-                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
-                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
-                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
-                            <div className="text-left">
-                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
-                              <p className="text-xs text-cream/40">{asset.name}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                        <td className="px-5 py-4">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs ${
+                              isBuy
+                                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-200'
+                                : 'bg-rose-500/10 border-rose-500/20 text-rose-200'
+                            }`}
+                          >
+                            {isBuy ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                            {isBuy ? 'BUY' : 'SELL'}
+                          </span>
+                        </td>
 
-                  {filteredRare.length > 0 && (
-                    <div className="p-2">
-                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">Exotic Pairs</p>
-                      {filteredRare.map((asset) => (
-                        <button
-                          key={asset.symbol}
-                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
-                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
-                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
-                            <div className="text-left">
-                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
-                              <p className="text-xs text-cream/40">{asset.name}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
+                        <td className="px-5 py-4 text-right tabular-nums">${t.investment.toFixed(2)}</td>
+                        <td className="px-5 py-4 text-right tabular-nums">x{t.multiplier}</td>
+                        <td className="px-5 py-4 text-right tabular-nums">{t.entryPrice ? t.entryPrice.toFixed(decimals) : '--'}</td>
+                        <td className="px-5 py-4 text-right tabular-nums">{t.currentPrice ? t.currentPrice.toFixed(decimals) : '--'}</td>
 
-                  {filteredAll.length > 0 && (
-                    <div className="p-2">
-                      <p className="text-[10px] text-cream/30 uppercase tracking-wider px-2 mb-1">All Pairs</p>
-                      {filteredAll.map((asset) => (
-                        <button
-                          key={asset.symbol}
-                          onClick={() => { setSelectedAsset(asset); setShowAssetSelector(false); }}
-                          className={`w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-white/5 transition-colors ${
-                            selectedAsset.symbol === asset.symbol ? 'bg-white/10' : ''
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <span>{currencyFlags[asset.symbol.split('/')[0]] || '💱'}</span>
-                            <div className="text-left">
-                              <p className="text-sm font-medium text-cream">{asset.symbol}</p>
-                              <p className="text-xs text-cream/40">{asset.name}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-sm font-mono text-cream">{formatPrice(livePrices[asset.symbol] ?? asset.price)}</p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                        <td className={`px-5 py-4 text-right tabular-nums font-semibold ${pnlColor}`}>
+                          {pnl >= 0 ? '+' : ''}
+                          {pnl.toFixed(2)}{' '}
+                          <span className="text-xs font-normal text-white/60">
+                            ({t.floatingPnLPercent >= 0 ? '+' : ''}
+                            {t.floatingPnLPercent.toFixed(2)}%)
+                          </span>
+                        </td>
 
-        {/* Notification Toast */}
-        <AnimatePresence>
-          {notification && (
-            <motion.div
-              initial={{ opacity: 0, y: 50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 50 }}
-              className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl shadow-lg border flex items-center gap-2 ${
-                notification.type === 'success'
-                  ? 'bg-profit/20 border-profit/30 text-profit'
-                  : 'bg-loss/20 border-loss/30 text-loss'
-              }`}
-            >
-              {notification.type === 'success' ? (
-                <CheckCircle className="w-4 h-4" />
-              ) : (
-                <AlertCircle className="w-4 h-4" />
-              )}
-              <span className="text-sm font-medium">{notification.message}</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                        <td className="px-5 py-4">
+                          <span className="text-xs text-white/70">{t.status}</span>
+                        </td>
+
+                        <td className="px-5 py-4 text-right">
+                          {t.status === 'active' ? (
+                            <button
+                              onClick={() => closeTrade(t.id, t.currentPrice || t.entryPrice, 'manual')}
+                              className="inline-flex items-center gap-2 rounded-xl px-3 py-2 bg-white/5 border border-white/10 hover:bg-white/10 transition"
+                            >
+                              <XCircle className="h-4 w-4" />
+                              Close
+                            </button>
+                          ) : (
+                            <span className="text-xs text-white/50">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="px-5 py-4 text-xs text-white/50">
+            Note: If trades open but don’t appear here, your RPC must insert <code className="text-white/70">status = 'active'</code>.
+          </div>
+        </div>
       </div>
-    </KYCGate>
+    </div>
   );
 }
