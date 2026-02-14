@@ -1,37 +1,40 @@
+// lib/trading-types.ts
 // ==========================================
 // COMPREHENSIVE TRADING TYPES
-// Implements both Spot (Stock) and Margin (FX/CFD) trading models
+// Spot HOLD model (Stocks + Crypto) + Margin model (FX/CFD/Crypto leverage)
 // ==========================================
 
 // ==========================================
 // ACCOUNT TYPES
 // ==========================================
 
+export type AccountType = 'spot' | 'margin' | 'binary';
+
 export interface TradingAccount {
   id: string;
   userId: string;
-  type: 'spot' | 'margin' | 'binary';
-  
+  type: AccountType;
+
   // Core balances
-  cash: number;                    // Liquid cash available
-  equity: number;                  // Total account value (computed)
-  
-  // For spot trading
+  cash: number; // Liquid cash available
+  equity: number; // Total account value (computed)
+
+  // Spot trading
   availableToTrade: number;
   availableToWithdraw: number;
-  
-  // For margin trading
-  balance: number;                 // Starting collateral
-  marginUsed: number;              // Currently locked in positions
-  freeMargin: number;              // Available for new positions
-  leverage: number;                // Account leverage (e.g., 100)
-  marginLevel?: number;            // (Equity / Margin Used) * 100
-  
+
+  // Margin trading
+  balance: number; // Starting collateral
+  marginUsed: number; // Locked in positions
+  freeMargin: number; // Available for new positions
+  leverage: number; // Default account leverage (e.g., 100)
+  marginLevel?: number; // (Equity / Margin Used) * 100
+
   // PnL tracking
-  unrealizedPnL: number;           // Mark-to-market on open positions
-  realizedPnL: number;             // Locked in from closed trades
-  totalPnL: number;                // unrealized + realized
-  
+  unrealizedPnL: number; // mark-to-market
+  realizedPnL: number; // locked from closed trades
+  totalPnL: number; // unrealized + realized
+
   // Additional
   currency: string;
   createdAt: Date;
@@ -39,64 +42,78 @@ export interface TradingAccount {
 }
 
 // ==========================================
-// POSITION TYPES
+// SPOT "HOLD" POSITION TYPES (Stocks + Crypto)
 // ==========================================
 
-export interface StockPosition {
+export type SpotAssetType = 'stock' | 'crypto';
+
+export interface SpotPosition {
   id: string;
   accountId: string;
+
   symbol: string;
   name: string;
-  type: 'stock';
-  
-  // Position data
-  qty: number;
-  avgEntry: number;
-  
-  // Computed values (updated on price change)
+
+  // ✅ This is the crypto-style hold model
+  type: SpotAssetType; // 'stock' | 'crypto'
+  qty: number; // shares or coins
+  avgEntry: number; // average entry price
+
   currentPrice: number;
-  marketValue: number;              // qty * currentPrice
-  unrealizedPnL: number;            // (currentPrice - avgEntry) * qty
+  marketValue: number; // qty * currentPrice
+
+  unrealizedPnL: number; // (currentPrice - avgEntry) * qty
   unrealizedPnLPercent: number;
-  
-  // Metadata
+
+  // Optional: accumulate realized PnL across partial sells
+  realizedPnL?: number;
+
   openedAt: Date;
   updatedAt: Date;
 }
+
+// Back-compat: many files still call it StockPosition
+export type StockPosition = SpotPosition;
+
+// ==========================================
+// MARGIN POSITION TYPES (FX/CFD/Crypto leverage)
+// ==========================================
+
+export type MarginAssetType = 'forex' | 'cfd' | 'crypto';
 
 export interface MarginPosition {
   id: string;
   accountId: string;
   symbol: string;
   name: string;
-  type: 'forex' | 'cfd' | 'crypto';
-  
+
+  type: MarginAssetType;
+
   // Position data
   side: 'long' | 'short';
-  qty: number;                      // Lot size or units
+  qty: number; // units (e.g., 100000 per lot for FX)
   avgEntry: number;
   leverage: number;
-  
+
   // Margin requirements
-  notional: number;                 // qty * avgEntry
-  requiredMargin: number;           // notional / leverage
-  maintenanceMargin: number;        // Usually 50% of required
-  
+  notional: number; // qty * avgEntry
+  requiredMargin: number; // notional / leverage
+  maintenanceMargin: number; // usually 50% of required
+
   // Risk management
   stopLoss?: number;
   takeProfit?: number;
   liquidationPrice?: number;
-  
+
   // Computed values (updated on price change)
   currentPrice: number;
-  unrealizedPnL: number;            // Calculated based on side
+  unrealizedPnL: number; // calculated based on side
   unrealizedPnLPercent: number;
-  
-  // Fees and funding
+
+  // Fees & funding
   openingFee: number;
   accumulatedFunding: number;
-  
-  // Metadata
+
   openedAt: Date;
   updatedAt: Date;
 }
@@ -107,30 +124,36 @@ export interface MarginPosition {
 
 export type OrderType = 'market' | 'limit' | 'stop' | 'stop_limit';
 export type OrderSide = 'buy' | 'sell';
-export type OrderStatus = 'pending' | 'open' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected';
+export type OrderStatus =
+  | 'pending'
+  | 'open'
+  | 'filled'
+  | 'partially_filled'
+  | 'cancelled'
+  | 'rejected';
 
 export interface Order {
   id: string;
   accountId: string;
   symbol: string;
-  
+
   type: OrderType;
   side: OrderSide;
-  
+
   qty: number;
-  price?: number;                   // For limit orders
-  stopPrice?: number;               // For stop orders
-  
+
+  // For limit/stop
+  price?: number;
+  stopPrice?: number;
+
   filledQty: number;
   avgFillPrice?: number;
-  
+
   status: OrderStatus;
-  
-  // Risk management
+
   stopLoss?: number;
   takeProfit?: number;
-  
-  // Timestamps
+
   createdAt: Date;
   updatedAt: Date;
   filledAt?: Date;
@@ -146,23 +169,22 @@ export interface Fill {
   orderId: string;
   accountId: string;
   symbol: string;
-  
+
   side: OrderSide;
   qty: number;
   price: number;
-  
+
   fee: number;
   feeCurrency: string;
-  
-  // For audit trail
+
   executedAt: Date;
 }
 
 // ==========================================
-// LEDGER TYPES (For Audit Trail)
+// LEDGER TYPES (Audit Trail)
 // ==========================================
 
-export type LedgerEntryType = 
+export type LedgerEntryType =
   | 'deposit'
   | 'withdrawal'
   | 'trade_open'
@@ -171,28 +193,26 @@ export type LedgerEntryType =
   | 'fee'
   | 'funding'
   | 'bonus'
-  | 'adjustment'     // Admin adjustments
+  | 'adjustment'
   | 'transfer';
 
 export interface LedgerEntry {
   id: string;
   accountId: string;
   type: LedgerEntryType;
-  
-  amount: number;                   // Positive for credit, negative for debit
+
+  amount: number; // + credit, - debit
   balanceBefore: number;
   balanceAfter: number;
-  
-  // Reference to related entity
-  referenceId?: string;             // Order ID, Position ID, etc.
+
+  referenceId?: string;
   referenceType?: string;
-  
+
   description: string;
-  
-  // For admin actions
+
   adminId?: string;
   adminNote?: string;
-  
+
   createdAt: Date;
 }
 
@@ -211,7 +231,7 @@ export interface DepositAddress {
   memo?: string;
   qrCode?: string;
   isActive: boolean;
-  // Admin can update these
+
   updatedBy?: string;
   updatedAt: Date;
 }
@@ -220,27 +240,25 @@ export interface Deposit {
   id: string;
   userId: string;
   accountId: string;
-  
+
   method: PaymentMethod;
   currency: string;
   amount: number;
   fee: number;
   netAmount: number;
-  
+
   status: TransactionStatus;
-  
-  // Crypto specific
+
   txHash?: string;
   fromAddress?: string;
   toAddress?: string;
   confirmations?: number;
   requiredConfirmations?: number;
-  
-  // Processing
+
   processedBy?: string;
   processedAt?: Date;
   note?: string;
-  
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -249,16 +267,15 @@ export interface Withdrawal {
   id: string;
   userId: string;
   accountId: string;
-  
+
   method: PaymentMethod;
   currency: string;
   amount: number;
   fee: number;
   netAmount: number;
-  
+
   status: TransactionStatus;
-  
-  // Destination
+
   toAddress?: string;
   bankDetails?: {
     bankName: string;
@@ -266,12 +283,11 @@ export interface Withdrawal {
     routingNumber?: string;
     swiftCode?: string;
   };
-  
-  // Processing
+
   processedBy?: string;
   processedAt?: Date;
   note?: string;
-  
+
   createdAt: Date;
   updatedAt: Date;
 }
@@ -285,24 +301,23 @@ export interface Investment {
   userId: string;
   planId: string;
   planName: string;
-  
+
   principal: number;
   currentValue: number;
   totalEarned: number;
-  
-  roi: number;                      // Plan ROI percentage
-  duration: number;                 // Days
-  
+
+  roi: number;
+  duration: number;
+
   startDate: Date;
   endDate: Date;
-  
+
   status: 'active' | 'completed' | 'cancelled';
-  
-  // Payouts
+
   payoutFrequency: 'daily' | 'weekly' | 'monthly' | 'end';
   nextPayout?: Date;
   totalPayouts: number;
-  
+
   createdAt: Date;
 }
 
@@ -315,16 +330,16 @@ export interface AirdropParticipation {
   userId: string;
   airdropId: string;
   airdropName: string;
-  
+
   tasksCompleted: string[];
   totalTasks: number;
-  
+
   pointsEarned: number;
   estimatedReward?: number;
-  
+
   status: 'active' | 'completed' | 'claimed';
   claimedAt?: Date;
-  
+
   createdAt: Date;
 }
 
@@ -338,46 +353,49 @@ export interface PriceFeed {
   ask: number;
   mid: number;
   spread: number;
+
   change24h: number;
   changePercent24h: number;
   high24h: number;
   low24h: number;
   volume24h: number;
+
   timestamp: Date;
 }
 
 // ==========================================
-// HELPER FUNCTIONS
+// HELPERS
 // ==========================================
 
-// Calculate unrealized PnL for margin position
-export function calculateMarginPnL(position: MarginPosition, currentPrice: number): number {
-  if (position.side === 'long') {
-    return (currentPrice - position.avgEntry) * position.qty;
-  } else {
-    return (position.avgEntry - currentPrice) * position.qty;
-  }
+// ✅ Spot HOLD PnL (crypto-style, used for BOTH stocks and crypto)
+export function calculateSpotUnrealizedPnL(avgEntry: number, currentPrice: number, qty: number): number {
+  return (currentPrice - avgEntry) * qty;
 }
 
-// Calculate liquidation price
+export function calculateSpotMarketValue(currentPrice: number, qty: number): number {
+  return currentPrice * qty;
+}
+
+// ✅ Margin PnL
+export function calculateMarginPnL(position: MarginPosition, currentPrice: number): number {
+  if (position.side === 'long') return (currentPrice - position.avgEntry) * position.qty;
+  return (position.avgEntry - currentPrice) * position.qty;
+}
+
 export function calculateLiquidationPrice(
   position: MarginPosition,
   accountEquity: number,
   maintenanceMarginRatio: number = 0.5
 ): number {
   const maintenanceMargin = position.requiredMargin * maintenanceMarginRatio;
-  
+
   if (position.side === 'long') {
-    // Long liquidation: price where equity = maintenance margin
     return position.avgEntry - (accountEquity - maintenanceMargin) / position.qty;
   } else {
-    // Short liquidation
     return position.avgEntry + (accountEquity - maintenanceMargin) / position.qty;
   }
 }
 
-// Calculate stock position average entry on add
-// Formula: new_avg = (q_old*avg_old + q_buy*buy_price + fee) / new_q
 export function calculateNewAvgEntry(
   oldQty: number,
   oldAvg: number,
@@ -388,16 +406,10 @@ export function calculateNewAvgEntry(
   return (oldQty * oldAvg + newQty * newPrice + fee) / (oldQty + newQty);
 }
 
-// Calculate margin required for new position
-export function calculateRequiredMargin(
-  qty: number,
-  price: number,
-  leverage: number
-): number {
+export function calculateRequiredMargin(qty: number, price: number, leverage: number): number {
   return (qty * price) / leverage;
 }
 
-// Calculate equity for margin account
 export function calculateMarginEquity(
   balance: number,
   unrealizedPnL: number,

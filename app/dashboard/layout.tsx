@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -24,69 +24,37 @@ import {
   Bitcoin,
   DollarSign,
   BarChart3,
-  Bot
+  Bot,
 } from 'lucide-react';
+
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore } from '@/lib/ui-store';
 import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
+import { useTradingAccountStore } from '@/lib/trading-store';
+
 import SupportWidget from '@/components/SupportWidget';
 import NotificationPanel from '@/components/NotificationPanel';
+import StockPriceSync from '@/components/StockPriceSync';
 
 const navigation = [
-  { 
-    name: 'Dashboard', 
-    href: '/dashboard', 
-    icon: LayoutDashboard 
-  },
-  { 
-    name: 'Tiers & Plans', 
-    href: '/dashboard/tier', 
-    icon: Shield 
-  },
-  { 
-    name: 'Trade', 
+  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { name: 'Tiers & Plans', href: '/dashboard/tier', icon: Shield },
+  {
+    name: 'Trade',
     icon: LineChart,
     children: [
       { name: 'Cryptocurrency', href: '/dashboard/trade/crypto', icon: Bitcoin },
       { name: 'Forex', href: '/dashboard/trade/fx', icon: DollarSign },
       { name: 'Stocks', href: '/dashboard/trade/stocks', icon: BarChart3 },
-    ]
+    ],
   },
-  { 
-    name: 'Trading Bots', 
-    href: '/dashboard/bots', 
-    icon: Bot 
-  },
-  { 
-    name: 'Portfolio', 
-    href: '/dashboard/portfolio', 
-    icon: BarChart3 
-  },
-  { 
-    name: 'Wallet', 
-    href: '/dashboard/wallet', 
-    icon: Wallet 
-  },
-  { 
-    name: 'History', 
-    href: '/dashboard/history', 
-    icon: History 
-  },
-  { 
-    name: 'Referrals', 
-    href: '/dashboard/referrals', 
-    icon: Users 
-  },
-  { 
-    name: 'Airdrop', 
-    href: '/dashboard/airdrop', 
-    icon: CreditCard 
-  },
-  { 
-    name: 'Connect Wallet', 
-    href: '/dashboard/connect-wallet', 
-    icon: Wallet 
-  },
+  { name: 'Trading Bots', href: '/dashboard/bots', icon: Bot },
+  { name: 'Portfolio', href: '/dashboard/portfolio', icon: BarChart3 },
+  { name: 'Wallet', href: '/dashboard/wallet', icon: Wallet },
+  { name: 'History', href: '/dashboard/history', icon: History },
+  { name: 'Referrals', href: '/dashboard/referrals', icon: Users },
+  { name: 'Airdrop', href: '/dashboard/airdrop', icon: CreditCard },
+  { name: 'Connect Wallet', href: '/dashboard/connect-wallet', icon: Wallet },
 ];
 
 const bottomNav = [
@@ -94,28 +62,56 @@ const bottomNav = [
   { name: 'Help', href: '/dashboard/help', icon: HelpCircle },
 ];
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
-  
-  // 🔥 Initialize all trading accounts with user's balance
+
+  // Unified balance (from your existing system)
   const { balance, isInitialized } = useUnifiedBalance();
-  
+
+  // Trading store hooks (spot hold model updates here)
+  const initializeAccounts = useTradingAccountStore((s) => s.initializeAccounts);
+  const syncBalanceFromUser = useTradingAccountStore((s) => s.syncBalanceFromUser);
+  const loadStocksFromSupabase = useTradingAccountStore((s) => s.loadStocksFromSupabase);
+  const spotUserId = useTradingAccountStore((s) => s.spotAccount?.userId);
+
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
   // Redirect if not authenticated
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
-      router.push('/auth/login');
-    }
+    if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
+
+  // ✅ Initialize + keep store balance in sync (does NOT use FX logic)
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!isInitialized) return;
+
+    const baseBalance =
+      Number((balance as any)?.available ?? (balance as any)?.total ?? 0) || 0;
+
+    // Only re-init when user changes
+    if (!spotUserId || spotUserId !== user.id) {
+      initializeAccounts(user.id, baseBalance);
+      loadStocksFromSupabase(user.id, baseBalance).catch(() => {});
+    }
+
+    // Always sync balances (doesn’t wipe positions)
+    syncBalanceFromUser(baseBalance);
+  }, [
+    user?.id,
+    isInitialized,
+    (balance as any)?.total,
+    (balance as any)?.available,
+    spotUserId,
+    initializeAccounts,
+    syncBalanceFromUser,
+    loadStocksFromSupabase,
+  ]);
 
   const handleLogout = async () => {
     await logout();
@@ -123,7 +119,7 @@ export default function DashboardLayout({
   };
 
   const isActive = (href: string) => pathname === href;
-  const isChildActive = (children: any[]) => children?.some(child => pathname === child.href);
+  const isChildActive = (children: any[]) => children?.some((child) => pathname === child.href);
 
   if (isLoading || !user) {
     return (
@@ -133,12 +129,20 @@ export default function DashboardLayout({
     );
   }
 
+  const totalBal = Number((balance as any)?.total ?? 0) || 0;
+  const bonusBal = Number((balance as any)?.bonus ?? 0) || 0;
+
   return (
     <div className="min-h-screen bg-void flex">
+      {/* ✅ Stock live price sync (Twelve) — ONE TIME in layout */}
+      <StockPriceSync />
+
       {/* Desktop Sidebar */}
-      <aside className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
-        sidebarOpen ? 'w-64' : 'w-20'
-      }`}>
+      <aside
+        className={`hidden lg:flex flex-col fixed inset-y-0 left-0 z-50 bg-obsidian border-r border-white/5 transition-all duration-300 ${
+          sidebarOpen ? 'w-64' : 'w-20'
+        }`}
+      >
         {/* Logo */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
           <Link href="/dashboard" className="flex items-center gap-2">
@@ -176,13 +180,15 @@ export default function DashboardLayout({
                       {sidebarOpen && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                          <ChevronDown className={`w-4 h-4 transition-transform ${
-                            expandedMenu === item.name ? 'rotate-180' : ''
-                          }`} />
+                          <ChevronDown
+                            className={`w-4 h-4 transition-transform ${
+                              expandedMenu === item.name ? 'rotate-180' : ''
+                            }`}
+                          />
                         </>
                       )}
                     </button>
-                    
+
                     <AnimatePresence>
                       {sidebarOpen && expandedMenu === item.name && (
                         <motion.ul
@@ -220,9 +226,7 @@ export default function DashboardLayout({
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
-                    {sidebarOpen && (
-                      <span className="text-sm font-medium">{item.name}</span>
-                    )}
+                    {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
                   </Link>
                 )}
               </li>
@@ -244,9 +248,7 @@ export default function DashboardLayout({
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
-                  {sidebarOpen && (
-                    <span className="text-sm font-medium">{item.name}</span>
-                  )}
+                  {sidebarOpen && <span className="text-sm font-medium">{item.name}</span>}
                 </Link>
               </li>
             ))}
@@ -257,7 +259,9 @@ export default function DashboardLayout({
             onClick={toggleSidebar}
             className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
           >
-            <ChevronDown className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
+            <ChevronDown
+              className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`}
+            />
             {sidebarOpen && <span className="text-sm">Collapse</span>}
           </button>
         </div>
@@ -312,11 +316,13 @@ export default function DashboardLayout({
                           >
                             <item.icon className="w-5 h-5" />
                             <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                            <ChevronDown className={`w-4 h-4 transition-transform ${
-                              expandedMenu === item.name ? 'rotate-180' : ''
-                            }`} />
+                            <ChevronDown
+                              className={`w-4 h-4 transition-transform ${
+                                expandedMenu === item.name ? 'rotate-180' : ''
+                              }`}
+                            />
                           </button>
-                          
+
                           <AnimatePresence>
                             {expandedMenu === item.name && (
                               <motion.ul
@@ -369,9 +375,11 @@ export default function DashboardLayout({
       </AnimatePresence>
 
       {/* Main Content */}
-      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
-        sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
-      }`}>
+      <div
+        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
+          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
+        }`}
+      >
         {/* Top Header */}
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           {/* Left */}
@@ -382,7 +390,7 @@ export default function DashboardLayout({
             >
               <Menu className="w-6 h-6" />
             </button>
-            
+
             {/* Search */}
             <div className="hidden sm:flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <Search className="w-4 h-4 text-slate-500" />
@@ -391,7 +399,9 @@ export default function DashboardLayout({
                 placeholder="Search assets, traders..."
                 className="bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none w-48 lg:w-64"
               />
-              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">⌘K</kbd>
+              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">
+                ⌘K
+              </kbd>
             </div>
           </div>
 
@@ -401,9 +411,11 @@ export default function DashboardLayout({
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${balance.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                {balance.bonus > 0 && (
-                  <span className="text-slate-400 text-[10px] ml-1">(incl. ${balance.bonus.toLocaleString()} bonus)</span>
+                ${totalBal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {bonusBal > 0 && (
+                  <span className="text-slate-400 text-[10px] ml-1">
+                    (incl. ${bonusBal.toLocaleString()} bonus)
+                  </span>
                 )}
               </p>
             </div>
@@ -422,7 +434,9 @@ export default function DashboardLayout({
                 className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
-                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">
+                  Connect Wallet
+                </span>
               </Link>
             )}
 
@@ -472,6 +486,7 @@ export default function DashboardLayout({
                         </div>
                       )}
                     </div>
+
                     <div className="py-2">
                       <Link
                         href="/dashboard/settings"
@@ -498,6 +513,7 @@ export default function DashboardLayout({
                         Settings
                       </Link>
                     </div>
+
                     <div className="border-t border-white/5 py-2">
                       <button
                         onClick={handleLogout}
@@ -515,9 +531,7 @@ export default function DashboardLayout({
         </header>
 
         {/* Page Content */}
-        <main className="flex-1 p-4 lg:p-6">
-          {children}
-        </main>
+        <main className="flex-1 p-4 lg:p-6">{children}</main>
       </div>
 
       {/* Support Widget */}
