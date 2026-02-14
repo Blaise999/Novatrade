@@ -1,6 +1,13 @@
 // app/dashboard/trade/fx/page.tsx
 'use client';
 
+/**
+ * FX TRADING PAGE
+ * - Uses Supabase session access_token as Bearer token for /api/trades
+ * - Uses lightweight-charts (static import) to avoid dynamic chunk failures
+ * - Fetches candles ONLY from /api/market/fx/candles
+ */
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import {
@@ -12,6 +19,9 @@ import {
   ShieldAlert,
   CandlestickChart,
 } from 'lucide-react';
+
+// ✅ STATIC IMPORT (fixes “Chart module not available” from dynamic import issues)
+import { createChart, CrosshairMode } from 'lightweight-charts';
 
 type Mode = 'active' | 'history';
 
@@ -234,19 +244,7 @@ function fmt(n: number, dp = 2) {
   return n.toFixed(dp);
 }
 
-/** ---------- SUPABASE TOKEN (project-ref locked) ---------- */
-function getProjectRefFromEnv(): string | null {
-  try {
-    const u = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    if (!u) return null;
-    const host = new URL(u).hostname; // <ref>.supabase.co
-    const ref = host.split('.')[0];
-    return ref || null;
-  } catch {
-    return null;
-  }
-}
-
+/** ---------- SUPABASE TOKEN (robust: supports your custom storageKey) ---------- */
 function decodeJwtPayload(token: string): any | null {
   try {
     const parts = token.split('.');
@@ -264,69 +262,103 @@ function decodeJwtPayload(token: string): any | null {
   }
 }
 
+function getProjectRefFromEnv(): string | null {
+  try {
+    const u = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    if (!u) return null;
+    const host = new URL(u).hostname; // <ref>.supabase.co
+    const ref = host.split('.')[0];
+    return ref || null;
+  } catch {
+    return null;
+  }
+}
+
+function extractAccessTokenFromStoredJson(raw: string): string | null {
+  try {
+    const parsed = JSON.parse(raw) as any;
+    const token =
+      parsed?.access_token ??
+      parsed?.currentSession?.access_token ??
+      parsed?.session?.access_token ??
+      parsed?.data?.session?.access_token ??
+      parsed?.value?.access_token ??
+      null;
+
+    return typeof token === 'string' && token.length > 20 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 function readStoredAccessToken(): string | null {
   if (typeof window === 'undefined') return null;
 
   const projectRef = getProjectRefFromEnv();
-  const expectedKey = projectRef ? `sb-${projectRef}-auth-token` : null;
+  const expectedSbKey = projectRef ? `sb-${projectRef}-auth-token` : null;
+
+  // ✅ your custom key from supabase client config
+  const customKey = 'novatrade-sb-auth';
 
   const pick = (store: Storage | null) => {
     if (!store) return null;
 
-    try {
-      const keys: string[] = [];
+    // 1) prefer your custom key first
+    const rawCustom = store.getItem(customKey);
+    if (rawCustom) {
+      const t = extractAccessTokenFromStoredJson(rawCustom);
+      if (t) return t;
+    }
 
-      if (expectedKey) {
-        keys.push(expectedKey);
-      } else {
-        for (let i = 0; i < store.length; i++) {
-          const k = store.key(i);
-          if (!k) continue;
-          if (k.startsWith('sb-') && k.endsWith('-auth-token')) keys.push(k);
-        }
+    // 2) then normal sb-<ref>-auth-token
+    if (expectedSbKey) {
+      const raw = store.getItem(expectedSbKey);
+      if (raw) {
+        const t = extractAccessTokenFromStoredJson(raw);
+        if (t) return t;
       }
+    }
 
-      for (const k of keys) {
-        const raw = store.getItem(k);
-        if (!raw) continue;
+    // 3) last: scan keys
+    try {
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        if (!k) continue;
 
-        const parsed = JSON.parse(raw) as any;
-        const token =
-          parsed?.access_token ??
-          parsed?.currentSession?.access_token ??
-          parsed?.session?.access_token ??
-          parsed?.data?.session?.access_token ??
-          null;
+        if (k === customKey || (k.startsWith('sb-') && k.endsWith('-auth-token'))) {
+          const raw = store.getItem(k);
+          if (!raw) continue;
 
-        if (typeof token !== 'string' || token.length < 20) continue;
+          const token = extractAccessTokenFromStoredJson(raw);
+          if (!token) continue;
 
-        // sanity check against project ref
-        if (projectRef) {
-          const payload = decodeJwtPayload(token);
-          const iss = typeof payload?.iss === 'string' ? payload.iss : '';
-          if (!iss.includes(projectRef)) {
-            dlog('Stored token ignored (wrong iss)', { key: k, iss });
-            continue;
+          // sanity check: if we know projectRef, token issuer should include it
+          if (projectRef) {
+            const payload = decodeJwtPayload(token);
+            const iss = typeof payload?.iss === 'string' ? payload.iss : '';
+            if (iss && !iss.includes(projectRef)) {
+              dlog('Stored token ignored (wrong iss)', { key: k, iss });
+              continue;
+            }
           }
-        }
 
-        dlog('Stored token selected', { key: k, projectRef });
-        return token;
+          return token;
+        }
       }
     } catch (e) {
-      derr('readStoredAccessToken error', e);
+      derr('readStoredAccessToken scan error', e);
     }
 
     return null;
   };
 
-  // NOTE: no ?? used here (avoids TS5076)
   const ss = window.sessionStorage ? window.sessionStorage : null;
   const ls = window.localStorage ? window.localStorage : null;
 
   return pick(ss) || pick(ls);
 }
 
+/** ---------- FX CANDLES FETCH ---------- */
 async function fetchFxCandles(display: string, tf: TF, limit = 260, signal?: AbortSignal): Promise<Candle[]> {
   const url =
     `/api/market/fx/candles?display=${encodeURIComponent(display)}` +
@@ -338,7 +370,11 @@ async function fetchFxCandles(display: string, tf: TF, limit = 260, signal?: Abo
 
   const text = await res.text();
   let json: any = null;
-  try { json = JSON.parse(text); } catch { json = null; }
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
 
   if (res.status === 403) {
     throw new Error(json?.message || 'FX candles access denied (Finnhub plan/API key)');
@@ -349,15 +385,12 @@ async function fetchFxCandles(display: string, tf: TF, limit = 260, signal?: Abo
   }
 
   const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
-  const mapped = rows
+  return rows
     .map((r) => mapCandleRow(r))
     .filter((x): x is Candle => x !== null)
     .sort((a, b) => a.time - b.time);
-
-  return mapped;
 }
 
-/** ---------- CHART DATA MAPPING ---------- */
 function mapCandleRow(r: unknown): Candle | null {
   if (!r || typeof r !== 'object') return null;
   const row = r as Record<string, unknown>;
@@ -460,6 +493,7 @@ export default function FXTradePage() {
   const chartWrapRef = useRef<HTMLDivElement | null>(null);
   const chartApiRef = useRef<any>(null);
   const candleSeriesRef = useRef<any>(null);
+  const resizeObsRef = useRef<ResizeObserver | null>(null);
 
   // chart request control
   const chartAbortRef = useRef<AbortController | null>(null);
@@ -497,7 +531,7 @@ export default function FXTradePage() {
       derr('refreshSession failed', e);
     }
 
-    // 3) storage (project-ref locked)
+    // 3) storage fallback (supports your custom storageKey)
     const stored = readStoredAccessToken();
     if (stored) {
       dlog('Token source: storage fallback', { has: true });
@@ -526,7 +560,11 @@ export default function FXTradePage() {
 
       const text = await res.text();
       let json: any = null;
-      try { json = JSON.parse(text); } catch { json = null; }
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
 
       dlog('Trades resp', { status: res.status, body: isDebugOn() ? json : undefined });
 
@@ -540,7 +578,7 @@ export default function FXTradePage() {
       const rows: TradeRow[] = Array.isArray(json?.trades) ? (json.trades as TradeRow[]) : [];
       const parsed = rows
         .map(dbRowToUi)
-        .filter((t): t is FxUiTrade => t.assetType === 'forex' && !!t.asset);
+        .filter((t) => t.assetType === 'forex' && !!t.asset);
 
       setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
     } catch (e: unknown) {
@@ -550,6 +588,61 @@ export default function FXTradePage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  /** ---------- CHART INIT + UPDATE (NO dynamic import) ---------- */
+  const ensureChart = () => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+
+    if (chartApiRef.current && candleSeriesRef.current) return;
+
+    // If container is empty, clear it (prevents double mounts)
+    try {
+      el.innerHTML = '';
+    } catch {}
+
+    const chart = createChart(el, {
+      layout: {
+        background: { color: 'transparent' },
+        textColor: 'rgba(255,255,255,0.85)',
+      },
+      grid: {
+        vertLines: { color: 'rgba(255,255,255,0.06)' },
+        horzLines: { color: 'rgba(255,255,255,0.06)' },
+      },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
+      timeScale: {
+        borderColor: 'rgba(255,255,255,0.12)',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: { mode: (CrosshairMode as any)?.Normal ?? 0 },
+      autoSize: true, // v5 supports this; we also fitContent on resize
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: '#22c55e',
+      downColor: '#f43f5e',
+      borderUpColor: '#22c55e',
+      borderDownColor: '#f43f5e',
+      wickUpColor: '#22c55e',
+      wickDownColor: '#f43f5e',
+    });
+
+    chartApiRef.current = chart;
+    candleSeriesRef.current = candleSeries;
+
+    // Resize observer to keep it responsive
+    try {
+      const ro = new ResizeObserver(() => {
+        try {
+          chart.timeScale().fitContent();
+        } catch {}
+      });
+      ro.observe(el);
+      resizeObsRef.current = ro;
+    } catch {}
   };
 
   const loadChart = async () => {
@@ -565,15 +658,21 @@ export default function FXTradePage() {
     chartInFlightRef.current = true;
 
     // abort previous request
-    try { chartAbortRef.current?.abort(); } catch {}
+    try {
+      chartAbortRef.current?.abort();
+    } catch {}
     const ac = new AbortController();
     chartAbortRef.current = ac;
 
     try {
       dlog('loadChart start', { asset, tf });
 
-      // fetch candles ONLY from your fx route
+      // 1) ensure chart exists BEFORE data (so you still see a chart shell)
+      ensureChart();
+
+      // 2) fetch candles ONLY from your fx route
       const candles: Candle[] = await fetchFxCandles(asset, tf, 260, ac.signal);
+      if (ac.signal.aborted) return;
 
       if (!candles.length) {
         setChartNote('No candle data returned.');
@@ -587,50 +686,18 @@ export default function FXTradePage() {
         setMarketPrice(() => (lc != null && lc > 0 ? lc.toFixed(5) : '1.00000'));
       }
 
-      // init chart only once; update series data on changes
-      try {
-        const mod = await import('lightweight-charts');
-
-        if (!chartApiRef.current) {
-          const el = chartWrapRef.current;
-
-          const chart = mod.createChart(el, {
-            layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.85)' },
-            grid: { vertLines: { color: 'rgba(255,255,255,0.06)' }, horzLines: { color: 'rgba(255,255,255,0.06)' } },
-            rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
-            timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: true, secondsVisible: false },
-            crosshair: { mode: mod.CrosshairMode?.Normal ?? 0 },
-            autoSize: true,
-          });
-
-          const candleSeries = chart.addCandlestickSeries({
-            upColor: '#22c55e',
-            downColor: '#f43f5e',
-            borderUpColor: '#22c55e',
-            borderDownColor: '#f43f5e',
-            wickUpColor: '#22c55e',
-            wickDownColor: '#f43f5e',
-          });
-
-          chartApiRef.current = chart;
-          candleSeriesRef.current = candleSeries;
-
-          const ro = new ResizeObserver(() => {
-            chart.timeScale().fitContent();
-          });
-          ro.observe(el);
-          (chartApiRef.current as any).__ro = ro;
-        }
-
-        if (candleSeriesRef.current) {
-          candleSeriesRef.current.setData(
-            candles.map((c) => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
-          );
-          chartApiRef.current?.timeScale()?.fitContent();
-        }
-      } catch (e) {
-        setChartNote('Chart module not available. Install: pnpm add lightweight-charts');
-        derr('lightweight-charts import failed', e);
+      // 3) update series
+      if (candleSeriesRef.current) {
+        candleSeriesRef.current.setData(
+          candles.map((c) => ({
+            time: c.time as any,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }))
+        );
+        chartApiRef.current?.timeScale()?.fitContent?.();
       }
     } catch (e: any) {
       const msg = e?.message || 'Failed to load chart';
@@ -642,24 +709,28 @@ export default function FXTradePage() {
     }
   };
 
+  // Polling for “live-ish” updates
   useEffect(() => {
-  // Polling for "live-ish" updates
-  const ms =
-    tf === '1m' ? 7000 :
-    tf === '5m' ? 12000 :
-    tf === '15m' ? 20000 :
-    tf === '1h' ? 30000 :
-    tf === '4h' ? 45000 :
-    60000;
+    const ms =
+      tf === '1m'
+        ? 7000
+        : tf === '5m'
+          ? 12000
+          : tf === '15m'
+            ? 20000
+            : tf === '1h'
+              ? 30000
+              : tf === '4h'
+                ? 45000
+                : 60000;
 
-  const id = window.setInterval(() => {
-    loadChart();
-  }, ms);
+    const id = window.setInterval(() => {
+      loadChart();
+    }, ms);
 
-  return () => window.clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [asset, tf]);
-
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset, tf]);
 
   useEffect(() => {
     if (firstLoadRef.current) return;
@@ -667,6 +738,8 @@ export default function FXTradePage() {
 
     dlog('FX page mounted');
     loadTrades('active');
+    // chart init+load on mount
+    loadChart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -682,14 +755,13 @@ export default function FXTradePage() {
       } catch {}
 
       try {
-        const ro = (chartApiRef.current as any)?.__ro as ResizeObserver | undefined;
-        ro?.disconnect?.();
+        resizeObsRef.current?.disconnect?.();
       } catch {}
+      resizeObsRef.current = null;
 
       try {
         chartApiRef.current?.remove?.();
       } catch {}
-
       chartApiRef.current = null;
       candleSeriesRef.current = null;
     };
@@ -747,7 +819,11 @@ export default function FXTradePage() {
 
       const text = await res.text();
       let json: any = null;
-      try { json = JSON.parse(text); } catch { json = null; }
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
 
       dlog('Open trade resp', { status: res.status, body: isDebugOn() ? json : undefined });
 
@@ -792,7 +868,11 @@ export default function FXTradePage() {
 
       const text = await res.text();
       let json: any = null;
-      try { json = JSON.parse(text); } catch { json = null; }
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = null;
+      }
 
       dlog('Close trade resp', { status: res.status, body: isDebugOn() ? json : undefined });
 
@@ -1049,9 +1129,7 @@ export default function FXTradePage() {
           </div>
 
           <div className="mt-4 flex items-center justify-between gap-3">
-            <div className="text-xs text-white/60">
-              Tip: market price is the “TV quote”. Server computes entry with spread.
-            </div>
+            <div className="text-xs text-white/60">Tip: market price is the “TV quote”. Server computes entry with spread.</div>
 
             <button
               onClick={openTrade}
@@ -1153,11 +1231,7 @@ export default function FXTradePage() {
                                 : 'bg-rose-500/15 border-rose-500/30 text-rose-100'
                             }`}
                           >
-                            {t.direction === 'buy' ? (
-                              <TrendingUp className="h-3 w-3" />
-                            ) : (
-                              <TrendingDown className="h-3 w-3" />
-                            )}
+                            {t.direction === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
                             {t.direction.toUpperCase()}
                           </span>
                         </td>
@@ -1177,9 +1251,7 @@ export default function FXTradePage() {
                         </td>
 
                         <td className="px-4 py-3 text-right">
-                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>
-                            {t.status}
-                          </span>
+                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>{t.status}</span>
                         </td>
 
                         <td className="px-4 py-3 text-right">

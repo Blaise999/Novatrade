@@ -2,8 +2,6 @@
 /**
  * OLYMP-STYLE TRADES API
  *
- * Server-side execution ONLY - the App is just a TV screen, the Server is the judge.
- *
  * ENDPOINTS:
  * POST /api/trades  - Open new trade (atomic balance deduction)
  * GET  /api/trades  - Get user's trades
@@ -45,25 +43,55 @@ function extractBearerToken(req: NextRequest): string | null {
 async function requireUser(req: NextRequest) {
   const token = extractBearerToken(req);
   if (!token) {
-    return {
-      user: null as any,
-      error: 'Missing or invalid authorization header',
-      status: 401,
-    };
+    return { user: null as any, error: 'Missing or invalid authorization header', status: 401 };
   }
 
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase.auth.getUser(token);
 
   if (error || !data?.user) {
-    return {
-      user: null as any,
-      error: 'Invalid or expired token',
-      status: 401,
-    };
+    return { user: null as any, error: 'Invalid or expired token', status: 401 };
   }
 
   return { user: data.user, error: null as any, status: 200 };
+}
+
+// ============================================
+// HELPERS
+// ============================================
+function clampInt(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function toNumber(v: any, fallback = NaN) {
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function sanitizeDbErrorMessage(msg: string): string {
+  const s = String(msg || '').trim();
+  if (!s) return 'Database error';
+
+  // Cloudflare HTML / upstream 500 sometimes leaks as a huge HTML document
+  const lower = s.toLowerCase();
+  if (lower.includes('<!doctype html') || lower.includes('<html') || lower.includes('cloudflare')) {
+    return 'Database error (upstream 500). Check Supabase logs for the real cause.';
+  }
+
+  // keep it short + readable
+  return s.replace(/\s+/g, ' ').slice(0, 400);
+}
+
+function normalizeNewBalance(result: any): number | null {
+  const v =
+    result?.new_balance ??
+    result?.newAvailable ??
+    result?.newavailable ??
+    result?.balance ??
+    null;
+
+  const n = toNumber(v, NaN);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ============================================
@@ -88,10 +116,6 @@ function checkIdempotency(key: string): string | null {
 
 function setIdempotency(key: string, tradeId: string) {
   idempotencyCache.set(key, { tradeId, expiresAt: Date.now() + IDEMPOTENCY_TTL });
-}
-
-function clampInt(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
 }
 
 // ============================================
@@ -203,16 +227,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const inv = Number(investment);
-    const mult = Number(multiplier);
-    const price = Number(marketPrice);
+    const inv = toNumber(investment);
+    const multNum = toNumber(multiplier);
+    const price = toNumber(marketPrice);
 
     if (!Number.isFinite(inv) || inv <= 0) {
       return NextResponse.json({ success: false, error: 'Investment must be positive' }, { status: 400 });
     }
-    if (!Number.isFinite(mult) || mult < 1 || mult > 1000) {
-      return NextResponse.json({ success: false, error: 'Multiplier must be between 1 and 1000' }, { status: 400 });
+
+    // ✅ force integer multiplier (prevents ambiguous function matches)
+    const multInt = Math.trunc(multNum);
+    if (!Number.isFinite(multNum) || multInt < 1 || multInt > 1000 || multInt !== multNum) {
+      return NextResponse.json(
+        { success: false, error: 'Multiplier must be an integer between 1 and 1000' },
+        { status: 400 }
+      );
     }
+
     if (!Number.isFinite(price) || price <= 0) {
       return NextResponse.json({ success: false, error: 'marketPrice must be a valid number' }, { status: 400 });
     }
@@ -250,7 +281,7 @@ export async function POST(request: NextRequest) {
       assetType,
       direction,
       investment: inv,
-      multiplier: mult,
+      multiplier: multInt,
       marketPrice: price,
       stopLoss: stopLoss != null ? Number(stopLoss) : undefined,
       takeProfit: takeProfit != null ? Number(takeProfit) : undefined,
@@ -264,23 +295,35 @@ export async function POST(request: NextRequest) {
     // ✅ DB uuid id
     const dbTradeId = crypto.randomUUID();
 
-    // atomic open
+    // ✅ call your CURRENT function signature (matches what you pasted)
+    // open_trade_atomic(
+    //   p_asset text, p_direction text, p_entry_price numeric, p_investment numeric,
+    //   p_liquidation_price numeric, p_multiplier integer, p_trade_id uuid, p_user_id uuid,
+    //   p_stop_loss numeric default null, p_take_profit numeric default null
+    // )
     const { data: result, error: dbError } = await supabase.rpc('open_trade_atomic', {
-      p_user_id: user.id,
-      p_trade_id: dbTradeId,
-      p_investment: trade.investment,
       p_asset: trade.asset,
       p_direction: trade.direction === 1 ? 'buy' : 'sell',
-      p_multiplier: trade.multiplier,
       p_entry_price: trade.entryPrice,
+      p_investment: trade.investment,
       p_liquidation_price: trade.liquidationPrice,
+      p_multiplier: multInt,
+      p_trade_id: dbTradeId,
+      p_user_id: user.id,
       p_stop_loss: trade.stopLoss ?? null,
       p_take_profit: trade.takeProfit ?? null,
     });
 
     if (dbError) {
+      const msg = sanitizeDbErrorMessage(dbError.message);
       console.error('[Trades API] Atomic open failed:', dbError);
-      return NextResponse.json({ success: false, error: 'Trade execution failed: ' + dbError.message }, { status: 500 });
+
+      // make this one readable for the UI
+      if (msg.includes('INSUFFICIENT_BALANCE')) {
+        return NextResponse.json({ success: false, error: 'Trade execution failed: INSUFFICIENT_BALANCE' }, { status: 400 });
+      }
+
+      return NextResponse.json({ success: false, error: 'Trade execution failed: ' + msg }, { status: 500 });
     }
 
     if (!result?.success) {
@@ -290,6 +333,8 @@ export async function POST(request: NextRequest) {
     // store idempotency (DB uuid)
     if (clientKey) setIdempotency(`${user.id}:${clientKey}`, dbTradeId);
     setIdempotency(serverKey, dbTradeId);
+
+    const newBal = normalizeNewBalance(result);
 
     return NextResponse.json({
       success: true,
@@ -307,7 +352,7 @@ export async function POST(request: NextRequest) {
         spreadCost: trade.spreadCost,
         status: 'active',
       },
-      newBalance: result.new_balance,
+      newBalance: newBal ?? undefined,
       message: `Trade opened: ${trade.direction === 1 ? 'BUY' : 'SELL'} ${trade.asset} @ ${trade.entryPrice.toFixed(5)}`,
     });
   } catch (e: any) {
@@ -349,13 +394,29 @@ export async function PATCH(request: NextRequest) {
       .single();
 
     if (fetchError || !trade) return NextResponse.json({ success: false, error: 'Trade not found' }, { status: 404 });
-    if (trade.status !== 'active') return NextResponse.json({ success: false, error: 'Trade is not active' }, { status: 400 });
+    if (String(trade.status).toLowerCase() !== 'active') {
+      return NextResponse.json({ success: false, error: 'Trade is not active' }, { status: 400 });
+    }
 
-    const investment = Number(trade.investment || trade.amount || 0);
-    const multiplier = Number(trade.multiplier || trade.leverage || 1);
-    const entryPrice = Number(trade.entry_price || trade.entryPrice);
-    const finalExitPrice = Number(exitPrice ?? trade.current_price);
-    const direction = Number(trade.direction_int) || (trade.direction === 'buy' ? 1 : -1);
+    const investment = toNumber(trade.investment ?? trade.amount ?? 0, 0);
+    const multiplier = toNumber(trade.multiplier ?? trade.leverage ?? 1, 1);
+    const entryPrice = toNumber(trade.entry_price ?? trade.entryPrice, NaN);
+
+    // ✅ guard exit price (prevents NaN PnL and weird DB errors)
+    const exit = exitPrice ?? trade.current_price ?? trade.exit_price;
+    const finalExitPrice = toNumber(exit, NaN);
+
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      return NextResponse.json({ success: false, error: 'Bad entry price on trade record' }, { status: 400 });
+    }
+    if (!Number.isFinite(finalExitPrice) || finalExitPrice <= 0) {
+      return NextResponse.json({ success: false, error: 'Exit price must be a valid number > 0' }, { status: 400 });
+    }
+
+    const direction =
+      toNumber(trade.direction_int, NaN) === 1 ? 1 :
+      toNumber(trade.direction_int, NaN) === -1 ? -1 :
+      String(trade.direction).toLowerCase() === 'buy' ? 1 : -1;
 
     const relativeChange = (finalExitPrice - entryPrice) / entryPrice;
     let finalPnL = direction * investment * multiplier * relativeChange;
@@ -380,13 +441,17 @@ export async function PATCH(request: NextRequest) {
     });
 
     if (closeError) {
+      const msg = sanitizeDbErrorMessage(closeError.message);
       console.error('[Trades API] Atomic close failed:', closeError);
-      return NextResponse.json({ success: false, error: 'Trade close failed: ' + closeError.message }, { status: 500 });
+      return NextResponse.json({ success: false, error: 'Trade close failed: ' + msg }, { status: 500 });
     }
 
     if (!result?.success) {
       return NextResponse.json({ success: false, error: result?.error || 'Close rejected' }, { status: 400 });
     }
+
+    const newBal = normalizeNewBalance(result);
+    const creditAmt = toNumber(result?.credit_amount, 0);
 
     return NextResponse.json({
       success: true,
@@ -395,9 +460,9 @@ export async function PATCH(request: NextRequest) {
         status: newStatus,
         exitPrice: finalExitPrice,
         finalPnL,
-        creditAmount: result.credit_amount,
+        creditAmount: creditAmt,
       },
-      newBalance: result.new_balance,
+      newBalance: newBal ?? undefined,
       result: {
         isWin: finalPnL > 0,
         profit: finalPnL,
