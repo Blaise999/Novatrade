@@ -80,9 +80,13 @@ export default function ReferralsPage() {
     load();
   }, [user?.id]);
 
-  const referralLink = referralCode
-    ? `${typeof window !== 'undefined' ? window.location.origin : ''}/auth/signup?ref=${referralCode}`
-    : '';
+  // ✅ HYDRATION FIX: compute referralLink in effect to avoid server/client mismatch
+  const [referralLink, setReferralLink] = useState('');
+  useEffect(() => {
+    if (referralCode) {
+      setReferralLink(`${window.location.origin}/auth/signup?ref=${referralCode}`);
+    }
+  }, [referralCode]);
 
   const totalEarnings = referrals
     .filter((r) => r.reward_paid)

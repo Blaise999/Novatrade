@@ -1,64 +1,79 @@
-// app/api/admin/kyc/list/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
-
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
+function supabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function requireAdmin(request: NextRequest) {
-  const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Bearer ')) return null;
+async function requireAdmin(req: NextRequest) {
+  const auth = req.headers.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token) return { ok: false, status: 401, error: 'Missing admin token' };
 
-  const token = auth.slice(7);
-  const tokenHash = hashToken(token);
+  // hash token like your db usually stores it
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-  const { data, error } = await supabaseAdmin
+  const sb = supabaseAdmin();
+
+  // admin_sessions table assumed from your migration
+  const { data: session, error } = await sb
     .from('admin_sessions')
-    .select('id, revoked_at')
+    .select('id, admin_id, expires_at, revoked_at')
     .eq('token_hash', tokenHash)
     .maybeSingle();
 
-  if (error || !data || data.revoked_at) return null;
-  return true;
+  if (error || !session) return { ok: false, status: 401, error: 'Invalid admin session' };
+  if (session.revoked_at) return { ok: false, status: 401, error: 'Session revoked' };
+  if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
+    return { ok: false, status: 401, error: 'Session expired' };
+  }
+
+  return { ok: true, adminId: session.admin_id as string };
 }
 
-export async function GET(request: NextRequest) {
-  try {
-    const ok = await requireAdmin(request);
-    if (!ok) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+export async function GET(req: NextRequest) {
+  const guard = await requireAdmin(req);
+  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
 
-    const url = new URL(request.url);
-    const status = url.searchParams.get('status'); // pending|verified|rejected|none|all
+  const sb = supabaseAdmin();
+  const { searchParams } = new URL(req.url);
+  const status = (searchParams.get('status') || 'all').toLowerCase();
 
-    let q = supabaseAdmin
-      .from('users')
-      .select(
-        'id,email,first_name,last_name,kyc_status,kyc_data,kyc_submitted_at,created_at'
-      )
-      .order('created_at', { ascending: false });
+  let q = sb
+    .from('users')
+    .select('id,email,first_name,last_name,kyc_status,created_at,kyc_submitted_at,kyc_data');
 
-    if (status && status !== 'all') {
-      if (status === 'none') q = q.or('kyc_status.is.null,kyc_status.eq.none,kyc_status.eq.not_started');
-      else q = q.eq('kyc_status', status);
-    }
+  if (status !== 'all') q = q.eq('kyc_status', status);
 
-    const { data, error } = await q;
-    if (error) throw error;
+  const { data: rows, error } = await q.order('created_at', { ascending: false });
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-    return NextResponse.json({ data: data ?? [] });
-  } catch (e: any) {
-    console.error('[AdminKYC] list error:', e);
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: 500 });
-  }
+  const makeSigned = async (path?: string | null) => {
+    if (!path) return null;
+    const { data, error: e } = await sb.storage
+      .from('kyc-documents')
+      .createSignedUrl(path, 60 * 20); // 20 mins
+    if (e) return null;
+    return data.signedUrl;
+  };
+
+  const kycs = await Promise.all(
+    (rows || []).map(async (u: any) => {
+      const meta = u.kyc_data || {};
+      return {
+        ...u,
+        kyc_docs: {
+          id_front: await makeSigned(meta.id_front_doc),
+          id_back: await makeSigned(meta.id_back_doc),
+          selfie: await makeSigned(meta.selfie_doc),
+          proof: await makeSigned(meta.proof_of_address_doc),
+        },
+      };
+    })
+  );
+
+  return NextResponse.json({ kycs });
 }

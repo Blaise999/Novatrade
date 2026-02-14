@@ -25,7 +25,7 @@ import {
 
 import Navigation from '@/components/Navigation';
 import Footer from '@/components/Footer';
-import { useStore } from '@/lib/supabase/store-supabase';
+import { useStore } from '@/lib/auth/store';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 const AIRDROP_CONFIG = {
@@ -81,11 +81,12 @@ export default function NovaAirdropPage() {
   // stats banner
   const [timeLeft, setTimeLeft] = useState('');
 
-  const referralLink = useMemo(() => {
-    const origin =
-      typeof window !== 'undefined' ? window.location.origin : 'https://www.novaatrade.com';
-    if (!referralCode) return '';
-    return `${origin}/auth/signup?ref=${encodeURIComponent(referralCode)}`;
+  // ✅ HYDRATION FIX: compute referralLink in effect to avoid server/client mismatch
+  const [referralLink, setReferralLink] = useState('');
+  useEffect(() => {
+    if (referralCode) {
+      setReferralLink(`${window.location.origin}/auth/signup?ref=${encodeURIComponent(referralCode)}`);
+    }
   }, [referralCode]);
 
   const currentStep = useMemo(() => {

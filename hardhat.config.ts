@@ -5,7 +5,6 @@ import "@nomicfoundation/hardhat-toolbox";
 import "@nomicfoundation/hardhat-verify";
 import "dotenv/config";
 
-
 const PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || "0x" + "0".repeat(64);
 
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || "";

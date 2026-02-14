@@ -1,485 +1,553 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import Image from 'next/image';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
-  Users,
-  TrendingUp,
-  Trophy,
-  Shield,
-  Star,
-  CheckCircle,
-  Copy,
-  ChevronRight,
-  Search,
-  Filter,
-  X,
-  AlertTriangle,
-  Wallet,
-  Target,
-  Clock,
-  BarChart3,
-  Zap
+  Wallet, Eye, EyeOff, TrendingUp, TrendingDown, ArrowUpRight,
+  ArrowDownRight, Bot, Clock, Grid3X3, Shield, CheckCircle,
+  ChevronRight, BarChart3, History,
+  Settings, CreditCard, Send,
 } from 'lucide-react';
-import { topTraders } from '@/lib/data';
 import { useStore } from '@/lib/supabase/store-supabase';
-import { Trader } from '@/lib/types';
+import { useBotEngine } from '@/lib/services/bot-trading-engine';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
+import { useAccount } from 'wagmi';
 
-// Risk level colors
-const riskColors: Record<number, { bg: string; text: string; label: string }> = {
-  1: { bg: 'bg-profit/10', text: 'text-profit', label: 'Low' },
-  2: { bg: 'bg-green-500/10', text: 'text-green-400', label: 'Low-Med' },
-  3: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', label: 'Medium' },
-  4: { bg: 'bg-orange-500/10', text: 'text-orange-400', label: 'Med-High' },
-  5: { bg: 'bg-loss/10', text: 'text-loss', label: 'High' },
-};
+export default function DashboardOverview() {
+  const { user, refreshUser } = useStore();
+  const { bots, fetchBots } = useBotEngine();
+  const [hideBalance, setHideBalance] = useState(false);
+  const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
-export default function CopyTradingPage() {
-  const { user } = useStore();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedFilter, setSelectedFilter] = useState<'all' | 'crypto' | 'forex' | 'stocks'>('all');
-  const [sortBy, setSortBy] = useState<'return' | 'winRate' | 'followers'>('return');
-  const [selectedTrader, setSelectedTrader] = useState<Trader | null>(null);
-  const [copyAmount, setCopyAmount] = useState('100');
-  const [showCopyModal, setShowCopyModal] = useState(false);
-  const [copiedTraders, setCopiedTraders] = useState<string[]>([]);
+  // ✅ live wallet state (wagmi)
+  const { address: liveAddress, isConnected: liveConnected } = useAccount();
 
-  const filteredTraders = topTraders
-    .filter(trader => {
-      const matchesSearch = trader.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        trader.assets.some(a => a.toLowerCase().includes(searchQuery.toLowerCase()));
-      
-      if (selectedFilter === 'all') return matchesSearch;
-      
-      const assetTypeMap: Record<string, string[]> = {
-        crypto: ['BTC', 'ETH', 'SOL', 'XRP'],
-        forex: ['EUR/USD', 'GBP/USD', 'USD/JPY'],
-        stocks: ['AAPL', 'NVDA', 'TSLA']
-      };
-      
-      return matchesSearch && trader.assets.some(a => assetTypeMap[selectedFilter]?.includes(a));
-    })
-    .sort((a, b) => {
-      switch (sortBy) {
-        case 'return': return b.totalReturn - a.totalReturn;
-        case 'winRate': return b.winRate - a.winRate;
-        case 'followers': return b.followers - a.followers;
-        default: return 0;
-      }
-    });
+  useEffect(() => {
+    if (user?.id) {
+      fetchBots(user.id);
+      refreshUser();
+      loadRecentActivity();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
-  const handleCopyTrader = () => {
-    if (!selectedTrader || !user) return;
-    
-    const amount = parseFloat(copyAmount);
-    const userBalance = user.balance || 0;
-    if (amount > userBalance) return;
-    
-    // Note: Balance deduction should be handled by backend API
-    // This is just UI state for now
-    setCopiedTraders([...copiedTraders, selectedTrader.id]);
-    setShowCopyModal(false);
-    setSelectedTrader(null);
+  const loadRecentActivity = async () => {
+    if (!user?.id || !isSupabaseConfigured()) return;
+    try {
+      // Fetch trades
+      const { data: trades } = await supabase
+        .from('trades')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      // Fetch deposits
+      const { data: deposits } = await supabase
+        .from('deposits')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch tier purchases
+      const { data: tierPurchases } = await supabase
+        .from('tier_purchases')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch bonus transactions
+      const { data: bonuses } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('user_id', user.id)
+        .in('type', ['tier_bonus', 'bonus', 'deposit'])
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch withdrawals
+      const { data: withdrawals } = await supabase
+        .from('withdrawals')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Fetch referrals (where user is referrer)
+      const { data: referrals } = await supabase
+        .from('referrals')
+        .select('*')
+        .eq('referrer_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(3);
+
+      // Normalize into unified activity items
+      const items: any[] = [];
+
+      (trades || []).forEach((t: any) => {
+        items.push({
+          id: `trade-${t.id}`,
+          kind: 'trade',
+          label: t.symbol || t.pair || 'Trade',
+          sublabel: `${t.direction || t.type || 'Trade'} • ${t.market_type || t.asset_type || ''}`,
+          amount: Number(t.amount ?? 0),
+          pnl: Number(t.profit_loss ?? t.pnl ?? 0),
+          status: t.status,
+          created_at: t.created_at || t.opened_at,
+        });
+      });
+
+      (deposits || []).forEach((d: any) => {
+        items.push({
+          id: `dep-${d.id}`,
+          kind: 'deposit',
+          label: 'Deposit',
+          sublabel: `${d.network || d.currency || 'Funds'} • ${d.status}`,
+          amount: Number(d.amount ?? 0),
+          pnl: Number(d.amount ?? 0),
+          status: d.status,
+          created_at: d.created_at,
+        });
+      });
+
+      (tierPurchases || []).forEach((tp: any) => {
+        const tierNames: Record<number, string> = { 1: 'Starter', 2: 'Trader', 3: 'Professional', 4: 'Elite' };
+        items.push({
+          id: `tier-${tp.id}`,
+          kind: 'tier',
+          label: `${tierNames[tp.tier_level] || 'Tier'} Purchase`,
+          sublabel: `Tier ${tp.tier_level} • ${tp.status}`,
+          amount: Number(tp.price_amount ?? 0),
+          pnl: tp.status === 'approved' ? Number(tp.bonus_amount ?? 0) : 0,
+          status: tp.status,
+          created_at: tp.created_at,
+        });
+      });
+
+      (bonuses || []).forEach((b: any) => {
+        items.push({
+          id: `tx-${b.id}`,
+          kind: 'bonus',
+          label: b.type === 'tier_bonus' ? 'Tier Bonus' : b.type === 'deposit' ? 'Deposit Credit' : 'Bonus',
+          sublabel: b.description || b.reference_type || 'Credit',
+          amount: Math.abs(Number(b.amount ?? 0)),
+          pnl: Number(b.amount ?? 0),
+          status: 'completed',
+          created_at: b.created_at,
+        });
+      });
+
+      (withdrawals || []).forEach((w: any) => {
+        items.push({
+          id: `wd-${w.id}`,
+          kind: 'withdrawal',
+          label: 'Withdrawal',
+          sublabel: `${w.method || w.network || 'Funds'} • ${w.status}`,
+          amount: Number(w.amount ?? 0),
+          pnl: -Number(w.amount ?? 0),
+          status: w.status,
+          created_at: w.created_at,
+        });
+      });
+
+      (referrals || []).forEach((r: any) => {
+        items.push({
+          id: `ref-${r.id}`,
+          kind: 'referral',
+          label: 'Referral',
+          sublabel: r.reward_paid ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}` : 'New signup',
+          amount: Number(r.reward_amount ?? 0),
+          pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
+          status: r.reward_paid ? 'completed' : 'pending',
+          created_at: r.created_at,
+        });
+      });
+
+      // Sort by date descending, take top 8
+      items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      setRecentActivity(items.slice(0, 8));
+    } catch {}
   };
 
-  const openCopyModal = (trader: Trader) => {
-    setSelectedTrader(trader);
-    setShowCopyModal(true);
-  };
+  const balance = user?.balance ?? 0;
+  const bonus = user?.bonusBalance ?? 0;
+  // balance_available already includes bonus credit, don't add bonus again
+  const totalBalance = balance;
+
+  const activeBots = bots.filter((b) => b.status === 'running').length;
+  const totalBotPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
+
+const kycRaw = String((user as any)?.kycStatus ?? (user as any)?.kyc_status ?? 'none').toLowerCase();
+const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
+
+
+  // ✅ show connected if either:
+  // - wallet is live connected (wagmi)
+  // - wallet is saved in profile (supabase)
+  const walletConnected = liveConnected || !!user?.walletAddress;
+
+  // ✅ show address from live wallet first, fallback to saved
+  const walletAddress = liveAddress || user?.walletAddress;
+
+  const formatBal = (n: number) =>
+    hideBalance
+      ? '••••••'
+      : `$${n.toLocaleString('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
 
   return (
-    <div className="p-4 lg:p-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-display font-bold text-cream">Copy Trading</h1>
-        <p className="text-slate-400 mt-1">
-          Automatically copy trades from top-performing traders
-        </p>
+    <div className="space-y-6">
+      {/* Welcome */}
+      <div>
+        <h1 className="text-2xl font-bold text-cream">
+          Welcome back, {user?.firstName || 'Trader'} 👋
+        </h1>
+        <p className="text-sm text-cream/50 mt-1">Here's your account overview</p>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid sm:grid-cols-4 gap-4 mb-6">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gold/10 rounded-lg flex items-center justify-center">
-              <Users className="w-5 h-5 text-gold" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Active Traders</p>
-              <p className="text-xl font-bold text-cream">2,847</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-profit/10 rounded-lg flex items-center justify-center">
-              <TrendingUp className="w-5 h-5 text-profit" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Avg. Return</p>
-              <p className="text-xl font-bold text-profit">+127%</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-electric/10 rounded-lg flex items-center justify-center">
-              <Trophy className="w-5 h-5 text-electric" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Top Win Rate</p>
-              <p className="text-xl font-bold text-cream">85.7%</p>
-            </div>
-          </div>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-          className="p-4 bg-white/5 rounded-xl border border-white/5"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-purple-500/10 rounded-lg flex items-center justify-center">
-              <Copy className="w-5 h-5 text-purple-400" />
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">You&apos;re Copying</p>
-              <p className="text-xl font-bold text-cream">{copiedTraders.length}</p>
-            </div>
-          </div>
-        </motion.div>
-      </div>
-
-      {/* Search and Filters */}
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search traders or assets..."
-            className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-sm text-cream placeholder:text-slate-600 focus:outline-none focus:border-gold"
-          />
-        </div>
-
-        <div className="flex gap-2">
-          {(['all', 'crypto', 'forex', 'stocks'] as const).map((filter) => (
+      {/* Main Balance Card */}
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="relative overflow-hidden p-6 bg-gradient-to-br from-electric/10 via-gold/5 to-transparent rounded-2xl border border-white/10"
+      >
+        <div className="absolute top-0 right-0 w-64 h-64 bg-electric/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
+        <div className="relative z-10">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-sm text-cream/60">Total Balance</span>
             <button
-              key={filter}
-              onClick={() => setSelectedFilter(filter)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium capitalize transition-all ${
-                selectedFilter === filter
-                  ? 'bg-gold text-void'
-                  : 'bg-white/5 text-slate-400 hover:bg-white/10'
+              onClick={() => setHideBalance(!hideBalance)}
+              className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
+            >
+              {hideBalance ? (
+                <EyeOff className="w-4 h-4 text-cream/40" />
+              ) : (
+                <Eye className="w-4 h-4 text-cream/40" />
+              )}
+            </button>
+          </div>
+
+          <p className="text-4xl font-bold text-cream mb-1">{formatBal(totalBalance)}</p>
+
+          <div className="flex items-center gap-4 text-sm">
+            {bonus > 0 && (
+              <span className="text-cream/50">
+                Includes <span className="text-gold font-medium">{formatBal(bonus)}</span> bonus
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-3 mt-5">
+            <Link
+              href="/dashboard/deposit"
+              className="flex items-center gap-2 px-4 py-2.5 bg-gold text-void font-semibold text-sm rounded-xl hover:bg-gold/90 transition-all"
+            >
+              <CreditCard className="w-4 h-4" /> Deposit
+            </Link>
+            <Link
+              href="/dashboard/wallet?tab=withdraw"
+              className="flex items-center gap-2 px-4 py-2.5 bg-white/10 text-cream font-semibold text-sm rounded-xl hover:bg-white/15 transition-all"
+            >
+              <Send className="w-4 h-4" /> Withdraw
+            </Link>
+            <Link
+              href="/dashboard/trade/crypto"
+              className="flex items-center gap-2 px-4 py-2.5 bg-electric/20 text-electric font-semibold text-sm rounded-xl hover:bg-electric/30 transition-all"
+            >
+              <TrendingUp className="w-4 h-4" /> Trade
+            </Link>
+          </div>
+        </div>
+      </motion.div>
+
+      {/* Quick Stats Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* Active Bots */}
+        <Link
+          href="/dashboard/bots"
+          className="p-4 bg-white/5 rounded-xl border border-white/10 hover:border-electric/30 transition-all group"
+        >
+          <div className="flex items-center gap-2 mb-2">
+            <div className="w-8 h-8 bg-purple-500/20 rounded-lg flex items-center justify-center">
+              <Bot className="w-4 h-4 text-purple-400" />
+            </div>
+            <ChevronRight className="w-4 h-4 text-cream/20 ml-auto group-hover:text-electric/60 transition-colors" />
+          </div>
+          <p className="text-2xl font-bold text-cream">{activeBots}</p>
+          <p className="text-xs text-cream/40">Active Bots</p>
+        </Link>
+
+        {/* Bot P&L */}
+        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                totalBotPnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'
               }`}
             >
-              {filter}
-            </button>
-          ))}
+              {totalBotPnl >= 0 ? (
+                <TrendingUp className="w-4 h-4 text-profit" />
+              ) : (
+                <TrendingDown className="w-4 h-4 text-loss" />
+              )}
+            </div>
+          </div>
+          <p className={`text-2xl font-bold ${totalBotPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+            {totalBotPnl >= 0 ? '+' : ''}
+            {formatBal(totalBotPnl)}
+          </p>
+          <p className="text-xs text-cream/40">Bot P&L</p>
         </div>
 
-        <select
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as any)}
-          className="px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-cream focus:outline-none focus:border-gold"
-        >
-          <option value="return">Highest Return</option>
-          <option value="winRate">Best Win Rate</option>
-          <option value="followers">Most Popular</option>
-        </select>
+        {/* Wallet */}
+        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                walletConnected ? 'bg-profit/20' : 'bg-white/10'
+              }`}
+            >
+              <Wallet className={`w-4 h-4 ${walletConnected ? 'text-profit' : 'text-cream/40'}`} />
+            </div>
+          </div>
+
+          {walletConnected ? (
+            <>
+              <p className="text-sm font-bold text-profit flex items-center gap-1">
+                <CheckCircle className="w-3.5 h-3.5" /> Connected
+              </p>
+
+              <p className="text-xs text-cream/40 font-mono truncate mt-0.5">
+                {walletAddress
+                  ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+                  : '—'}
+              </p>
+
+              {/* optional tiny hint */}
+              <p className="text-[10px] text-cream/30 mt-1">
+                {liveConnected ? 'Live wallet' : user?.walletAddress ? 'Saved wallet' : ''}
+              </p>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/dashboard/connect-wallet"
+                className="text-sm font-bold text-cream/60 hover:text-electric transition-colors"
+              >
+                Not Connected
+              </Link>
+              <p className="text-xs text-cream/40">Tap to connect</p>
+            </>
+          )}
+        </div>
+
+        {/* KYC */}
+        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+          <div className="flex items-center gap-2 mb-2">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                kycStatus === 'verified'
+                  ? 'bg-profit/20'
+                  : kycStatus === 'pending'
+                  ? 'bg-gold/20'
+                  : 'bg-white/10'
+              }`}
+            >
+              <Shield
+                className={`w-4 h-4 ${
+                  kycStatus === 'verified'
+                    ? 'text-profit'
+                    : kycStatus === 'pending'
+                    ? 'text-gold'
+                    : 'text-cream/40'
+                }`}
+              />
+            </div>
+          </div>
+
+          <p
+            className={`text-sm font-bold ${
+              kycStatus === 'verified'
+                ? 'text-profit'
+                : kycStatus === 'pending'
+                ? 'text-gold'
+                : 'text-cream/60'
+            }`}
+          >
+            {kycStatus === 'verified'
+              ? 'Verified ✓'
+              : kycStatus === 'pending'
+              ? 'In Review'
+              : kycStatus === 'rejected'
+              ? 'Rejected'
+              : 'Not Verified'}
+          </p>
+
+          <p className="text-xs text-cream/40">
+            {kycStatus === 'verified' ? (
+              'Full access enabled'
+            ) : kycStatus === 'pending' ? (
+              'Under review'
+            ) : (
+              <Link href="/kyc" className="text-electric hover:underline">
+                Complete KYC →
+              </Link>
+            )}
+          </p>
+        </div>
       </div>
 
-      {/* Traders Grid */}
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredTraders.map((trader, index) => {
-          const risk = riskColors[trader.riskScore] || riskColors[3];
-          const isCopying = copiedTraders.includes(trader.id);
-          
-          return (
-            <motion.div
-              key={trader.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.05 }}
-              className="bg-white/5 rounded-2xl border border-white/5 overflow-hidden hover:border-white/10 transition-all"
-            >
-              {/* Header */}
-              <div className="p-4 border-b border-white/5">
-                <div className="flex items-start gap-3">
-                  <div className="relative">
-                    <Image
-                      src={trader.avatar}
-                      alt={trader.name}
-                      width={48}
-                      height={48}
-                      className="w-12 h-12 rounded-xl object-cover"
-                    />
-                    {trader.verified && (
-                      <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-electric rounded-full flex items-center justify-center">
-                        <CheckCircle className="w-3 h-3 text-void" />
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-semibold text-cream">{trader.name}</h3>
-                      {trader.verified && (
-                        <span className="text-xs px-2 py-0.5 bg-electric/10 text-electric rounded-full">
-                          Verified
-                        </span>
+      {/* Running Bots Summary */}
+      {bots.filter((b) => b.status === 'running').length > 0 && (
+        <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-semibold text-cream flex items-center gap-2">
+              <Bot className="w-5 h-5 text-electric" /> Active Bots
+            </h2>
+            <Link href="/dashboard/bots" className="text-xs text-electric hover:underline">
+              View All →
+            </Link>
+          </div>
+
+          <div className="space-y-2">
+            {bots
+              .filter((b) => b.status === 'running')
+              .slice(0, 3)
+              .map((bot) => (
+                <div key={bot.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                        bot.bot_type === 'dca' ? 'bg-purple-500/20' : 'bg-orange-500/20'
+                      }`}
+                    >
+                      {bot.bot_type === 'dca' ? (
+                        <Clock className="w-4 h-4 text-purple-400" />
+                      ) : (
+                        <Grid3X3 className="w-4 h-4 text-orange-400" />
                       )}
                     </div>
-                    <p className="text-xs text-slate-500 mt-0.5 line-clamp-1">{trader.bio}</p>
-                  </div>
-                </div>
-              </div>
 
-              {/* Stats */}
-              <div className="p-4 grid grid-cols-3 gap-4">
-                <div>
-                  <p className="text-xs text-slate-500">Total Return</p>
-                  <p className="text-lg font-bold text-profit">
-                    +{trader.totalReturn.toFixed(1)}%
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">Win Rate</p>
-                  <p className="text-lg font-bold text-cream">{trader.winRate}%</p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-500">Followers</p>
-                  <p className="text-lg font-bold text-cream">
-                    {(trader.followers / 1000).toFixed(1)}K
-                  </p>
-                </div>
-              </div>
-
-              {/* Assets & Risk */}
-              <div className="px-4 pb-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex flex-wrap gap-1">
-                    {trader.assets.slice(0, 3).map((asset) => (
-                      <span
-                        key={asset}
-                        className="text-xs px-2 py-1 bg-white/5 text-slate-400 rounded"
-                      >
-                        {asset}
-                      </span>
-                    ))}
-                    {trader.assets.length > 3 && (
-                      <span className="text-xs px-2 py-1 bg-white/5 text-slate-500 rounded">
-                        +{trader.assets.length - 3}
-                      </span>
-                    )}
-                  </div>
-                  <span className={`text-xs px-2 py-1 rounded ${risk.bg} ${risk.text}`}>
-                    {risk.label} Risk
-                  </span>
-                </div>
-
-                {/* Actions */}
-                {isCopying ? (
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 py-2.5 bg-profit/10 text-profit text-sm font-medium rounded-lg text-center">
-                      ✓ Copying
-                    </div>
-                    <button className="p-2.5 bg-white/5 hover:bg-white/10 rounded-lg transition-colors">
-                      <BarChart3 className="w-5 h-5 text-slate-400" />
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => openCopyModal(trader)}
-                    className="w-full py-2.5 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-lg hover:shadow-lg hover:shadow-gold/20 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Copy className="w-4 h-4" />
-                    Copy Trader
-                  </button>
-                )}
-              </div>
-            </motion.div>
-          );
-        })}
-      </div>
-
-      {/* Copy Modal */}
-      <AnimatePresence>
-        {showCopyModal && selectedTrader && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-void/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
-            onClick={() => setShowCopyModal(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              onClick={(e) => e.stopPropagation()}
-              className="bg-charcoal rounded-2xl border border-white/10 w-full max-w-md overflow-hidden"
-            >
-              {/* Modal Header */}
-              <div className="p-5 border-b border-white/5">
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <Image
-                      src={selectedTrader.avatar}
-                      alt={selectedTrader.name}
-                      width={48}
-                      height={48}
-                      className="w-12 h-12 rounded-xl object-cover"
-                    />
                     <div>
-                      <h3 className="text-lg font-semibold text-cream">{selectedTrader.name}</h3>
-                      <p className="text-sm text-profit">+{selectedTrader.totalReturn}% return</p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => setShowCopyModal(false)}
-                    className="p-2 hover:bg-white/5 rounded-lg transition-colors"
-                  >
-                    <X className="w-5 h-5 text-slate-400" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Modal Content */}
-              <div className="p-5 space-y-4">
-                {/* Stats Row */}
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <Target className="w-5 h-5 text-gold mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Win Rate</p>
-                    <p className="text-sm font-bold text-cream">{selectedTrader.winRate}%</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <BarChart3 className="w-5 h-5 text-electric mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Trades</p>
-                    <p className="text-sm font-bold text-cream">{selectedTrader.trades.toLocaleString()}</p>
-                  </div>
-                  <div className="p-3 bg-white/5 rounded-xl text-center">
-                    <Users className="w-5 h-5 text-profit mx-auto mb-1" />
-                    <p className="text-xs text-slate-500">Copiers</p>
-                    <p className="text-sm font-bold text-cream">{(selectedTrader.followers / 1000).toFixed(1)}K</p>
-                  </div>
-                </div>
-
-                {/* Copy Amount */}
-                <div>
-                  <label className="text-sm text-slate-400 mb-2 block">
-                    Copy Amount (USD)
-                  </label>
-                  <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500">$</span>
-                    <input
-                      type="number"
-                      value={copyAmount}
-                      onChange={(e) => setCopyAmount(e.target.value)}
-                      className="w-full pl-8 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-lg font-semibold text-cream focus:outline-none focus:border-gold"
-                    />
-                  </div>
-                  <div className="flex gap-2 mt-2">
-                    {[50, 100, 250, 500].map((amt) => (
-                      <button
-                        key={amt}
-                        onClick={() => setCopyAmount(amt.toString())}
-                        className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                          copyAmount === amt.toString()
-                            ? 'bg-gold text-void'
-                            : 'bg-white/5 text-slate-400 hover:bg-white/10'
-                        }`}
-                      >
-                        ${amt}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Risk Warning */}
-                <div className="p-3 bg-yellow-500/10 rounded-xl border border-yellow-500/20">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
-                    <div className="text-xs text-yellow-200">
-                      <p className="font-medium">Risk Disclosure</p>
-                      <p className="text-yellow-200/80 mt-1">
-                        Past performance doesn&apos;t guarantee future results. Only copy with funds you can afford to lose.
+                      <p className="text-sm font-medium text-cream">{bot.name}</p>
+                      <p className="text-xs text-cream/40">
+                        {bot.pair} • {bot.total_trades} trades
                       </p>
                     </div>
                   </div>
-                </div>
 
-                {/* Balance Check */}
-                {user && parseFloat(copyAmount) > (user.balance || 0) && (
-                  <div className="p-3 bg-loss/10 rounded-xl border border-loss/20 text-center">
-                    <p className="text-sm text-loss mb-2">
-                      Insufficient balance. Available: ${(user.balance || 0).toLocaleString()}
+                  <div className="text-right">
+                    <p className={`text-sm font-bold ${(bot.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
+                      {(bot.total_pnl ?? 0) >= 0 ? '+' : ''}${(bot.total_pnl ?? 0).toFixed(2)}
                     </p>
-                    <Link
-                      href="/dashboard/wallet"
-                      className="inline-flex items-center gap-2 text-sm text-gold hover:text-gold/80 font-medium"
-                    >
-                      <Wallet className="w-4 h-4" />
-                      Deposit Funds
-                    </Link>
+                    <span className="flex items-center gap-1 text-[10px] text-profit">
+                      <span className="w-1.5 h-1.5 bg-profit rounded-full animate-pulse" /> Running
+                    </span>
                   </div>
-                )}
-
-                {/* Copy Button */}
-                <button
-                  onClick={handleCopyTrader}
-                  disabled={!copyAmount || parseFloat(copyAmount) <= 0 || !!(user && parseFloat(copyAmount) > (user.balance || 0))}
-
-                  className="w-full py-4 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  <Copy className="w-5 h-5" />
-                  Start Copying with ${copyAmount}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* How It Works */}
-      <div className="mt-8 p-6 bg-gradient-to-r from-gold/5 to-electric/5 rounded-2xl border border-gold/10">
-        <h2 className="text-lg font-semibold text-cream mb-4">How Copy Trading Works</h2>
-        <div className="grid sm:grid-cols-4 gap-6">
-          {[
-            { icon: Search, title: 'Find Traders', desc: 'Browse top performers by return, win rate, or strategy' },
-            { icon: Copy, title: 'Start Copying', desc: 'Set your investment amount and start automatically copying' },
-            { icon: Zap, title: 'Auto Execute', desc: 'Their trades are replicated in your account in real-time' },
-            { icon: TrendingUp, title: 'Earn Together', desc: 'When they profit, you profit proportionally' },
-          ].map((step, i) => (
-            <div key={i} className="text-center">
-              <div className="w-12 h-12 bg-gold/10 rounded-xl flex items-center justify-center mx-auto mb-3">
-                <step.icon className="w-6 h-6 text-gold" />
-              </div>
-              <h3 className="text-sm font-medium text-cream mb-1">{step.title}</h3>
-              <p className="text-xs text-slate-500">{step.desc}</p>
-            </div>
-          ))}
+                </div>
+              ))}
+          </div>
         </div>
+      )}
+
+      {/* Recent Trades */}
+      <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="font-semibold text-cream flex items-center gap-2">
+            <History className="w-5 h-5 text-gold" /> Recent Activity
+          </h2>
+          <Link href="/dashboard/history" className="text-xs text-electric hover:underline">
+            View All →
+          </Link>
+        </div>
+
+        {recentActivity.length === 0 ? (
+          <p className="text-center py-6 text-cream/30 text-sm">No recent activity</p>
+        ) : (
+          <div className="space-y-2">
+            {recentActivity.map((item: any) => {
+              const isPositive = item.kind === 'deposit' || item.kind === 'bonus' || item.kind === 'tier' || item.pnl >= 0;
+              const iconColor = item.kind === 'deposit' ? 'bg-electric/20' :
+                item.kind === 'tier' ? 'bg-gold/20' :
+                item.kind === 'bonus' ? 'bg-purple-500/20' :
+                isPositive ? 'bg-profit/20' : 'bg-loss/20';
+              const textColor = item.kind === 'deposit' ? 'text-electric' :
+                item.kind === 'tier' ? 'text-gold' :
+                item.kind === 'bonus' ? 'text-purple-400' :
+                isPositive ? 'text-profit' : 'text-loss';
+
+              return (
+                <div key={item.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${iconColor}`}>
+                      {item.kind === 'deposit' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.kind === 'tier' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.kind === 'bonus' ? (
+                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                      ) : item.pnl >= 0 ? (
+                        <ArrowUpRight className="w-4 h-4 text-profit" />
+                      ) : (
+                        <ArrowDownRight className="w-4 h-4 text-loss" />
+                      )}
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-medium text-cream">{item.label}</p>
+                      <p className="text-xs text-cream/40">
+                        {item.sublabel} • {new Date(item.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="text-right">
+                    <p className={`text-sm font-bold ${textColor}`}>
+                      {item.kind === 'trade' ? (
+                        <>{item.pnl >= 0 ? '+' : ''}${Number(item.pnl).toFixed(2)}</>
+                      ) : (
+                        <>+${Number(item.amount).toFixed(2)}</>
+                      )}
+                    </p>
+                    {item.kind === 'trade' && (
+                      <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>
+                    )}
+                    {item.kind !== 'trade' && item.status && (
+                      <p className={`text-xs ${item.status === 'approved' || item.status === 'completed' ? 'text-emerald-400/60' : item.status === 'pending' ? 'text-yellow-400/60' : 'text-cream/40'}`}>
+                        {item.status}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Quick Links */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: 'Trading Bots', href: '/dashboard/bots', icon: Bot, color: 'text-purple-400' },
+          { label: 'Portfolio', href: '/dashboard/portfolio', icon: BarChart3, color: 'text-electric' },
+          { label: 'Trade History', href: '/dashboard/history', icon: History, color: 'text-gold' },
+          { label: 'Settings', href: '/dashboard/settings', icon: Settings, color: 'text-cream/60' },
+        ].map((link) => (
+          <Link
+            key={link.href}
+            href={link.href}
+            className="flex items-center gap-3 p-4 bg-white/5 rounded-xl border border-white/10 hover:border-white/20 transition-all group"
+          >
+            <link.icon className={`w-5 h-5 ${link.color}`} />
+            <span className="text-sm text-cream/70 group-hover:text-cream transition-colors">{link.label}</span>
+            <ChevronRight className="w-4 h-4 text-cream/20 ml-auto" />
+          </Link>
+        ))}
       </div>
     </div>
   );

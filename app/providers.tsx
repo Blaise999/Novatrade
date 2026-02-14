@@ -2,39 +2,42 @@
 
 /**
  * APP PROVIDERS
- * 
- * Wraps the app with all necessary providers:
- * - AuthProvider (session hydration from localStorage/Supabase)
- * - Web3Provider (Wagmi + RainbowKit + TanStack Query)
- * 
- * ✅ HYDRATION FIX: Web3Provider is loaded with next/dynamic ssr:false
- * because RainbowKit/Wagmi inject portal elements & styles during SSR
- * that cause React #418 (hydration mismatch) on the client.
+ *
+ * ✅ HYDRATION FIX:
+ * - Server renders: AuthProvider → children (page content IS in server HTML)
+ * - Client 1st render: same (mounted=false, so Web3 wrapper is skipped)
+ * - Client after useEffect: AuthProvider → Web3Provider → children
+ *
+ * This ensures server HTML matches client first render (no hydration mismatch).
+ * Web3/RainbowKit wrapping is added AFTER hydration completes.
+ *
+ * The old approach used `next/dynamic({ ssr: false })` which SWALLOWED {children}
+ * on the server (loading:()=>null ate the page content) → empty server HTML →
+ * massive #418 hydration mismatch → #423 recovery → appendChild DOM errors.
  */
 
-import { ReactNode } from 'react';
-import dynamic from 'next/dynamic';
+import { ReactNode, useState, useEffect } from 'react';
 import { AuthProvider } from '@/lib/supabase/auth-provider';
-
-// ✅ HYDRATION FIX: Load Web3Provider client-only to prevent SSR mismatch
-const Web3Provider = dynamic(
-  () => import('@/lib/wagmi/provider').then(mod => ({ default: mod.Web3Provider })),
-  {
-    ssr: false,
-    loading: () => null, // AuthProvider handles loading state
-  }
-);
+import { Web3Provider } from '@/lib/wagmi/provider';
 
 interface ProvidersProps {
   children: ReactNode;
 }
 
 export function Providers({ children }: ProvidersProps) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   return (
     <AuthProvider>
-      <Web3Provider>
-        {children}
-      </Web3Provider>
+      {mounted ? (
+        <Web3Provider>{children}</Web3Provider>
+      ) : (
+        children
+      )}
     </AuthProvider>
   );
 }

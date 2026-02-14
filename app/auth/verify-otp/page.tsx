@@ -1,15 +1,20 @@
 'use client';
 
-import { Suspense, useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { ArrowLeft, CheckCircle, Loader2, RefreshCw, Mail } from 'lucide-react';
-import { useStore } from '@/lib/auth/store';
+
+// ✅ FIX: import BOTH stores
+import { useOtpStore, useStore, supabase } from '@/lib/auth/store';
+
 import { useEmail } from '@/hooks/useEmail';
 
 const REF_KEY = 'novatrade_signup_ref';
+
+type OtpResult = { success: boolean; error?: string };
 
 function safeStringify(v: any) {
   try {
@@ -33,29 +38,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
-/**
- * ✅ IMPORTANT:
- * Default export MUST wrap the component that calls useSearchParams() in Suspense
- * to avoid Next build "missing-suspense-with-csr-bailout".
- */
 export default function VerifyOTPPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-[60vh] flex items-center justify-center">
-          <div className="flex items-center gap-2 text-slate-400">
-            <Loader2 className="w-5 h-5 animate-spin" />
-            <span>Loading…</span>
-          </div>
-        </div>
-      }
-    >
-      <VerifyOTPInner />
-    </Suspense>
-  );
-}
-
-function VerifyOTPInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -83,9 +66,14 @@ function VerifyOTPInner() {
     } catch {}
   }, [searchParams]);
 
-  // ✅ use clearOtp instead of setOtpPassword(null)
-  const { otpEmail, otpName, otpPassword, redirectUrl, clearOtp, signup } = useStore();
-  const { sendOTP, verifyOTP, sendWelcome } = useEmail();
+  const { otpEmail, otpName, otpPassword, redirectUrl, setOtpPassword } = useOtpStore();
+  const { signup } = useStore();
+
+  // ✅ FIX: useEmail may be typed loosely in your project, so we type-cast results safely
+  const emailApi = useEmail() as any;
+  const sendOTP = emailApi.sendOTP as (...args: any[]) => Promise<any>;
+  const verifyOTP = emailApi.verifyOTP as (...args: any[]) => Promise<any>;
+  const sendWelcome = emailApi.sendWelcome as undefined | ((email: string, name: string) => Promise<any>);
 
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [isLoading, setIsLoading] = useState(false);
@@ -253,12 +241,9 @@ function VerifyOTPInner() {
     try {
       if (source === 'auto') lastAutoSubmittedCodeRef.current = code;
 
-      // 1) Verify OTP
-      const result = await withTimeout(
-        verifyOTP(otpEmail, code, 'email_verification'),
-        25000,
-        'verifyOTP'
-      );
+      // 1) Verify OTP (typed cast fixes TS2339 on success/error)
+      const result = (await withTimeout(verifyOTP(otpEmail, code), 25000, 'verifyOTP')) as OtpResult;
+
       const t1 = typeof performance !== 'undefined' ? performance.now() : Date.now();
       pushLog('verifyOTP result', result, `elapsed_ms=${Math.round(t1 - t0)}`);
 
@@ -282,15 +267,10 @@ function VerifyOTPInner() {
 
       pushLog('signup start', { email: otpEmail, firstName, lastName });
 
-      const signupResult = await withTimeout(
-        signup(otpEmail, otpPassword, firstName, lastName),
-        25000,
-        'supabase.signup'
-      );
-
+      const signupResult = await withTimeout(signup(otpEmail, otpPassword, firstName, lastName), 25000, 'signup');
       pushLog('signup result', { signupResult });
 
-      if (!signupResult || !signupResult.success) {
+      if (!signupResult?.success) {
         setError(
           signupResult?.error ||
             'Account creation failed. If this email already exists, go to Login.'
@@ -300,22 +280,28 @@ function VerifyOTPInner() {
         return;
       }
 
-      const userId = (signupResult as any)?.user?.id || '';
-      if (userId) await completeReferral(userId);
+      // ✅ get userId from current session (store.signup returns only success/error)
+      try {
+        const sess = await supabase.auth.getSession();
+        const userId = sess.data.session?.user?.id || '';
+        if (userId) await completeReferral(userId);
+      } catch {}
 
       setIsVerified(true);
 
-      // Welcome email (ignore failure)
-      try {
-        pushLog('sendWelcome start');
-        await withTimeout(sendWelcome(otpEmail, otpName || 'User'), 15000, 'sendWelcome');
-        pushLog('sendWelcome ok');
-      } catch (e: any) {
-        pushLog('sendWelcome failed (ignored)', e?.message || e);
+      // Welcome email (ignore failure) — only if function exists
+      if (sendWelcome) {
+        try {
+          pushLog('sendWelcome start');
+          await withTimeout(sendWelcome(otpEmail, otpName || 'User'), 15000, 'sendWelcome');
+          pushLog('sendWelcome ok');
+        } catch (e: any) {
+          pushLog('sendWelcome failed (ignored)', e?.message || e);
+        }
       }
 
-      // ✅ FIX: don't do setOtpPassword(null)
-      clearOtp();
+      // ✅ FIX: setOtpPassword expects string, not null
+      setOtpPassword('');
 
       setTimeout(() => {
         const destination = redirectUrl || '/kyc';
@@ -342,11 +328,7 @@ function VerifyOTPInner() {
     pushLog('resend start', { otpEmail });
 
     try {
-      const result = await withTimeout(
-        sendOTP(otpEmail, otpName || 'User', 'email_verification'),
-        20000,
-        'sendOTP'
-      );
+      const result = (await withTimeout(sendOTP(otpEmail, otpName || 'User'), 20000, 'sendOTP')) as OtpResult;
       pushLog('sendOTP result', result);
 
       if (result.success) {

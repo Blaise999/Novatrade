@@ -5,10 +5,8 @@
  *
  * - useStore(): user auth + user actions
  * - useAdminStore(): admin actions
- *
- * Includes OTP carry-over state used by:
- * - /app/auth/signup/page.tsx
- * - /app/auth/verify-otp/page.tsx
+ * - useOtpStore(): alias of useStore (OTP temp fields)
+ * - useKYCStore(): alias of useStore (KYC helpers)
  */
 
 import { create } from 'zustand';
@@ -23,53 +21,6 @@ async function withTimeout<T>(p: PromiseLike<T>, ms = 8000): Promise<T> {
     new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`timeout_${ms}ms`)), ms)),
   ]);
 }
-
-// ============================================
-// STORAGE HELPERS
-// ============================================
-function ssGet(key: string): string | null {
-  try {
-    return typeof window !== 'undefined' ? sessionStorage.getItem(key) : null;
-  } catch {
-    return null;
-  }
-}
-function ssSet(key: string, val: string) {
-  try {
-    if (typeof window !== 'undefined') sessionStorage.setItem(key, val);
-  } catch {}
-}
-function ssRemove(key: string) {
-  try {
-    if (typeof window !== 'undefined') sessionStorage.removeItem(key);
-  } catch {}
-}
-function lsGet(key: string): string | null {
-  try {
-    return typeof window !== 'undefined' ? localStorage.getItem(key) : null;
-  } catch {
-    return null;
-  }
-}
-function lsSet(key: string, val: string) {
-  try {
-    if (typeof window !== 'undefined') localStorage.setItem(key, val);
-  } catch {}
-}
-function lsRemove(key: string) {
-  try {
-    if (typeof window !== 'undefined') localStorage.removeItem(key);
-  } catch {}
-}
-
-// Session + OTP keys
-const SESSION_KEY = 'novatrade_session';
-const USERS_KEY = 'novatrade_users';
-
-const OTP_EMAIL_KEY = 'novatrade_otp_email';
-const OTP_NAME_KEY = 'novatrade_otp_name';
-const OTP_PASSWORD_KEY = 'novatrade_otp_password';
-const OTP_REDIRECT_KEY = 'novatrade_otp_redirect';
 
 // ============================================
 // TYPES
@@ -218,7 +169,11 @@ interface AuthStore {
   isLoading: boolean;
   error: string | null;
 
-  // OTP flow carry-over (Signup → Verify OTP)
+  deposits: Deposit[];
+  trades: Trade[];
+  paymentMethods: PaymentMethod[];
+
+  // ✅ OTP TEMP STATE (signup -> verify-otp)
   otpEmail: string;
   otpName: string;
   otpPassword: string;
@@ -229,10 +184,6 @@ interface AuthStore {
   setOtpPassword: (v: string) => void;
   setRedirectUrl: (v: string) => void;
   clearOtp: () => void;
-
-  deposits: Deposit[];
-  trades: Trade[];
-  paymentMethods: PaymentMethod[];
 
   login: (
     email: string,
@@ -280,47 +231,34 @@ export const useStore = create<AuthStore>((set, get) => ({
   isLoading: true, // ✅ Start true — prevents redirect before checkSession runs
   error: null,
 
-  // OTP state restored from sessionStorage (so refresh on OTP page still works)
-  otpEmail: ssGet(OTP_EMAIL_KEY) || '',
-  otpName: ssGet(OTP_NAME_KEY) || '',
-  otpPassword: ssGet(OTP_PASSWORD_KEY) || '',
-  redirectUrl: ssGet(OTP_REDIRECT_KEY) || '',
-
-  setOtpEmail: (v) => {
-    set({ otpEmail: v });
-    ssSet(OTP_EMAIL_KEY, v);
-  },
-  setOtpName: (v) => {
-    set({ otpName: v });
-    ssSet(OTP_NAME_KEY, v);
-  },
-  setOtpPassword: (v) => {
-    set({ otpPassword: v });
-    ssSet(OTP_PASSWORD_KEY, v);
-  },
-  setRedirectUrl: (v) => {
-    set({ redirectUrl: v });
-    ssSet(OTP_REDIRECT_KEY, v);
-  },
-  clearOtp: () => {
-    set({ otpEmail: '', otpName: '', otpPassword: '', redirectUrl: '' });
-    ssRemove(OTP_EMAIL_KEY);
-    ssRemove(OTP_NAME_KEY);
-    ssRemove(OTP_PASSWORD_KEY);
-    ssRemove(OTP_REDIRECT_KEY);
-  },
-
   deposits: [],
   trades: [],
   paymentMethods: [],
+
+  // ✅ OTP defaults
+  otpEmail: '',
+  otpName: '',
+  otpPassword: '',
+  redirectUrl: '/dashboard',
+
+  setOtpEmail: (v) => set({ otpEmail: v }),
+  setOtpName: (v) => set({ otpName: v }),
+  setOtpPassword: (v) => set({ otpPassword: v }),
+  setRedirectUrl: (v) => set({ redirectUrl: v }),
+  clearOtp: () =>
+    set({
+      otpEmail: '',
+      otpName: '',
+      otpPassword: '',
+      redirectUrl: '/dashboard',
+    }),
 
   login: async (email, password) => {
     set({ isLoading: true, error: null });
 
     try {
-      // DEMO MODE (no supabase)
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(lsGet(USERS_KEY) || '[]');
+        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         const found = users.find(
           (u: any) => u.email === email.toLowerCase() && u.password === password
         );
@@ -328,8 +266,11 @@ export const useStore = create<AuthStore>((set, get) => ({
 
         const { password: _pw, ...userWithoutPw } = found;
 
-        // ✅ Use sessionStorage to match checkSession()
-        ssSet(SESSION_KEY, JSON.stringify(userWithoutPw));
+        // keep old behavior but also support sessionStorage fallback
+        try {
+          sessionStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
+        } catch {}
+        localStorage.setItem('novatrade_session', JSON.stringify(userWithoutPw));
 
         set({ user: userWithoutPw, isAuthenticated: true });
 
@@ -337,7 +278,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return { success: true, redirect: getRegistrationRedirect(status) };
       }
 
-      // SUPABASE MODE
       const authRes = await withTimeout(
         supabase.auth.signInWithPassword({ email, password }),
         8000
@@ -433,9 +373,8 @@ export const useStore = create<AuthStore>((set, get) => ({
     set({ isLoading: true, error: null });
 
     try {
-      // DEMO MODE
       if (!isSupabaseConfigured()) {
-        const users = JSON.parse(lsGet(USERS_KEY) || '[]');
+        const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
         if (users.find((u: any) => u.email === email.toLowerCase())) {
           set({ error: 'Email already registered' });
           return { success: false, error: 'Email already registered' };
@@ -460,16 +399,17 @@ export const useStore = create<AuthStore>((set, get) => ({
         };
 
         users.push({ ...newUser, password });
-        lsSet(USERS_KEY, JSON.stringify(users));
+        localStorage.setItem('novatrade_users', JSON.stringify(users));
 
-        // ✅ Use sessionStorage (matches checkSession)
-        ssSet(SESSION_KEY, JSON.stringify(newUser));
+        try {
+          sessionStorage.setItem('novatrade_session', JSON.stringify(newUser));
+        } catch {}
+        localStorage.setItem('novatrade_session', JSON.stringify(newUser));
 
         set({ user: newUser, isAuthenticated: true });
         return { success: true };
       }
 
-      // SUPABASE MODE
       const res = await withTimeout(
         supabase.auth.signUp({
           email,
@@ -505,15 +445,14 @@ export const useStore = create<AuthStore>((set, get) => ({
   logout: async () => {
     try {
       if (!isSupabaseConfigured()) {
-        ssRemove(SESSION_KEY);
-        lsRemove(SESSION_KEY); // just in case older builds saved here
+        try {
+          sessionStorage.removeItem('novatrade_session');
+        } catch {}
+        localStorage.removeItem('novatrade_session');
       } else {
         await supabase.auth.signOut();
       }
     } finally {
-      // ✅ Clear OTP carry-over
-      get().clearOtp();
-
       // ✅ Clear ALL trading persist stores to prevent data leaks between users
       const tradingKeys = [
         'novatrade-trading-accounts',
@@ -525,7 +464,6 @@ export const useStore = create<AuthStore>((set, get) => ({
       tradingKeys.forEach((key) => {
         try {
           localStorage.removeItem(key);
-          sessionStorage.removeItem(key);
         } catch {}
       });
 
@@ -537,6 +475,12 @@ export const useStore = create<AuthStore>((set, get) => ({
         trades: [],
         paymentMethods: [],
         error: null,
+
+        // reset OTP too
+        otpEmail: '',
+        otpName: '',
+        otpPassword: '',
+        redirectUrl: '/dashboard',
       });
     }
   },
@@ -545,13 +489,17 @@ export const useStore = create<AuthStore>((set, get) => ({
     set({ isLoading: true });
 
     try {
-      // DEMO MODE
       if (!isSupabaseConfigured()) {
-        // ✅ sessionStorage is the source of truth
-        const session = ssGet(SESSION_KEY) || lsGet(SESSION_KEY); // fallback for older builds
+        // ✅ support both, migrate to sessionStorage if only local exists
+        let session =
+          (typeof sessionStorage !== 'undefined'
+            ? sessionStorage.getItem('novatrade_session')
+            : null) || localStorage.getItem('novatrade_session');
+
         if (session) {
-          // migrate if needed
-          if (!ssGet(SESSION_KEY)) ssSet(SESSION_KEY, session);
+          try {
+            sessionStorage.setItem('novatrade_session', session);
+          } catch {}
           set({ user: JSON.parse(session), isAuthenticated: true });
         } else {
           set({ user: null, isAuthenticated: false });
@@ -559,7 +507,6 @@ export const useStore = create<AuthStore>((set, get) => ({
         return;
       }
 
-      // SUPABASE MODE
       const sessRes = await withTimeout(supabase.auth.getSession(), 8000);
       const session = (sessRes as any).data?.session;
 
@@ -597,17 +544,22 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, ...updates };
-        // ✅ sessionStorage is the source of truth
-        ssSet(SESSION_KEY, JSON.stringify(updatedUser));
-        // ✅ Also update the users array so changes survive re-login
+
         try {
-          const users = JSON.parse(lsGet(USERS_KEY) || '[]');
+          sessionStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        } catch {}
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+
+        // Also update users array so changes survive re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
           const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
           if (idx >= 0) {
             users[idx] = { ...users[idx], ...updates };
-            lsSet(USERS_KEY, JSON.stringify(users));
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
           }
         } catch {}
+
         set({ user: updatedUser });
         return true;
       }
@@ -644,16 +596,22 @@ export const useStore = create<AuthStore>((set, get) => ({
     try {
       if (!isSupabaseConfigured()) {
         const updatedUser = { ...user, registrationStatus: status };
-        ssSet(SESSION_KEY, JSON.stringify(updatedUser));
-        // ✅ Also update the users array so status survives re-login
+
         try {
-          const users = JSON.parse(lsGet(USERS_KEY) || '[]');
+          sessionStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        } catch {}
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+
+        // Also update users array so status survives re-login
+        try {
+          const users = JSON.parse(localStorage.getItem('novatrade_users') || '[]');
           const idx = users.findIndex((u: any) => u.id === user.id || u.email === user.email);
           if (idx >= 0) {
             users[idx] = { ...users[idx], registrationStatus: status };
-            lsSet(USERS_KEY, JSON.stringify(users));
+            localStorage.setItem('novatrade_users', JSON.stringify(users));
           }
         } catch {}
+
         set({ user: updatedUser });
         return true;
       }
@@ -678,6 +636,7 @@ export const useStore = create<AuthStore>((set, get) => ({
 
       if (data) set({ user: dbRowToUser(data) });
       else set({ user: { ...user, registrationStatus: status } });
+
       return true;
     } catch (e: any) {
       set({ error: e?.message || 'Failed to update registration status' });
@@ -691,7 +650,6 @@ export const useStore = create<AuthStore>((set, get) => ({
 
     try {
       const isPassed = status === 'verified' || status === 'approved';
-
       const nextRegistrationStatus: RegistrationStatus =
         isPassed && user.registrationStatus === 'pending_kyc'
           ? 'pending_wallet'
@@ -703,7 +661,12 @@ export const useStore = create<AuthStore>((set, get) => ({
           kycStatus: status,
           registrationStatus: nextRegistrationStatus,
         };
-        ssSet(SESSION_KEY, JSON.stringify(updatedUser));
+
+        try {
+          sessionStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+        } catch {}
+        localStorage.setItem('novatrade_session', JSON.stringify(updatedUser));
+
         set({ user: updatedUser });
         return true;
       }
@@ -1078,23 +1041,19 @@ if (typeof window !== 'undefined' && isSupabaseConfigured()) {
           trades: [],
           paymentMethods: [],
           error: null,
-
-          // otp
           otpEmail: '',
           otpName: '',
           otpPassword: '',
-          redirectUrl: '',
+          redirectUrl: '/dashboard',
         });
-
-        // also clear otp session keys
-        ssRemove(OTP_EMAIL_KEY);
-        ssRemove(OTP_NAME_KEY);
-        ssRemove(OTP_PASSWORD_KEY);
-        ssRemove(OTP_REDIRECT_KEY);
       }
     });
   }
 }
 
-// Back-compat exports (so old imports still work)
+// ✅ Back-compat exports (keep)
 export { supabase, isSupabaseConfigured };
+
+// ✅ FIXES FOR YOUR ERRORS:
+export const useOtpStore = useStore;
+export const useKYCStore = useStore;

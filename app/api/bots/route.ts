@@ -1,39 +1,21 @@
 /**
- * BOT ACTIVATION KEYS API
+ * BOT API ROUTES
  *
- * GET  /api/bots/keys?action=list                 — admin: list all keys
- * GET  /api/bots/keys?action=check&userId=<id>    — user: check their bot access
- * POST /api/bots/keys  { action:'generate', botType, adminId, notes, count }  — admin: generate key(s)
- * POST /api/bots/keys  { action:'redeem', key, userId }                       — user: redeem key
- * PATCH /api/bots/keys { action:'revoke', keyId }                             — admin: revoke key
+ * GET  /api/bots            — list user's bots
+ * GET  /api/bots?id=xxx     — single bot detail (config + levels + orders)
+ * POST /api/bots            — create DCA or Grid bot
+ * PATCH /api/bots           — start / stop / pause
+ * DELETE /api/bots?id=xxx   — delete a stopped bot
  */
-
-export const runtime = 'nodejs';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import crypto from 'crypto';
-
-type BotType = 'dca' | 'grid';
 
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  {
-    auth: { autoRefreshToken: false, persistSession: false },
-  }
+  { auth: { autoRefreshToken: false, persistSession: false } },
 );
-
-// ============================================
-// HELPERS
-// ============================================
-function generateActivationKey(botType: BotType): string {
-  const prefix = botType === 'dca' ? 'DCA' : 'GRID';
-  const seg1 = crypto.randomBytes(2).toString('hex').toUpperCase();
-  const seg2 = crypto.randomBytes(2).toString('hex').toUpperCase();
-  const seg3 = crypto.randomBytes(2).toString('hex').toUpperCase();
-  return `${prefix}-${seg1}-${seg2}-${seg3}`;
-}
 
 // ============================================
 // GET
@@ -41,343 +23,270 @@ function generateActivationKey(botType: BotType): string {
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
-    const action = searchParams.get('action') || 'list';
-    const userId = searchParams.get('userId');
+    const userId = request.headers.get('x-user-id') || searchParams.get('userId');
+    const botId = searchParams.get('id');
 
-    // --- User: check their bot access ---
-    if (action === 'check') {
-      if (!userId) {
-        return NextResponse.json(
-          { success: false, error: 'userId is required' },
-          { status: 400 }
-        );
-      }
-
-      const { data: access, error } = await supabaseAdmin
-        .from('user_bot_access')
-        .select('*')
-        .eq('user_id', userId)
-        .eq('is_active', true);
-
-      if (error) {
-        return NextResponse.json(
-          { success: false, error: error.message },
-          { status: 500 }
-        );
-      }
-
-      const dcaActive = (access ?? []).some((a: any) => a.bot_type === 'dca');
-      const gridActive = (access ?? []).some((a: any) => a.bot_type === 'grid');
-
-      return NextResponse.json({
-        success: true,
-        access: { dca: dcaActive, grid: gridActive },
-        records: access ?? [],
-      });
+    if (!userId) {
+      return NextResponse.json({ success: false, error: 'userId required' }, { status: 400 });
     }
 
-    // --- Admin: list all keys ---
-    const { data: keys, error } = await supabaseAdmin
-      .from('bot_activation_keys')
+    // Single bot detail
+    if (botId) {
+      const { data: bot, error } = await supabaseAdmin
+        .from('trading_bots')
+        .select('*')
+        .eq('id', botId)
+        .eq('user_id', userId)
+        .single();
+
+      if (error || !bot) {
+        return NextResponse.json({ success: false, error: 'Bot not found' }, { status: 404 });
+      }
+
+      // Attach config
+      if (bot.bot_type === 'dca') {
+        const { data: cfg } = await supabaseAdmin.from('dca_bot_config').select('*').eq('bot_id', botId).single();
+        bot.dca_config = cfg;
+      } else {
+        const { data: cfg } = await supabaseAdmin.from('grid_bot_config').select('*').eq('bot_id', botId).single();
+        bot.grid_config = cfg;
+        const { data: levels } = await supabaseAdmin.from('grid_levels').select('*').eq('bot_id', botId).order('level_index');
+        bot.grid_levels = levels ?? [];
+      }
+
+      // Recent orders
+      const { data: orders } = await supabaseAdmin
+        .from('bot_orders')
+        .select('*')
+        .eq('bot_id', botId)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      bot.orders = orders ?? [];
+
+      // Activity
+      const { data: activity } = await supabaseAdmin
+        .from('bot_activity_log')
+        .select('*')
+        .eq('bot_id', botId)
+        .order('created_at', { ascending: false })
+        .limit(30);
+      bot.activity = activity ?? [];
+
+      return NextResponse.json({ success: true, bot });
+    }
+
+    // List all bots
+    const { data: bots, error } = await supabaseAdmin
+      .from('trading_bots')
       .select('*')
+      .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
     if (error) {
-      return NextResponse.json(
-        { success: false, error: error.message },
-        { status: 500 }
-      );
+      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    const total = (keys ?? []).length;
-    const unused = (keys ?? []).filter((k: any) => k.status === 'unused').length;
-    const active = (keys ?? []).filter((k: any) => k.status === 'active').length;
-    const revoked = (keys ?? []).filter((k: any) => k.status === 'revoked').length;
-
-    return NextResponse.json({
-      success: true,
-      keys: keys ?? [],
-      stats: { total, unused, active, revoked },
-    });
+    return NextResponse.json({ success: true, bots: bots ?? [] });
   } catch (err: any) {
-    return NextResponse.json(
-      { success: false, error: err?.message || 'Unknown error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
 
 // ============================================
-// POST
+// POST — Create
 // ============================================
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const action: string | undefined = body?.action;
+    const { userId, botType } = body;
 
-    // --- Admin: generate new key(s) ---
-    if (action === 'generate') {
-      const botType: BotType | undefined = body?.botType;
-      const adminId: string | undefined = body?.adminId;
-      const notes: string | null | undefined = body?.notes;
-      const count: number | undefined = body?.count;
-
-      if (!botType || !['dca', 'grid'].includes(botType)) {
-        return NextResponse.json(
-          { success: false, error: 'botType must be dca or grid' },
-          { status: 400 }
-        );
-      }
-
-      const numKeys = Math.min(Number.isFinite(count) ? Number(count) : 1, 50);
-      const generatedKeys: any[] = [];
-
-      for (let i = 0; i < numKeys; i++) {
-        // Try a few times in case of rare key collision (assuming unique constraint)
-        let created: any = null;
-
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const key = generateActivationKey(botType);
-
-          const { data, error } = await supabaseAdmin
-            .from('bot_activation_keys')
-            .insert({
-              activation_key: key,
-              bot_type: botType,
-              status: 'unused',
-              generated_by: adminId || 'admin',
-              notes: notes ?? null,
-            })
-            .select()
-            .single();
-
-          if (!error && data) {
-            created = data;
-            break;
-          }
-        }
-
-        if (created) generatedKeys.push(created);
-      }
-
-      return NextResponse.json({
-        success: true,
-        keys: generatedKeys,
-        count: generatedKeys.length,
-      });
+    if (!userId || !botType) {
+      return NextResponse.json({ success: false, error: 'userId and botType required' }, { status: 400 });
     }
 
-    // --- User: redeem activation key ---
-    if (action === 'redeem') {
-      const key: string | undefined = body?.key;
-      const userId: string | undefined = body?.userId;
+    // === TIER GATING ===
+    // DCA bots require Tier >= 2, Grid bots require Tier >= 3
+    const requiredTier = botType === 'dca' ? 2 : botType === 'grid' ? 3 : 2;
+    const tierNames: Record<number, string> = { 2: 'Trader', 3: 'Professional' };
+    const { data: userTier } = await supabaseAdmin
+      .from('users')
+      .select('tier_level, tier_active')
+      .eq('id', userId)
+      .maybeSingle();
 
-      if (!key || !userId) {
-        return NextResponse.json(
-          { success: false, error: 'key and userId required' },
-          { status: 400 }
-        );
-      }
+    const userLevel = Number(userTier?.tier_level ?? 0);
+    const tierActive = Boolean(userTier?.tier_active);
 
-      const normalizedKey = key.trim().toUpperCase();
-
-      // Find the key
-      const { data: keyRecord, error: findErr } = await supabaseAdmin
-        .from('bot_activation_keys')
-        .select('*')
-        .eq('activation_key', normalizedKey)
-        .single();
-
-      if (findErr || !keyRecord) {
-        return NextResponse.json(
-          { success: false, error: 'Invalid activation key. Please check and try again.' },
-          { status: 404 }
-        );
-      }
-
-      if (keyRecord.status === 'active') {
-        return NextResponse.json(
-          { success: false, error: 'This key has already been used.' },
-          { status: 400 }
-        );
-      }
-
-      if (keyRecord.status === 'revoked') {
-        return NextResponse.json(
-          { success: false, error: 'This key has been revoked.' },
-          { status: 400 }
-        );
-      }
-
-      const botType: BotType = keyRecord.bot_type;
-
-      // Check if user already has this bot
-      const { data: existingAccess, error: existingErr } = await supabaseAdmin
-        .from('user_bot_access')
-        .select('id')
-        .eq('user_id', userId)
-        .eq('bot_type', botType)
-        .eq('is_active', true)
-        .maybeSingle();
-
-      if (existingErr) {
-        return NextResponse.json(
-          { success: false, error: existingErr.message },
-          { status: 500 }
-        );
-      }
-
-      if (existingAccess) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: `You already have ${botType.toUpperCase()} bot access activated.`,
-          },
-          { status: 400 }
-        );
-      }
-
-      // Get user email for record-keeping
-      const { data: userRecord } = await supabaseAdmin
-        .from('users')
-        .select('email')
-        .eq('id', userId)
-        .maybeSingle();
-
-      // Activate key
-      const now = new Date().toISOString();
-      const { error: updateErr } = await supabaseAdmin
-        .from('bot_activation_keys')
-        .update({
-          status: 'active',
-          user_id: userId,
-          user_email: userRecord?.email || null,
-          activated_at: now,
-        })
-        .eq('id', keyRecord.id);
-
-      if (updateErr) {
-        return NextResponse.json(
-          { success: false, error: 'Failed to activate key' },
-          { status: 500 }
-        );
-      }
-
-      // Grant bot access
-      const { error: accessErr } = await supabaseAdmin.from('user_bot_access').insert({
-        user_id: userId,
-        bot_type: botType,
-        activation_key_id: keyRecord.id,
-        is_active: true,
-      });
-
-      if (accessErr) {
-        console.error('[BotKeys] access grant error:', accessErr);
-      }
-
-      // Log activity (best-effort)
-      const { error: logErr } = await supabaseAdmin.from('bot_activity_log').insert({
-        bot_id: keyRecord.id,
-        action: 'key_redeemed',
-        details: { key: normalizedKey, botType, userId },
-      });
-
-      if (logErr) {
-        console.warn('[BotKeys] activity log error:', logErr);
-      }
-
+    if (!tierActive || userLevel < requiredTier) {
       return NextResponse.json({
-        success: true,
-        botType,
-        message: `${botType.toUpperCase()} bot activated successfully! You can now create and run ${botType.toUpperCase()} bots.`,
-      });
+        success: false,
+        error: `Upgrade required: You need ${tierNames[requiredTier] || 'Tier ' + requiredTier} to use ${botType === 'dca' ? 'DCA' : 'GridWarrior'} Bots. Your current tier: ${userLevel === 0 ? 'Basic' : 'Tier ' + userLevel}.`,
+        requiresTier: requiredTier,
+      }, { status: 403 });
     }
 
-    return NextResponse.json(
-      { success: false, error: 'Invalid action' },
-      { status: 400 }
-    );
+    if (botType === 'dca') {
+      const { name, pair, orderAmount, frequency, takeProfitPct, stopLossPct,
+        trailingTpEnabled, trailingTpDeviation,
+        safetyOrdersEnabled, maxSafetyOrders, safetyOrderSize,
+        safetyOrderStepPct, safetyOrderStepScale, safetyOrderVolumeScale } = body;
+
+      if (!pair || !orderAmount) {
+        return NextResponse.json({ success: false, error: 'pair and orderAmount required' }, { status: 400 });
+      }
+
+      const { data: bot, error: botErr } = await supabaseAdmin.from('trading_bots').insert({
+        user_id: userId, bot_type: 'dca', name: name || `DCA ${pair}`, pair, status: 'stopped',
+      }).select().single();
+
+      if (botErr) return NextResponse.json({ success: false, error: botErr.message }, { status: 500 });
+
+      const { data: cfg, error: cfgErr } = await supabaseAdmin.from('dca_bot_config').insert({
+        bot_id: bot.id, order_amount: orderAmount, frequency: frequency || '4h',
+        take_profit_pct: takeProfitPct ?? 3.0, stop_loss_pct: stopLossPct ?? null,
+        trailing_tp_enabled: trailingTpEnabled ?? false, trailing_tp_deviation: trailingTpDeviation ?? 1.0,
+        safety_orders_enabled: safetyOrdersEnabled ?? false, max_safety_orders: maxSafetyOrders ?? 5,
+        safety_order_size: safetyOrderSize ?? orderAmount, safety_order_step_pct: safetyOrderStepPct ?? 2.0,
+        safety_order_step_scale: safetyOrderStepScale ?? 1.0, safety_order_volume_scale: safetyOrderVolumeScale ?? 1.5,
+      }).select().single();
+
+      await supabaseAdmin.from('bot_activity_log').insert({ bot_id: bot.id, action: 'created', details: { type: 'dca' } });
+      return NextResponse.json({ success: true, bot: { ...bot, dca_config: cfg } });
+    }
+
+    if (botType === 'grid') {
+      const { name, pair, upperPrice, lowerPrice, gridCount, gridType, totalInvestment,
+        strategy, stopUpperPrice, stopLowerPrice } = body;
+
+      if (!pair || !upperPrice || !lowerPrice || !gridCount || !totalInvestment) {
+        return NextResponse.json({ success: false, error: 'pair, upperPrice, lowerPrice, gridCount, totalInvestment required' }, { status: 400 });
+      }
+
+      const { data: bot, error: botErr } = await supabaseAdmin.from('trading_bots').insert({
+        user_id: userId, bot_type: 'grid', name: name || `Grid ${pair}`, pair, status: 'stopped',
+        invested_amount: totalInvestment,
+      }).select().single();
+
+      if (botErr) return NextResponse.json({ success: false, error: botErr.message }, { status: 500 });
+
+      const perGrid = +(totalInvestment / gridCount).toFixed(8);
+      const { data: cfg } = await supabaseAdmin.from('grid_bot_config').insert({
+        bot_id: bot.id, upper_price: upperPrice, lower_price: lowerPrice,
+        grid_count: gridCount, grid_type: gridType || 'arithmetic',
+        total_investment: totalInvestment, per_grid_amount: perGrid,
+        strategy: strategy || 'neutral',
+        stop_upper_price: stopUpperPrice ?? null, stop_lower_price: stopLowerPrice ?? null,
+      }).select().single();
+
+      // Generate levels
+      const prices = (gridType === 'geometric')
+        ? genGeoGrid(lowerPrice, upperPrice, gridCount)
+        : genArithGrid(lowerPrice, upperPrice, gridCount);
+
+      for (let i = 0; i < prices.length; i++) {
+        await supabaseAdmin.from('grid_levels').insert({ bot_id: bot.id, level_index: i, price: prices[i] });
+      }
+
+      const { data: levels } = await supabaseAdmin.from('grid_levels').select('*').eq('bot_id', bot.id).order('level_index');
+      await supabaseAdmin.from('bot_activity_log').insert({ bot_id: bot.id, action: 'created', details: { type: 'grid', gridCount } });
+
+      return NextResponse.json({ success: true, bot: { ...bot, grid_config: cfg, grid_levels: levels } });
+    }
+
+    return NextResponse.json({ success: false, error: 'Invalid botType' }, { status: 400 });
   } catch (err: any) {
-    return NextResponse.json(
-      { success: false, error: err?.message || 'Unknown error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
 }
 
 // ============================================
-// PATCH — Revoke key
+// PATCH — Start / Stop / Pause
 // ============================================
 export async function PATCH(request: NextRequest) {
   try {
     const body = await request.json();
-    const keyId: string | undefined = body?.keyId;
-    const action: string | undefined = body?.action;
+    const { userId, botId, action } = body;
 
-    if (!keyId) {
-      return NextResponse.json(
-        { success: false, error: 'keyId required' },
-        { status: 400 }
-      );
+    if (!userId || !botId || !action) {
+      return NextResponse.json({ success: false, error: 'userId, botId, action required' }, { status: 400 });
     }
 
-    if (action !== 'revoke') {
-      return NextResponse.json(
-        { success: false, error: 'Invalid action' },
-        { status: 400 }
-      );
-    }
+    const { data: bot } = await supabaseAdmin.from('trading_bots').select('id, user_id, status, bot_type').eq('id', botId).eq('user_id', userId).single();
+    if (!bot) return NextResponse.json({ success: false, error: 'Bot not found' }, { status: 404 });
 
-    const { data: keyRecord, error: keyErr } = await supabaseAdmin
-      .from('bot_activation_keys')
-      .select('*')
-      .eq('id', keyId)
-      .single();
+    // === TIER GATING on start ===
+    if (action === 'start') {
+      const requiredTier = (bot as any).bot_type === 'dca' ? 2 : 3;
+      const { data: userTier } = await supabaseAdmin
+        .from('users')
+        .select('tier_level, tier_active')
+        .eq('id', userId)
+        .maybeSingle();
 
-    if (keyErr) {
-      return NextResponse.json(
-        { success: false, error: keyErr.message },
-        { status: 500 }
-      );
-    }
-
-    if (!keyRecord) {
-      return NextResponse.json(
-        { success: false, error: 'Key not found' },
-        { status: 404 }
-      );
-    }
-
-    // Revoke the key
-    const { error: revokeErr } = await supabaseAdmin
-      .from('bot_activation_keys')
-      .update({ status: 'revoked', revoked_at: new Date().toISOString() })
-      .eq('id', keyId);
-
-    if (revokeErr) {
-      return NextResponse.json(
-        { success: false, error: revokeErr.message },
-        { status: 500 }
-      );
-    }
-
-    // If it was active, also revoke user's bot access
-    if (keyRecord.status === 'active' && keyRecord.user_id) {
-      const { error: accessRevokeErr } = await supabaseAdmin
-        .from('user_bot_access')
-        .update({ is_active: false })
-        .eq('activation_key_id', keyId);
-
-      if (accessRevokeErr) {
-        console.warn('[BotKeys] access revoke warn:', accessRevokeErr);
+      const userLevel = Number(userTier?.tier_level ?? 0);
+      if (!userTier?.tier_active || userLevel < requiredTier) {
+        return NextResponse.json({
+          success: false,
+          error: `Upgrade required: Tier ${requiredTier} needed to start this bot.`,
+          requiresTier: requiredTier,
+        }, { status: 403 });
       }
     }
 
+    const validActions = ['start', 'stop', 'pause'];
+    if (!validActions.includes(action)) {
+      return NextResponse.json({ success: false, error: 'action must be start, stop, or pause' }, { status: 400 });
+    }
+
+    const statusMap: Record<string, string> = { start: 'running', stop: 'stopped', pause: 'paused' };
+    const extra: Record<string, any> = {};
+    if (action === 'start') extra.started_at = new Date().toISOString();
+    if (action === 'stop') extra.stopped_at = new Date().toISOString();
+
+    await supabaseAdmin.from('trading_bots').update({ status: statusMap[action], ...extra }).eq('id', botId);
+    await supabaseAdmin.from('bot_activity_log').insert({ bot_id: botId, action, details: {} });
+
+    return NextResponse.json({ success: true, status: statusMap[action] });
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  }
+}
+
+// ============================================
+// DELETE
+// ============================================
+export async function DELETE(request: NextRequest) {
+  try {
+    const { searchParams } = request.nextUrl;
+    const botId = searchParams.get('id');
+    const userId = request.headers.get('x-user-id') || searchParams.get('userId');
+
+    if (!botId || !userId) {
+      return NextResponse.json({ success: false, error: 'id and userId required' }, { status: 400 });
+    }
+
+    const { data: bot } = await supabaseAdmin.from('trading_bots').select('id, status').eq('id', botId).eq('user_id', userId).single();
+    if (!bot) return NextResponse.json({ success: false, error: 'Bot not found' }, { status: 404 });
+    if (bot.status === 'running') {
+      return NextResponse.json({ success: false, error: 'Stop bot before deleting' }, { status: 400 });
+    }
+
+    // Cascade handles children
+    await supabaseAdmin.from('trading_bots').delete().eq('id', botId);
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    return NextResponse.json(
-      { success: false, error: err?.message || 'Unknown error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
   }
+}
+
+// ============================================
+// Grid helpers (duplicated for server-side)
+// ============================================
+function genArithGrid(lo: number, hi: number, n: number): number[] {
+  const step = (hi - lo) / (n - 1);
+  return Array.from({ length: n }, (_, i) => +(lo + i * step).toFixed(8));
+}
+function genGeoGrid(lo: number, hi: number, n: number): number[] {
+  const r = Math.pow(hi / lo, 1 / (n - 1));
+  return Array.from({ length: n }, (_, i) => +(lo * Math.pow(r, i)).toFixed(8));
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -20,7 +20,10 @@ import {
   ShieldCheck,
   Check,
 } from 'lucide-react';
-import { useStore } from '@/lib/auth/store';
+
+// ✅ FIX: import useOtpStore (do NOT rely on global)
+import { useOtpStore } from '@/lib/auth/store';
+
 import { useEmail } from '@/hooks/useEmail';
 
 // ============================================
@@ -110,10 +113,10 @@ function PasswordStrength({ password }: { password: string }) {
     strength <= 2
       ? 'bg-red-500'
       : strength <= 3
-        ? 'bg-yellow-500'
-        : strength <= 4
-          ? 'bg-emerald-400'
-          : 'bg-emerald-500';
+      ? 'bg-yellow-500'
+      : strength <= 4
+      ? 'bg-emerald-400'
+      : 'bg-emerald-500';
 
   if (!password) return null;
 
@@ -156,37 +159,19 @@ function PasswordStrength({ password }: { password: string }) {
   );
 }
 
-/**
- * ✅ IMPORTANT:
- * Wrap the component that uses useSearchParams() in Suspense.
- */
+// ============================================
+// SIGNUP PAGE COMPONENT
+// ============================================
 export default function SignupPage() {
-  return (
-    <Suspense
-      fallback={
-        <div className="min-h-[60vh] flex items-center justify-center">
-          <div className="flex items-center gap-2 text-slate-400">
-            <Loader2 className="w-5 h-5 animate-spin" />
-            <span>Loading…</span>
-          </div>
-        </div>
-      }
-    >
-      <SignupInner />
-    </Suspense>
-  );
-}
-
-// ============================================
-// SIGNUP PAGE INNER (safe to use useSearchParams here)
-// ============================================
-function SignupInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const refFromUrl = (searchParams.get('ref') || '').trim();
 
-  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useStore();
-  const { sendOTP } = useEmail();
+  const { setOtpEmail, setOtpName, setOtpPassword, setRedirectUrl } = useOtpStore();
+
+  // ✅ safety cast if your hook typing is loose
+  const emailApi = useEmail() as any;
+  const sendOTP = emailApi.sendOTP as (...args: any[]) => Promise<any>;
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -198,7 +183,6 @@ function SignupInner() {
     handleSubmit,
     formState: { errors, isValid },
     watch,
-    setValue,
   } = useForm<SignupForm>({
     resolver: zodResolver(signupSchema) as unknown as Resolver<SignupForm>,
     mode: 'onChange',
@@ -213,11 +197,6 @@ function SignupInner() {
     },
   });
 
-  // If ref arrives from URL on first load, ensure RHF gets it (safe)
-  useEffect(() => {
-    if (refFromUrl) setValue('referralCode', refFromUrl);
-  }, [refFromUrl, setValue]);
-
   const password = watch('password', '');
 
   const onSubmit: SubmitHandler<SignupForm> = async (data) => {
@@ -230,12 +209,10 @@ function SignupInner() {
       setOtpPassword(data.password);
       setRedirectUrl('/kyc');
 
-      // If your hook supports purpose, keep it consistent with verify page:
-      const otpResult = await sendOTP(
+      const otpResult = (await sendOTP(
         data.email.toLowerCase(),
-        `${data.firstName} ${data.lastName}`,
-        'email_verification'
-      );
+        `${data.firstName} ${data.lastName}`
+      )) as { success: boolean; error?: string };
 
       if (!otpResult.success) {
         setError(otpResult.error || 'Failed to send verification code. Please try again.');

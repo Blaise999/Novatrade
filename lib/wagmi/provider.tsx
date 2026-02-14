@@ -2,19 +2,16 @@
 
 /**
  * WEB3 PROVIDER
- * 
+ *
  * Wraps app with Wagmi, RainbowKit, and TanStack Query providers.
- * This enables real wallet connections throughout the app.
- * 
- * Usage in layout.tsx:
- *   import { Web3Provider } from '@/lib/wagmi/provider';
- *   
- *   export default function Layout({ children }) {
- *     return <Web3Provider>{children}</Web3Provider>;
- *   }
+ *
+ * ✅ HYDRATION NOTE: This component is ONLY mounted client-side
+ * (Providers.tsx gates it behind a mounted check). So we don't need
+ * our own mounted guard for hydration — but we keep it for RainbowKit
+ * modal styling stability.
  */
 
-import { ReactNode, useState, useEffect } from 'react';
+import { ReactNode } from 'react';
 import { WagmiProvider } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RainbowKitProvider, darkTheme, Theme } from '@rainbow-me/rainbowkit';
@@ -22,13 +19,12 @@ import { config } from './config';
 
 import '@rainbow-me/rainbowkit/styles.css';
 
-// Custom theme matching Nova Trade's design
 const customTheme: Theme = {
   ...darkTheme(),
   colors: {
     ...darkTheme().colors,
-    accentColor: '#F5A623', // Gold
-    accentColorForeground: '#0A0B0D', // Void
+    accentColor: '#F5A623',
+    accentColorForeground: '#0A0B0D',
     connectButtonBackground: '#1A1B1E',
     connectButtonBackgroundError: '#EF4444',
     connectButtonInnerBackground: '#0A0B0D',
@@ -56,11 +52,10 @@ const customTheme: Theme = {
   },
 };
 
-// Create query client outside component to persist across renders
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 1000 * 60 * 5, // 5 minutes
+      staleTime: 1000 * 60 * 5,
       refetchOnWindowFocus: false,
     },
   },
@@ -71,27 +66,17 @@ interface Web3ProviderProps {
 }
 
 export function Web3Provider({ children }: Web3ProviderProps) {
-  // Prevent hydration issues by only rendering after mount
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
+  // No mounted guard needed — this component is only rendered client-side
+  // by Providers.tsx (which gates on its own mounted state)
   return (
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider 
+        <RainbowKitProvider
           theme={customTheme}
           modalSize="compact"
           showRecentTransactions={true}
         >
-          {/* Only render children after mount to prevent hydration mismatch */}
-          {mounted ? children : (
-            <div className="min-h-screen bg-void flex items-center justify-center">
-              <div className="w-8 h-8 border-2 border-gold border-t-transparent rounded-full animate-spin" />
-            </div>
-          )}
+          {children}
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>

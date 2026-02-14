@@ -627,7 +627,18 @@ export default function FXTradingPage() {
 
         await refreshUser?.();
 
-        // ✅ DB close is now handled centrally inside closeMarginPosition in the store
+        // ✅ Close trade in DB via server API (service role key)
+        fetch('/api/user/trades', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
+          body: JSON.stringify({
+            tradeId: (pos as any).id,
+            userId: user?.id,
+            exitPrice: px,
+            pnl,
+            status: 'closed',
+          }),
+        }).catch((e) => console.error('[FX] Auto-close DB save failed:', e));
 
         setNotification({
           type: 'success',
@@ -641,7 +652,7 @@ export default function FXTradingPage() {
         setTimeout(() => autoClosingIdsRef.current.delete(id), 2000);
       }
     },
-    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, formatMoney]
+    [closeMarginPosition, tierConfig.spreadDiscount, refreshUser, formatMoney, user?.id]
   );
 
   useEffect(() => {
@@ -782,8 +793,28 @@ export default function FXTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // ✅ DB save is now handled centrally inside openMarginPosition in the store
-      // No need to call saveTradeToHistory here
+      // ✅ Save trade to DB via server API (service role key — bypasses RLS)
+      const positionId = (result as any).positionId;
+      fetch('/api/user/trades', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
+        body: JSON.stringify({
+          id: positionId,
+          userId: user?.id,
+          marketType: 'fx',
+          assetType: 'forex',
+          pair: selectedAsset.symbol,
+          direction: tradeDirection === 'buy' ? 'buy' : 'sell',
+          quantity: qty,
+          lotSize: effLotSize,
+          leverage,
+          entryPrice,
+          stopLoss: stopLoss || null,
+          takeProfit: takeProfit || null,
+          amount: qty * entryPrice / leverage,
+          isSimulated: true,
+        }),
+      }).catch((e) => console.error('[FX] Server trade save failed:', e));
 
       setNotification({
         type: 'success',
@@ -813,6 +844,7 @@ export default function FXTradingPage() {
     takeProfit,
     refreshUser,
     formatPrice,
+    user?.id,
   ]);
 
   // ✅ Alias for button onClick
@@ -832,7 +864,21 @@ export default function FXTradingPage() {
         const pnl = Number((result as any).realizedPnL ?? 0);
         await refreshUser?.();
 
-        // ✅ DB close is now handled centrally inside closeMarginPosition in the store
+        // ✅ Close trade in DB via server API (service role key — bypasses RLS)
+        fetch('/api/user/trades', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', 'x-user-id': user?.id || '' },
+          body: JSON.stringify({
+            tradeId: (position as any).id,
+            userId: user?.id,
+            exitPrice,
+            pnl,
+            pnlPercent: (position as any).requiredMargin > 0
+              ? (pnl / (position as any).requiredMargin) * 100
+              : null,
+            status: 'closed',
+          }),
+        }).catch((e) => console.error('[FX] Server trade close failed:', e));
 
         setNotification({
           type: 'success',
@@ -846,7 +892,7 @@ export default function FXTradingPage() {
       setPositionToClose(null);
       setTimeout(() => setNotification(null), 3000);
     },
-    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, formatMoney]
+    [askPrice, bidPrice, tierConfig.spreadDiscount, closeMarginPosition, refreshUser, formatMoney, user?.id]
   );
 
   const accountBalance = Number((marginAccount as any)?.balance ?? 0) || userBalance;

@@ -1,46 +1,83 @@
+// app/api/admin/support/tickets/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdmin, supabaseAdmin } from '@/lib/requireAdmin';
+import { requireAdmin } from '@/lib/requireAdmin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const allowed = new Set(['open', 'in_progress', 'waiting_user', 'resolved', 'closed']);
+type DbTicketStatus = 'open' | 'in_progress' | 'waiting_user' | 'resolved' | 'closed';
 
-export async function POST(request: NextRequest, ctx: { params: { id: string } }) {
+export async function GET(request: NextRequest) {
   const admin = await requireAdmin(request);
-  if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  if (!admin.ok) return NextResponse.json({ error: admin.error }, { status: admin.status });
 
-  const ticketId = ctx.params.id;
+  const url = new URL(request.url);
+  const filter = (url.searchParams.get('filter') || 'open').toLowerCase();
+
+  const statusMap: Record<string, DbTicketStatus[] | null> = {
+    all: null,
+    open: ['open', 'in_progress'],
+    pending: ['waiting_user'],
+    closed: ['closed', 'resolved'],
+  };
+
+  const statuses = statusMap[filter] ?? statusMap.open;
 
   try {
-    const body = await request.json().catch(() => ({}));
-    const status = String(body?.status ?? '').trim();
-
-    if (!allowed.has(status)) {
-      return NextResponse.json({ error: 'Invalid status' }, { status: 400 });
-    }
-
-    const patch: any = {
-      status,
-      updated_at: new Date().toISOString(),
-    };
-
-    if (status === 'closed' || status === 'resolved') {
-      patch.resolved_at = new Date().toISOString();
-    }
-
-    const { data: updated, error } = await supabaseAdmin
+    let q = admin.supabaseAdmin
       .from('support_tickets')
-      .update(patch)
-      .eq('id', ticketId)
       .select('id,user_id,assigned_to,subject,category,priority,status,created_at,updated_at,resolved_at')
-      .single();
+      .order('updated_at', { ascending: false })
+      .limit(200);
 
-    if (error) throw error;
+    if (statuses) q = q.in('status', statuses);
 
-    return NextResponse.json({ ticket: updated });
+    const { data: tickets, error: tErr } = await q;
+    if (tErr) throw tErr;
+
+    const list = tickets ?? [];
+    const userIds = Array.from(new Set(list.map((t) => t.user_id).filter(Boolean)));
+
+    // users lookup
+    const usersById = new Map<string, any>();
+    if (userIds.length) {
+      const { data: users, error: uErr } = await admin.supabaseAdmin
+        .from('users')
+        .select('id,email,first_name,last_name')
+        .in('id', userIds);
+
+      if (uErr) throw uErr;
+      (users ?? []).forEach((u) => usersById.set(u.id, u));
+    }
+
+    // last message lookup (one query)
+    const ticketIds = list.map((t) => t.id);
+    const lastByTicket = new Map<string, any>();
+
+    if (ticketIds.length) {
+      const { data: msgs, error: mErr } = await admin.supabaseAdmin
+        .from('support_messages')
+        .select('ticket_id,message,sender_type,created_at')
+        .in('ticket_id', ticketIds)
+        .order('created_at', { ascending: false })
+        .limit(2000);
+
+      if (mErr) throw mErr;
+
+      for (const m of msgs ?? []) {
+        if (!lastByTicket.has(m.ticket_id)) lastByTicket.set(m.ticket_id, m);
+      }
+    }
+
+    const merged = list.map((t) => ({
+      ...t,
+      users: usersById.get(t.user_id) ?? null,
+      last_message: lastByTicket.get(t.id) ?? null,
+    }));
+
+    return NextResponse.json({ tickets: merged });
   } catch (e: any) {
-    console.error('[AdminSupport] status error:', e);
-    return NextResponse.json({ error: e?.message || 'Failed to update status' }, { status: 500 });
+    console.error('[AdminSupport] tickets GET error:', e);
+    return NextResponse.json({ error: e?.message || 'Failed to load tickets' }, { status: 500 });
   }
 }
