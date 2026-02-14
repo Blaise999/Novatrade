@@ -1,7 +1,6 @@
 // app/dashboard/trade/fx/page.tsx
 'use client';
 
-import Script from 'next/script';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import {
@@ -14,12 +13,6 @@ import {
   CandlestickChart,
 } from 'lucide-react';
 
-declare global {
-  interface Window {
-    LightweightCharts?: any;
-  }
-}
-
 type Mode = 'active' | 'history';
 
 type TradeStatus =
@@ -28,7 +21,7 @@ type TradeStatus =
   | 'liquidated'
   | 'stopped_out'
   | 'take_profit'
-  | 'open'; // sometimes DB uses "open"
+  | 'open';
 
 type TradeRow = {
   id: string;
@@ -116,39 +109,35 @@ type Candle = {
   volume?: number;
 };
 
+/** ---------- DEBUG ---------- */
+function isDebugOn(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.localStorage.getItem('nt_debug') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function dlog(...args: any[]) {
+  if (isDebugOn()) console.log('[FX]', ...args);
+}
+
+function derr(...args: any[]) {
+  if (isDebugOn()) console.error('[FX]', ...args);
+}
+
 /** ---------- HELPERS ---------- */
 function makeIdempotencyKey(): string {
   try {
     const key = globalThis.crypto?.randomUUID?.();
     if (key) return key;
-  } catch {
-    // ignore
-  }
+  } catch {}
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function clampNum(v: unknown, fallback = 0) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function secondsPer(tf: TF) {
-  switch (tf) {
-    case '1m':
-      return 60;
-    case '5m':
-      return 300;
-    case '15m':
-      return 900;
-    case '1h':
-      return 3600;
-    case '4h':
-      return 14400;
-    case '1D':
-      return 86400;
-    default:
-      return 900;
-  }
 }
 
 function toDirInt(row: TradeRow): 1 | -1 {
@@ -245,16 +234,59 @@ function fmt(n: number, dp = 2) {
   return n.toFixed(dp);
 }
 
-/** Try to read Supabase access_token from storage (fixes “missing api token” when session isn’t hydrated yet). */
+/** ---------- SUPABASE TOKEN (project-ref locked) ---------- */
+function getProjectRefFromEnv(): string | null {
+  try {
+    const u = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    if (!u) return null;
+    const host = new URL(u).hostname; // <ref>.supabase.co
+    const ref = host.split('.')[0];
+    return ref || null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeJwtPayload(token: string): any | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = decodeURIComponent(
+      atob(b64)
+        .split('')
+        .map((c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'))
+        .join('')
+    );
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 function readStoredAccessToken(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  const projectRef = getProjectRefFromEnv();
+  const expectedKey = projectRef ? `sb-${projectRef}-auth-token` : null;
+
   const pick = (store: Storage | null) => {
     if (!store) return null;
-    try {
-      for (let i = 0; i < store.length; i++) {
-        const k = store.key(i);
-        if (!k) continue;
-        if (!k.startsWith('sb-') || !k.endsWith('-auth-token')) continue;
 
+    try {
+      const keys: string[] = [];
+
+      if (expectedKey) {
+        keys.push(expectedKey);
+      } else {
+        for (let i = 0; i < store.length; i++) {
+          const k = store.key(i);
+          if (!k) continue;
+          if (k.startsWith('sb-') && k.endsWith('-auth-token')) keys.push(k);
+        }
+      }
+
+      for (const k of keys) {
         const raw = store.getItem(k);
         if (!raw) continue;
 
@@ -266,24 +298,63 @@ function readStoredAccessToken(): string | null {
           parsed?.data?.session?.access_token ??
           null;
 
-        if (typeof token === 'string' && token.length > 10) return token;
+        if (typeof token !== 'string' || token.length < 20) continue;
+
+        // sanity check against project ref
+        if (projectRef) {
+          const payload = decodeJwtPayload(token);
+          const iss = typeof payload?.iss === 'string' ? payload.iss : '';
+          if (!iss.includes(projectRef)) {
+            dlog('Stored token ignored (wrong iss)', { key: k, iss });
+            continue;
+          }
+        }
+
+        dlog('Stored token selected', { key: k, projectRef });
+        return token;
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      derr('readStoredAccessToken error', e);
     }
+
     return null;
   };
 
-  // ✅ TS5076-safe: no mixing ?? with ||
-  const ss: Storage | null =
-    typeof window !== 'undefined' && window.sessionStorage ? window.sessionStorage : null;
-  const ls: Storage | null =
-    typeof window !== 'undefined' && window.localStorage ? window.localStorage : null;
+  // NOTE: no ?? used here (avoids TS5076)
+  const ss = window.sessionStorage ? window.sessionStorage : null;
+  const ls = window.localStorage ? window.localStorage : null;
 
-  const fromSession = pick(ss);
-  if (fromSession) return fromSession;
+  return pick(ss) || pick(ls);
+}
 
-  return pick(ls);
+async function fetchFxCandles(display: string, tf: TF, limit = 260, signal?: AbortSignal): Promise<Candle[]> {
+  const url =
+    `/api/market/fx/candles?display=${encodeURIComponent(display)}` +
+    `&tf=${encodeURIComponent(tf)}&limit=${limit}`;
+
+  dlog('Candles fetch =>', url);
+
+  const res = await fetch(url, { method: 'GET', cache: 'no-store', signal });
+
+  const text = await res.text();
+  let json: any = null;
+  try { json = JSON.parse(text); } catch { json = null; }
+
+  if (res.status === 403) {
+    throw new Error(json?.message || 'FX candles access denied (Finnhub plan/API key)');
+  }
+
+  if (!res.ok) {
+    throw new Error(json?.error || `Candles failed (${res.status})`);
+  }
+
+  const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
+  const mapped = rows
+    .map((r) => mapCandleRow(r))
+    .filter((x): x is Candle => x !== null)
+    .sort((a, b) => a.time - b.time);
+
+  return mapped;
 }
 
 /** ---------- CHART DATA MAPPING ---------- */
@@ -330,82 +401,6 @@ function mapCandleRow(r: unknown): Candle | null {
   };
 }
 
-function pairToOandaSymbol(displayPair: string) {
-  const p = String(displayPair ?? '')
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '');
-  if (!p) return '';
-  if (p.includes(':')) return p;
-  return `OANDA:${p.replace('/', '_')}`;
-}
-
-/** candles fetch: try your endpoints (fx candle route first), then generic fallbacks */
-async function tryFetchCandlesFromAnyEndpoint(displayPair: string, tf: TF, limit = 240): Promise<Candle[]> {
-  const symbol = pairToOandaSymbol(displayPair);
-
-  const endpoints = [
-    // ✅ your Finnhub FX candle route (supports display=EUR/USD)
-    `/api/market/fx/candles?display=${encodeURIComponent(displayPair)}&tf=${encodeURIComponent(tf)}&limit=${limit}`,
-
-    // optional: if you also expose symbol-based candle endpoints
-    `/api/market/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=${limit}`,
-    `/api/markets/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=${limit}`,
-    `/api/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=${limit}`,
-  ];
-
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-      if (!res.ok) continue;
-
-      const json: unknown = await res.json().catch(() => ({}));
-
-      const rows: unknown[] =
-        Array.isArray((json as any)?.candles)
-          ? ((json as any).candles as unknown[])
-          : Array.isArray((json as any)?.data)
-            ? ((json as any).data as unknown[])
-            : Array.isArray(json)
-              ? (json as unknown[])
-              : [];
-
-      const mapped = rows
-        .map((r: unknown) => mapCandleRow(r))
-        .filter((x: Candle | null): x is Candle => x !== null)
-        .sort((a: Candle, b: Candle) => a.time - b.time);
-
-      if (mapped.length) return mapped;
-    } catch {
-      // try next
-    }
-  }
-
-  return [];
-}
-
-function synthCandles(tf: TF, lastClose = 1.0, count = 180): Candle[] {
-  const now = Math.floor(Date.now() / 1000);
-  const step = secondsPer(tf);
-  const start = now - step * count;
-
-  let price = lastClose > 0 ? lastClose : 1.0;
-
-  const out: Candle[] = [];
-  for (let i = 0; i < count; i++) {
-    const t = Math.floor((start + i * step) / step) * step;
-    // tiny deterministic wiggle
-    const wiggle = Math.sin(i / 5) * 0.0005 + Math.cos(i / 7) * 0.0003;
-    const open = price;
-    const close = Math.max(0.0001, open + wiggle);
-    const high = Math.max(open, close) + Math.abs(wiggle) * 0.6;
-    const low = Math.min(open, close) - Math.abs(wiggle) * 0.6;
-    price = close;
-    out.push({ time: t, open, high, low, close });
-  }
-  return out;
-}
-
 const FX_PAIRS = [
   'EUR/USD',
   'GBP/USD',
@@ -431,7 +426,7 @@ const TIMEFRAMES: { label: string; value: TF }[] = [
   { label: '15m', value: '15m' },
   { label: '1h', value: '1h' },
   { label: '4h', value: '4h' },
-  { label: '1D', value: '1D' }, // ✅ matches your API route switch-case
+  { label: '1D', value: '1D' },
 ];
 
 export default function FXTradePage() {
@@ -445,7 +440,7 @@ export default function FXTradePage() {
   const [trades, setTrades] = useState<FxUiTrade[]>([]);
   const [exitDraft, setExitDraft] = useState<Record<string, string>>({});
 
-  // Open form (TV screen only — server is judge)
+  // Open form
   const [asset, setAsset] = useState<string>('EUR/USD');
   const [direction, setDirection] = useState<'buy' | 'sell'>('buy');
   const [investment, setInvestment] = useState<string>('50');
@@ -458,8 +453,6 @@ export default function FXTradePage() {
   const [tf, setTf] = useState<TF>('5m');
   const [chartNote, setChartNote] = useState<string | null>(null);
   const [lastClose, setLastClose] = useState<number | null>(null);
-  const [liveState, setLiveState] = useState<'off' | 'live' | 'poll'>('off');
-  const [lcReady, setLcReady] = useState(false);
 
   const firstLoadRef = useRef(false);
 
@@ -467,42 +460,51 @@ export default function FXTradePage() {
   const chartWrapRef = useRef<HTMLDivElement | null>(null);
   const chartApiRef = useRef<any>(null);
   const candleSeriesRef = useRef<any>(null);
-  const candlesRef = useRef<Candle[]>([]);
-  const streamRef = useRef<EventSource | null>(null);
-  const pollRef = useRef<number | null>(null);
-  const backfillRef = useRef<number | null>(null);
 
-  // ✅ avoids TS2774 no matter how isSupabaseConfigured is defined in your project
+  // chart request control
+  const chartAbortRef = useRef<AbortController | null>(null);
+  const chartInFlightRef = useRef(false);
+
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
 
   const headerAuthToken = async (): Promise<string | null> => {
     if (!canUseSupabase) return null;
 
-    // 1) normal supabase session token
+    // 1) normal token
     try {
       const { data, error: sErr } = await supabase.auth.getSession();
       if (!sErr) {
         const token = data.session?.access_token ?? null;
-        if (token) return token;
+        if (token) {
+          dlog('Token source: supabase.getSession()', { has: true });
+          return token;
+        }
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      derr('getSession failed', e);
     }
 
-    // 2) try refresh session (best effort)
+    // 2) refresh
     try {
       const { data } = await supabase.auth.refreshSession();
       const token = data.session?.access_token ?? null;
-      if (token) return token;
-    } catch {
-      // ignore
+      if (token) {
+        dlog('Token source: supabase.refreshSession()', { has: true });
+        return token;
+      }
+    } catch (e) {
+      derr('refreshSession failed', e);
     }
 
-    // 3) fallback storage read
+    // 3) storage (project-ref locked)
     const stored = readStoredAccessToken();
-    if (stored) return stored;
+    if (stored) {
+      dlog('Token source: storage fallback', { has: true });
+      return stored;
+    }
 
+    dlog('Token source: NONE');
     return null;
   };
 
@@ -512,7 +514,9 @@ export default function FXTradePage() {
 
     try {
       const token = await headerAuthToken();
-      if (!token) throw new Error('Missing API token. Please sign in again (session token not found).');
+      if (!token) throw new Error('Missing API token. Please sign in again.');
+
+      dlog('Trades fetch => /api/trades?limit=200');
 
       const res = await fetch(`/api/trades?limit=200`, {
         method: 'GET',
@@ -520,17 +524,20 @@ export default function FXTradePage() {
         cache: 'no-store',
       });
 
-      const json: unknown = await res.json().catch(() => ({}));
-      const ok = (json as any)?.success;
+      const text = await res.text();
+      let json: any = null;
+      try { json = JSON.parse(text); } catch { json = null; }
 
+      dlog('Trades resp', { status: res.status, body: isDebugOn() ? json : undefined });
+
+      const ok = json?.success;
       if (!res.ok || !ok) {
-        throw new Error((json as any)?.error || `Failed to load trades (${res.status})`);
+        throw new Error(json?.error || `Failed to load trades (${res.status})`);
       }
 
-      setBalance(clampNum((json as any)?.balance ?? (json as any)?.newBalance ?? 0));
+      setBalance(clampNum(json?.balance ?? json?.newBalance ?? 0));
 
-      const rows: TradeRow[] = Array.isArray((json as any)?.trades) ? ((json as any).trades as TradeRow[]) : [];
-
+      const rows: TradeRow[] = Array.isArray(json?.trades) ? (json.trades as TradeRow[]) : [];
       const parsed = rows
         .map(dbRowToUi)
         .filter((t): t is FxUiTrade => t.assetType === 'forex' && !!t.asset);
@@ -539,340 +546,138 @@ export default function FXTradePage() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load';
       setError(msg);
+      derr('loadTrades error', msg);
     } finally {
       setLoading(false);
     }
   };
-
-  function stopLive() {
-    try {
-      streamRef.current?.close();
-    } catch {
-      // ignore
-    }
-    streamRef.current = null;
-
-    if (pollRef.current != null) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-
-    if (backfillRef.current != null) {
-      window.clearInterval(backfillRef.current);
-      backfillRef.current = null;
-    }
-
-    setLiveState('off');
-  }
-
-  function ensureChart() {
-    const el = chartWrapRef.current;
-    if (!el) return;
-
-    const LC = window.LightweightCharts;
-    if (!LC) return;
-
-    if (!chartApiRef.current) {
-      const chart = LC.createChart(el, {
-        layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.85)' },
-        grid: {
-          vertLines: { color: 'rgba(255,255,255,0.06)' },
-          horzLines: { color: 'rgba(255,255,255,0.06)' },
-        },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
-        timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: true, secondsVisible: false },
-        crosshair: { mode: 0 }, // Normal
-        autoSize: true,
-      });
-
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: '#22c55e',
-        downColor: '#f43f5e',
-        borderUpColor: '#22c55e',
-        borderDownColor: '#f43f5e',
-        wickUpColor: '#22c55e',
-        wickDownColor: '#f43f5e',
-      });
-
-      chartApiRef.current = chart;
-      candleSeriesRef.current = candleSeries;
-
-      const ro = new ResizeObserver(() => {
-        try {
-          chart.timeScale().fitContent();
-        } catch {
-          // ignore
-        }
-      });
-      ro.observe(el);
-      (chartApiRef.current as any).__ro = ro;
-    }
-  }
-
-  function setSeriesData(candles: Candle[]) {
-    candlesRef.current = candles;
-
-    const series = candleSeriesRef.current;
-    if (!series) return;
-
-    series.setData(
-      candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
-    );
-
-    try {
-      chartApiRef.current?.timeScale()?.fitContent?.();
-    } catch {
-      // ignore
-    }
-  }
-
-  function applyTick(price: number, tsSec: number) {
-    const tfSec = secondsPer(tf);
-    const bucket = Math.floor(tsSec / tfSec) * tfSec;
-
-    const prev = candlesRef.current;
-    const last = prev.length ? prev[prev.length - 1] : null;
-
-    let nextLast: Candle;
-
-    if (!last) {
-      nextLast = { time: bucket, open: price, high: price, low: price, close: price };
-      candlesRef.current = [nextLast];
-      candleSeriesRef.current?.setData?.([
-        { time: nextLast.time, open: nextLast.open, high: nextLast.high, low: nextLast.low, close: nextLast.close },
-      ]);
-    } else if (last.time < bucket) {
-      const open = last.close;
-      nextLast = {
-        time: bucket,
-        open,
-        high: Math.max(open, price),
-        low: Math.min(open, price),
-        close: price,
-      };
-      const next = [...prev, nextLast].slice(-300);
-      candlesRef.current = next;
-      candleSeriesRef.current?.update?.({
-        time: nextLast.time,
-        open: nextLast.open,
-        high: nextLast.high,
-        low: nextLast.low,
-        close: nextLast.close,
-      });
-    } else {
-      nextLast = {
-        ...last,
-        high: Math.max(last.high, price),
-        low: Math.min(last.low, price),
-        close: price,
-      };
-      const next = prev.slice();
-      next[next.length - 1] = nextLast;
-      candlesRef.current = next;
-      candleSeriesRef.current?.update?.({
-        time: nextLast.time,
-        open: nextLast.open,
-        high: nextLast.high,
-        low: nextLast.low,
-        close: nextLast.close,
-      });
-    }
-
-    setLastClose(nextLast.close);
-    setMarketPrice(nextLast.close.toFixed(5));
-  }
 
   const loadChart = async () => {
     setChartNote(null);
 
     if (!chartWrapRef.current) return;
 
-    // must have lightweight-charts global ready
-    if (!lcReady || !window.LightweightCharts) {
-      setChartNote('Chart engine loading…');
+    // prevent overlapping chart loads
+    if (chartInFlightRef.current) {
+      dlog('loadChart skipped (in flight)');
       return;
     }
+    chartInFlightRef.current = true;
 
-    ensureChart();
+    // abort previous request
+    try { chartAbortRef.current?.abort(); } catch {}
+    const ac = new AbortController();
+    chartAbortRef.current = ac;
 
-    // fetch candles (endpoint first, then supabase `candles` table)
-    let candles: Candle[] = await tryFetchCandlesFromAnyEndpoint(asset, tf, 260);
-
-    if (!candles.length && canUseSupabase) {
-      // fallback: supabase table `candles` (if you have it)
-      try {
-        const { data, error: sErr } = await supabase
-          .from('candles')
-          .select('*')
-          .eq('symbol', asset)
-          .eq('tf', tf)
-          .order('time', { ascending: true })
-          .limit(260);
-
-        if (!sErr && Array.isArray(data)) {
-          const rows = data as unknown[];
-          candles = rows
-            .map((r: unknown) => mapCandleRow(r))
-            .filter((x: Candle | null): x is Candle => x !== null)
-            .sort((a: Candle, b: Candle) => a.time - b.time);
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // if still none, synth so chart isn't blank
-    if (!candles.length) {
-      const base = clampNum(lastClose, 1.0);
-      candles = synthCandles(tf, base, 180);
-      setChartNote('No candle source found — showing synthetic candles (wire /api/market/fx/candles).');
-    }
-
-    const lc = candles[candles.length - 1]?.close ?? null;
-    setLastClose(lc);
-
-    // keep marketPrice input in sync with last close (nice UX)
-    if (lc != null && lc > 0) setMarketPrice(lc.toFixed(5));
-
-    setSeriesData(candles);
-  };
-
-  function startLive() {
-    stopLive();
-
-    const symbol = pairToOandaSymbol(asset);
-    if (!symbol) return;
-
-    // 1) Try SSE stream (your ws->sse bridge)
     try {
-      const es = new EventSource(`/api/market/stream?symbols=${encodeURIComponent(symbol)}`);
-      streamRef.current = es;
+      dlog('loadChart start', { asset, tf });
 
-      es.onopen = () => {
-        setLiveState('live');
-      };
+      // fetch candles ONLY from your fx route
+      const candles: Candle[] = await fetchFxCandles(asset, tf, 260, ac.signal);
 
-      es.onmessage = (ev) => {
-        try {
-          const obj = JSON.parse(ev.data);
+      if (!candles.length) {
+        setChartNote('No candle data returned.');
+        setLastClose(null);
+        dlog('Candles empty');
+      } else {
+        const lc = candles[candles.length - 1]?.close ?? null;
+        setLastClose(lc);
 
-          // finnHub payload usually:
-          // { type: "trade", data: [{ p: 1.2345, t: 170..., s: "OANDA:EUR_USD", v: ...}] }
-          const arr = (obj as any)?.data;
-          if (!Array.isArray(arr) || !arr.length) return;
-
-          const tick = arr[arr.length - 1];
-          const price = clampNum(tick?.p, NaN);
-          const t = clampNum(tick?.t, 0);
-
-          if (!Number.isFinite(price)) return;
-
-          const tsSec = t > 2_000_000_000 ? Math.floor(t / 1000) : Math.floor(t || Date.now() / 1000);
-          applyTick(price, tsSec);
-        } catch {
-          // ignore bad frames
-        }
-      };
-
-      es.onerror = () => {
-        // fallback to polling
-        try {
-          es.close();
-        } catch {
-          // ignore
-        }
-        streamRef.current = null;
-
-        setLiveState('poll');
-
-        // poll last candle close from your FX candle route
-        pollRef.current = window.setInterval(async () => {
-          try {
-            const r = await fetch(
-              `/api/market/fx/candles?display=${encodeURIComponent(asset)}&tf=${encodeURIComponent(tf)}&limit=2`,
-              { cache: 'no-store' }
-            );
-            if (!r.ok) return;
-            const j: any = await r.json().catch(() => ({}));
-            const rows: unknown[] = Array.isArray(j?.candles) ? j.candles : [];
-            const mapped = rows
-              .map((x) => mapCandleRow(x))
-              .filter((x): x is Candle => !!x)
-              .sort((a, b) => a.time - b.time);
-            const last = mapped[mapped.length - 1];
-            if (!last) return;
-            applyTick(last.close, last.time);
-          } catch {
-            // ignore
-          }
-        }, 900) as unknown as number;
-      };
-    } catch {
-      // if EventSource fails hard, do nothing (poll will be started by onerror anyway)
-      setLiveState('poll');
-    }
-
-    // 2) Backfill candles periodically (keeps chart clean if ticks missed)
-    const tfSec = secondsPer(tf);
-    const backfillMs = tfSec <= 900 ? 15000 : tfSec <= 3600 ? 30000 : 60000;
-
-    backfillRef.current = window.setInterval(async () => {
-      const fresh = await tryFetchCandlesFromAnyEndpoint(asset, tf, 260);
-      if (fresh.length) {
-        setSeriesData(fresh);
-        const lc = fresh[fresh.length - 1]?.close ?? null;
-        if (lc != null && lc > 0) {
-          setLastClose(lc);
-          setMarketPrice(lc.toFixed(5));
-        }
+        // keep input synced
+        setMarketPrice(() => (lc != null && lc > 0 ? lc.toFixed(5) : '1.00000'));
       }
-    }, backfillMs) as unknown as number;
-  }
+
+      // init chart only once; update series data on changes
+      try {
+        const mod = await import('lightweight-charts');
+
+        if (!chartApiRef.current) {
+          const el = chartWrapRef.current;
+
+          const chart = mod.createChart(el, {
+            layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.85)' },
+            grid: { vertLines: { color: 'rgba(255,255,255,0.06)' }, horzLines: { color: 'rgba(255,255,255,0.06)' } },
+            rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
+            timeScale: { borderColor: 'rgba(255,255,255,0.12)', timeVisible: true, secondsVisible: false },
+            crosshair: { mode: mod.CrosshairMode?.Normal ?? 0 },
+            autoSize: true,
+          });
+
+          const candleSeries = chart.addCandlestickSeries({
+            upColor: '#22c55e',
+            downColor: '#f43f5e',
+            borderUpColor: '#22c55e',
+            borderDownColor: '#f43f5e',
+            wickUpColor: '#22c55e',
+            wickDownColor: '#f43f5e',
+          });
+
+          chartApiRef.current = chart;
+          candleSeriesRef.current = candleSeries;
+
+          const ro = new ResizeObserver(() => {
+            chart.timeScale().fitContent();
+          });
+          ro.observe(el);
+          (chartApiRef.current as any).__ro = ro;
+        }
+
+        if (candleSeriesRef.current) {
+          candleSeriesRef.current.setData(
+            candles.map((c) => ({ time: c.time as any, open: c.open, high: c.high, low: c.low, close: c.close }))
+          );
+          chartApiRef.current?.timeScale()?.fitContent();
+        }
+      } catch (e) {
+        setChartNote('Chart module not available. Install: pnpm add lightweight-charts');
+        derr('lightweight-charts import failed', e);
+      }
+    } catch (e: any) {
+      const msg = e?.message || 'Failed to load chart';
+      setChartNote(msg);
+      setLastClose(null);
+      derr('loadChart error', msg);
+    } finally {
+      chartInFlightRef.current = false;
+    }
+  };
 
   useEffect(() => {
     if (firstLoadRef.current) return;
     firstLoadRef.current = true;
+
+    dlog('FX page mounted');
     loadTrades('active');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // chart effect
   useEffect(() => {
     loadChart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset, tf, lcReady]);
+  }, [asset, tf]);
 
-  // live stream effect
-  useEffect(() => {
-    if (!lcReady) return;
-    startLive();
-    return () => stopLive();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset, tf, lcReady]);
-
-  // cleanup chart
   useEffect(() => {
     return () => {
-      stopLive();
+      try {
+        chartAbortRef.current?.abort();
+      } catch {}
 
       try {
         const ro = (chartApiRef.current as any)?.__ro as ResizeObserver | undefined;
         ro?.disconnect?.();
-      } catch {
-        // ignore
-      }
+      } catch {}
+
       try {
         chartApiRef.current?.remove?.();
-      } catch {
-        // ignore
-      }
+      } catch {}
+
       chartApiRef.current = null;
       candleSeriesRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onRefresh = async () => {
+    dlog('Refresh clicked');
     await loadTrades(mode);
     await loadChart();
   };
@@ -899,6 +704,8 @@ export default function FXTradePage() {
 
       const idempotencyKey = makeIdempotencyKey();
 
+      dlog('Open trade => /api/trades', { asset, inv, multiplier });
+
       const res = await fetch('/api/trades', {
         method: 'POST',
         headers: {
@@ -919,16 +726,22 @@ export default function FXTradePage() {
         }),
       });
 
-      const json: unknown = await res.json().catch(() => ({}));
-      if (!res.ok || !(json as any)?.success) {
-        throw new Error((json as any)?.error || `Trade open failed (${res.status})`);
+      const text = await res.text();
+      let json: any = null;
+      try { json = JSON.parse(text); } catch { json = null; }
+
+      dlog('Open trade resp', { status: res.status, body: isDebugOn() ? json : undefined });
+
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `Trade open failed (${res.status})`);
       }
 
-      if ((json as any)?.newBalance != null) setBalance(clampNum((json as any).newBalance, balance));
+      if (json?.newBalance != null) setBalance(clampNum(json.newBalance, balance));
       await loadTrades(mode);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to open trade';
       setError(msg);
+      derr('openTrade error', msg);
     } finally {
       setLoading(false);
     }
@@ -946,6 +759,8 @@ export default function FXTradePage() {
       const exit = draft ? clampNum(draft, 0) : clampNum(t.currentPrice, 0);
       if (exit <= 0) throw new Error('Exit price must be greater than 0');
 
+      dlog('Close trade => /api/trades PATCH', { tradeId: t.id, exit });
+
       const res = await fetch('/api/trades', {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -956,12 +771,17 @@ export default function FXTradePage() {
         }),
       });
 
-      const json: unknown = await res.json().catch(() => ({}));
-      if (!res.ok || !(json as any)?.success) {
-        throw new Error((json as any)?.error || `Trade close failed (${res.status})`);
+      const text = await res.text();
+      let json: any = null;
+      try { json = JSON.parse(text); } catch { json = null; }
+
+      dlog('Close trade resp', { status: res.status, body: isDebugOn() ? json : undefined });
+
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `Trade close failed (${res.status})`);
       }
 
-      if ((json as any)?.newBalance != null) setBalance(clampNum((json as any).newBalance, balance));
+      if (json?.newBalance != null) setBalance(clampNum(json.newBalance, balance));
 
       setExitDraft((prev) => {
         const next = { ...prev };
@@ -973,6 +793,7 @@ export default function FXTradePage() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to close trade';
       setError(msg);
+      derr('closeTrade error', msg);
     } finally {
       setActionLoadingId(null);
     }
@@ -990,13 +811,6 @@ export default function FXTradePage() {
 
   return (
     <div className="min-h-screen bg-[#050508] text-white">
-      {/* ✅ No npm dependency needed: loads lightweight-charts from CDN */}
-      <Script
-        src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"
-        strategy="afterInteractive"
-        onLoad={() => setLcReady(true)}
-      />
-
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
         {/* Top bar */}
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1006,7 +820,7 @@ export default function FXTradePage() {
             </div>
             <div>
               <div className="text-lg font-semibold">FX Trading</div>
-              <div className="text-xs text-white/60">Olymp-style: server decides, UI only displays.</div>
+              <div className="text-xs text-white/60">Server decides, UI displays.</div>
             </div>
           </div>
 
@@ -1044,20 +858,7 @@ export default function FXTradePage() {
                 <CandlestickChart className="h-4 w-4" />
               </div>
               <div>
-                <div className="font-semibold flex items-center gap-2">
-                  Market Chart
-                  <span
-                    className={`text-[10px] px-2 py-1 rounded-full border ${
-                      liveState === 'live'
-                        ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100'
-                        : liveState === 'poll'
-                          ? 'border-yellow-500/40 bg-yellow-500/15 text-yellow-100'
-                          : 'border-white/15 bg-white/10 text-white/70'
-                    }`}
-                  >
-                    {liveState === 'live' ? 'LIVE' : liveState === 'poll' ? 'DELAYED' : 'OFF'}
-                  </span>
-                </div>
+                <div className="font-semibold">Market Chart</div>
                 <div className="text-xs text-white/60">
                   {asset} · {TIMEFRAMES.find((x) => x.value === tf)?.label}
                   {lastClose != null ? ` · Last ${lastClose.toFixed(5)}` : ''}
@@ -1107,8 +908,7 @@ export default function FXTradePage() {
           </div>
 
           <div className="mt-3 text-xs text-white/60">
-            Uses your <code className="text-white/80">/api/market/stream</code> (SSE) if available, otherwise polls{' '}
-            <code className="text-white/80">/api/market/fx/candles</code>.
+            If chart says access denied: your Finnhub plan/key can’t fetch FX candles.
           </div>
         </div>
 
@@ -1117,7 +917,7 @@ export default function FXTradePage() {
           <div className="flex items-center justify-between gap-4 mb-4">
             <div>
               <div className="font-semibold">Open Trade</div>
-              <div className="text-xs text-white/60">Deduction happens atomically on the server.</div>
+              <div className="text-xs text-white/60">Deduction happens on the server.</div>
             </div>
           </div>
 
@@ -1230,7 +1030,9 @@ export default function FXTradePage() {
           </div>
 
           <div className="mt-4 flex items-center justify-between gap-3">
-            <div className="text-xs text-white/60">Tip: market price is the “TV quote”. Server computes entry with spread.</div>
+            <div className="text-xs text-white/60">
+              Tip: market price is the “TV quote”. Server computes entry with spread.
+            </div>
 
             <button
               onClick={openTrade}
@@ -1332,7 +1134,11 @@ export default function FXTradePage() {
                                 : 'bg-rose-500/15 border-rose-500/30 text-rose-100'
                             }`}
                           >
-                            {t.direction === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                            {t.direction === 'buy' ? (
+                              <TrendingUp className="h-3 w-3" />
+                            ) : (
+                              <TrendingDown className="h-3 w-3" />
+                            )}
                             {t.direction.toUpperCase()}
                           </span>
                         </td>
@@ -1352,7 +1158,9 @@ export default function FXTradePage() {
                         </td>
 
                         <td className="px-4 py-3 text-right">
-                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>{t.status}</span>
+                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>
+                            {t.status}
+                          </span>
                         </td>
 
                         <td className="px-4 py-3 text-right">
@@ -1389,8 +1197,7 @@ export default function FXTradePage() {
         </div>
 
         <div className="text-xs text-white/50">
-          Note: P/L shown is display-only. Final credit/debit is applied by the server via{' '}
-          <code className="text-white/70">close_trade_atomic</code>.
+          Debug: set <code className="text-white/70">localStorage.nt_debug=1</code> to see logs.
         </div>
       </div>
     </div>

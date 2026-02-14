@@ -3,6 +3,17 @@ import WebSocket, { type RawData } from "ws";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const DEBUG = process.env.DEBUG_MARKET === "1";
+
+function s(...args: any[]) {
+  if (DEBUG) console.log("[market/stream]", ...args);
+}
+
+function safeSnippet(v: string, max = 240) {
+  const t = String(v || "");
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
 export async function GET(req: Request) {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) return new Response("Missing FINNHUB_API_KEY", { status: 500 });
@@ -16,6 +27,8 @@ export async function GET(req: Request) {
   if (!symbols.length) {
     return new Response("Missing symbols=OANDA:EUR_USD,OANDA:GBP_USD", { status: 400 });
   }
+
+  s("CONNECT", { symbols });
 
   const stream = new ReadableStream<string>({
     start(controller) {
@@ -34,7 +47,6 @@ export async function GET(req: Request) {
       });
 
       ws.on("message", (buf: RawData) => {
-        // RawData can be Buffer | ArrayBuffer | string | Buffer[]
         const text =
           typeof buf === "string"
             ? buf
@@ -48,10 +60,14 @@ export async function GET(req: Request) {
       });
 
       ws.on("error", (err: Error) => {
+        s("WS_ERR", err.message);
         send({ type: "error", message: err.message });
       });
 
-      // close when client disconnects
+      ws.on("close", (code, reason) => {
+        s("WS_CLOSE", { code, reason: safeSnippet(String(reason || "")) });
+      });
+
       req.signal.addEventListener("abort", close);
     },
   });
