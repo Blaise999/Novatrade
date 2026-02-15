@@ -307,6 +307,7 @@ export async function POST(request: NextRequest) {
     
     const { error: insertError } = await supabase.from('trades').insert(tradeRow);
     
+    
     if (insertError) {
       // Rollback balance
       await supabase.from('users').update({ balance_available: currentBalance }).eq('id', userId);

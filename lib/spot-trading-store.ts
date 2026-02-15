@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   SpotPosition,
   SpotAccount,
@@ -9,57 +9,84 @@ import {
   calculateUnrealizedPnL,
   calculateNewAvgPrice,
   calculateRealizedPnL,
-  getDisplayValues,
   calculateShieldedPriceChange,
 } from './spot-trading-types';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
-import { 
-  syncCryptoTrade, 
-  notifyBalanceUpdate 
-} from '@/lib/services/balance-sync';
+import { notifyBalanceUpdate } from '@/lib/services/balance-sync';
+
+// ==========================================
+// SAFE STORAGE (sessionStorage; SSR-safe)
+// ==========================================
+const ssrNoopStorage = {
+  getItem: (_: string) => null,
+  setItem: (_: string, __: string) => {},
+  removeItem: (_: string) => {},
+};
+
+const zustandStorage = createJSONStorage(() => {
+  if (typeof window === 'undefined') return ssrNoopStorage as any;
+  // ✅ keep store per-tab like your auth session
+  return window.sessionStorage;
+});
+
+// ==========================================
+// AUTH UID HELPER (single source of truth)
+// ==========================================
+async function getAuthUid(): Promise<string | null> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser();
+    if (error) return null;
+    return data.user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // ==========================================
 // SUPABASE BALANCE SYNC HELPER
 // ==========================================
-
-/**
- * Updates the user's balance in Supabase when crypto trades execute
- */
 async function syncCryptoBalanceToSupabase(
-  userId: string, 
+  _userId: string,
   newBalance: number,
   pnlChange: number,
   description: string
 ): Promise<boolean> {
-  if (!isSupabaseConfigured() || !userId) {
+  if (!isSupabaseConfigured()) {
     console.log('[CryptoTrading] Supabase not configured, skipping sync');
     return false;
   }
 
+  const uid = await getAuthUid();
+  if (!uid) return false;
+
   try {
     const { error } = await supabase
       .from('users')
-      .update({ 
+      .update({
         balance_available: Math.max(0, newBalance),
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       })
-      .eq('id', userId);
+      .eq('id', uid); // ✅ must match auth.uid()
 
     if (error) {
       console.error('[CryptoTrading] Failed to sync balance:', error);
       return false;
     }
 
-    console.log(`[CryptoTrading] Balance synced: ${pnlChange >= 0 ? '+' : ''}${pnlChange.toFixed(2)} | New: $${newBalance.toFixed(2)} | ${description}`);
-    
-    // Notify all listeners that balance has changed
+    console.log(
+      `[CryptoTrading] Balance synced: ${pnlChange >= 0 ? '+' : ''}${pnlChange.toFixed(
+        2
+      )} | New: $${newBalance.toFixed(2)} | ${description}`
+    );
+
     notifyBalanceUpdate({
       available: newBalance,
       bonus: 0,
       totalDeposited: 0,
       timestamp: new Date(),
     });
-    
+
     return true;
   } catch (err) {
     console.error('[CryptoTrading] Sync error:', err);
@@ -68,64 +95,90 @@ async function syncCryptoBalanceToSupabase(
 }
 
 // ==========================================
-// SUPABASE PORTFOLIO PERSISTENCE
-// Syncs positions/trades to DB so they survive cross-device logins
+// SUPABASE PORTFOLIO PERSISTENCE (RLS-safe)
 // ==========================================
+async function savePortfolioToSupabase(
+  _userId: string,
+  state: {
+    account: SpotAccount | null;
+    positions: SpotPosition[];
+    tradeHistory: SpotTrade[];
+  }
+): Promise<void> {
+  if (!isSupabaseConfigured()) return;
 
-async function savePortfolioToSupabase(userId: string, state: {
-  account: SpotAccount | null;
-  positions: SpotPosition[];
-  tradeHistory: SpotTrade[];
-}): Promise<void> {
-  if (!isSupabaseConfigured() || !userId) return;
+  const uid = await getAuthUid();
+  if (!uid) return;
+
   try {
     const payload = {
       account: state.account,
       positions: state.positions,
       tradeHistory: (state.tradeHistory || []).slice(0, 200),
     };
-    await supabase
+
+    const { error } = await supabase
       .from('user_trading_data')
-      .upsert({
-        user_id: userId,
-        spot_crypto_state: payload,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id' });
+      .upsert(
+        {
+          user_id: uid, // ✅ MUST be auth.uid()
+          spot_crypto_state: payload,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
+
+    if (error) {
+      console.warn('[CryptoTrading] Portfolio upsert failed:', error);
+    }
   } catch (err) {
-    console.warn('[CryptoTrading] Portfolio save failed (table may not exist yet):', err);
+    console.warn('[CryptoTrading] Portfolio save failed:', err);
   }
 }
 
-async function loadPortfolioFromSupabase(userId: string): Promise<{
+async function loadPortfolioFromSupabase(
+  _userId: string
+): Promise<{
   account: SpotAccount | null;
   positions: SpotPosition[];
   tradeHistory: SpotTrade[];
 } | null> {
-  if (!isSupabaseConfigured() || !userId) return null;
+  if (!isSupabaseConfigured()) return null;
+
+  const uid = await getAuthUid();
+  if (!uid) return null;
+
   try {
     const { data, error } = await supabase
       .from('user_trading_data')
       .select('spot_crypto_state')
-      .eq('user_id', userId)
+      .eq('user_id', uid) // ✅ MUST be auth.uid()
       .maybeSingle();
+
     if (error || !data?.spot_crypto_state) return null;
+
     const s = data.spot_crypto_state as any;
-    // Rehydrate dates
+
     const positions = (s.positions || []).map((p: any) => ({
       ...p,
       createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
       updatedAt: p.updatedAt ? new Date(p.updatedAt) : new Date(),
       shieldActivatedAt: p.shieldActivatedAt ? new Date(p.shieldActivatedAt) : null,
     }));
+
     const tradeHistory = (s.tradeHistory || []).map((t: any) => ({
       ...t,
       executedAt: t.executedAt ? new Date(t.executedAt) : new Date(),
     }));
-    const account = s.account ? {
-      ...s.account,
-      createdAt: s.account.createdAt ? new Date(s.account.createdAt) : new Date(),
-      updatedAt: s.account.updatedAt ? new Date(s.account.updatedAt) : new Date(),
-    } : null;
+
+    const account = s.account
+      ? {
+          ...s.account,
+          createdAt: s.account.createdAt ? new Date(s.account.createdAt) : new Date(),
+          updatedAt: s.account.updatedAt ? new Date(s.account.updatedAt) : new Date(),
+        }
+      : null;
+
     return { account, positions, tradeHistory };
   } catch (err) {
     console.warn('[CryptoTrading] Portfolio load failed:', err);
@@ -135,35 +188,18 @@ async function loadPortfolioFromSupabase(userId: string): Promise<{
 
 // ==========================================
 // SPOT TRADING STORE
-// Implements Spot Asset Model with Shield Mode
 // ==========================================
-
 interface SpotTradingState {
-  // Account
   account: SpotAccount | null;
-  
-  // Positions (crypto holdings)
   positions: SpotPosition[];
-  
-  // Trade history
   tradeHistory: SpotTrade[];
-  
-  // Real-time prices (from WebSocket)
   prices: Record<string, number>;
-
-  // Loading state for Supabase hydration
   _hydrated: boolean;
-  
-  // ==========================================
-  // ACCOUNT ACTIONS
-  // ==========================================
+
   initializeAccount: (userId: string, initialCash?: number) => void;
   loadFromSupabase: (userId: string, fallbackCash?: number) => Promise<void>;
   syncCashFromUser: (cash: number) => void;
-  
-  // ==========================================
-  // TRADING ACTIONS (Spot Model)
-  // ==========================================
+
   executeBuy: (
     symbol: string,
     name: string,
@@ -172,23 +208,17 @@ interface SpotTradingState {
     fee?: number,
     icon?: string
   ) => { success: boolean; error?: string };
-  
+
   executeSell: (
     positionId: string,
     quantity: number,
     price: number,
     fee?: number
   ) => { success: boolean; realizedPnL?: number; error?: string };
-  
-  // ==========================================
-  // PRICE UPDATE (WebSocket Handler)
-  // ==========================================
+
   updatePrice: (symbol: string, price: number) => void;
   updatePrices: (prices: Record<string, number>) => void;
-  
-  // ==========================================
-  // SHIELD MODE ACTIONS
-  // ==========================================
+
   activateShield: (positionId: string) => { success: boolean; error?: string };
   deactivateShield: (positionId: string) => { success: boolean; error?: string };
   toggleShield: (positionId: string) => { success: boolean; error?: string };
@@ -197,10 +227,7 @@ interface SpotTradingState {
   toggleGlobalShield: () => void;
   isGlobalShieldActive: () => boolean;
   getShieldSummary: () => ShieldSummary;
-  
-  // ==========================================
-  // COMPUTED VALUES
-  // ==========================================
+
   getTotalPortfolioValue: () => number;
   getDisplayPortfolioValue: () => number;
   getTotalEquity: () => number;
@@ -216,28 +243,25 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       tradeHistory: [],
       prices: {},
       _hydrated: false,
-      
-      // ==========================================
-      // ACCOUNT INITIALIZATION
-      // ==========================================
+
       initializeAccount: (userId, initialCash = 0) => {
         const existing = get();
 
-        // ✅ CRITICAL: If userId changed, clear stale data from previous user
-        if (existing.account && existing.account.userId && existing.account.userId !== userId) {
+        if (existing.account?.userId && existing.account.userId !== userId) {
           set({ positions: [], tradeHistory: [] });
         }
 
-        // Don't reinitialize if already loaded for this user
-        if (existing.account && existing.account.userId === userId && existing.positions.length > 0) {
-          // Just sync cash
+        if (existing.account?.userId === userId && existing.positions.length > 0) {
           if (initialCash > 0) {
-            set(state => ({
-              account: state.account ? { ...state.account, cashBalance: initialCash, updatedAt: new Date() } : null
+            set((state) => ({
+              account: state.account
+                ? { ...state.account, cashBalance: initialCash, updatedAt: new Date() }
+                : null,
             }));
           }
           return;
         }
+
         const now = new Date();
         const account: SpotAccount = {
           id: `spot_${userId}`,
@@ -252,16 +276,14 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           createdAt: now,
           updatedAt: now,
         };
+
         set({ account });
       },
 
-      // ==========================================
-      // LOAD FROM SUPABASE (cross-device sync)
-      // ==========================================
       loadFromSupabase: async (userId, fallbackCash = 0) => {
         const remote = await loadPortfolioFromSupabase(userId);
+
         if (remote && remote.positions && remote.positions.length > 0) {
-          // Remote has data — use it (positions survive across devices)
           const account = remote.account || {
             id: `spot_${userId}`,
             userId,
@@ -275,13 +297,16 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             createdAt: new Date(),
             updatedAt: new Date(),
           };
-          // Sync cash from user profile (always trust Supabase user balance)
+
           account.cashBalance = fallbackCash;
+
           const portfolioValue = remote.positions.reduce((sum, p) => sum + p.marketValue, 0);
           const displayPortfolioValue = remote.positions.reduce((sum, p) => sum + p.displayValue, 0);
+
           account.portfolioValue = portfolioValue;
           account.displayPortfolioValue = displayPortfolioValue;
           account.totalEquity = fallbackCash + displayPortfolioValue;
+
           set({
             account,
             positions: remote.positions,
@@ -290,10 +315,10 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           });
           return;
         }
-        // No remote data — check if localStorage already has data for this user
+
+        // If local (session) has data for this user, keep it and sync
         const local = get();
-        if (local.account && local.account.userId === userId && local.positions.length > 0) {
-          // localStorage has data for this user, keep it and sync to Supabase
+        if (local.account?.userId === userId && local.positions.length > 0) {
           set({ _hydrated: true });
           savePortfolioToSupabase(userId, {
             account: local.account,
@@ -302,25 +327,18 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           });
           return;
         }
-        // No data anywhere, initialize fresh
+
         get().initializeAccount(userId, fallbackCash);
         set({ _hydrated: true });
       },
-      
+
       syncCashFromUser: (cash) => {
         const state = get();
         if (!state.account) return;
-        
-        // Recalculate portfolio values
-        const portfolioValue = state.positions.reduce(
-          (sum, p) => sum + p.marketValue,
-          0
-        );
-        const displayPortfolioValue = state.positions.reduce(
-          (sum, p) => sum + p.displayValue,
-          0
-        );
-        
+
+        const portfolioValue = state.positions.reduce((sum, p) => sum + p.marketValue, 0);
+        const displayPortfolioValue = state.positions.reduce((sum, p) => sum + p.displayValue, 0);
+
         set({
           account: {
             ...state.account,
@@ -332,27 +350,17 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           },
         });
       },
-      
-      // ==========================================
-      // BUY EXECUTION (Spot Model)
-      // Balance = Quantity × Price
-      // ==========================================
+
       executeBuy: (symbol, name, quantity, price, fee = 0, icon) => {
         const state = get();
-        if (!state.account) {
-          return { success: false, error: 'Account not initialized' };
-        }
-        
+        if (!state.account) return { success: false, error: 'Account not initialized' };
+
         const totalCost = quantity * price + fee;
-        
-        if (totalCost > state.account.cashBalance) {
-          return { success: false, error: 'Insufficient balance' };
-        }
-        
+        if (totalCost > state.account.cashBalance) return { success: false, error: 'Insufficient balance' };
+
         const now = new Date();
-        const existingPosition = state.positions.find(p => p.symbol === symbol);
-        
-        // Create trade record
+        const existingPosition = state.positions.find((p) => p.symbol === symbol);
+
         const trade: SpotTrade = {
           id: `trade_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
           positionId: existingPosition?.id,
@@ -367,9 +375,8 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           netValue: totalCost,
           executedAt: now,
         };
-        
+
         if (existingPosition) {
-          // Add to existing position
           const newQty = existingPosition.quantity + quantity;
           const newAvgPrice = calculateNewAvgPrice(
             existingPosition.quantity,
@@ -380,23 +387,19 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           const newCostBasis = existingPosition.totalCostBasis + totalCost;
           const marketValue = calculateMarketValue(newQty, existingPosition.currentPrice);
           const { pnl, pnlPercent } = calculateUnrealizedPnL(marketValue, newCostBasis);
-          
-          // Get display values (respects shield)
-          const displayValues = existingPosition.shieldEnabled && existingPosition.shieldSnapPrice
-            ? {
-                value: newQty * existingPosition.shieldSnapPrice,
-                pnl: (newQty * existingPosition.shieldSnapPrice) - newCostBasis,
-                pnlPercent: ((newQty * existingPosition.shieldSnapPrice) - newCostBasis) / newCostBasis * 100,
-              }
-            : { value: marketValue, pnl, pnlPercent };
-          
+
+          const displayValues =
+            existingPosition.shieldEnabled && existingPosition.shieldSnapPrice
+              ? {
+                  value: newQty * existingPosition.shieldSnapPrice,
+                  pnl: newQty * existingPosition.shieldSnapPrice - newCostBasis,
+                  pnlPercent: ((newQty * existingPosition.shieldSnapPrice - newCostBasis) / newCostBasis) * 100,
+                }
+              : { value: marketValue, pnl, pnlPercent };
+
           set((state) => ({
             account: state.account
-              ? {
-                  ...state.account,
-                  cashBalance: state.account.cashBalance - totalCost,
-                  updatedAt: now,
-                }
+              ? { ...state.account, cashBalance: state.account.cashBalance - totalCost, updatedAt: now }
               : null,
             positions: state.positions.map((p) =>
               p.symbol === symbol
@@ -411,10 +414,7 @@ export const useSpotTradingStore = create<SpotTradingState>()(
                     displayValue: displayValues.value,
                     displayPnL: displayValues.pnl,
                     displayPnLPercent: displayValues.pnlPercent,
-                    // Update shield snap value if shield is active
-                    shieldSnapValue: p.shieldEnabled && p.shieldSnapPrice
-                      ? newQty * p.shieldSnapPrice
-                      : null,
+                    shieldSnapValue: p.shieldEnabled && p.shieldSnapPrice ? newQty * p.shieldSnapPrice : null,
                     updatedAt: now,
                   }
                 : p
@@ -422,8 +422,8 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             tradeHistory: [trade, ...state.tradeHistory],
           }));
         } else {
-          // Create new position
           const marketValue = calculateMarketValue(quantity, price);
+
           const newPosition: SpotPosition = {
             id: `pos_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
             userId: state.account.userId,
@@ -435,42 +435,36 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             totalCostBasis: totalCost,
             currentPrice: price,
             marketValue,
-            unrealizedPnL: -fee, // Initial P&L is just the fee
+            unrealizedPnL: -fee,
             unrealizedPnLPercent: fee > 0 ? (-fee / totalCost) * 100 : 0,
-            // Shield starts disabled
             shieldEnabled: false,
             shieldSnapPrice: null,
             shieldSnapValue: null,
             shieldActivatedAt: null,
-            // Display values (same as market when no shield)
             displayValue: marketValue,
             displayPnL: -fee,
             displayPnLPercent: fee > 0 ? (-fee / totalCost) * 100 : 0,
             createdAt: now,
             updatedAt: now,
           };
-          
+
           trade.positionId = newPosition.id;
-          
+
           set((state) => ({
             account: state.account
-              ? {
-                  ...state.account,
-                  cashBalance: state.account.cashBalance - totalCost,
-                  updatedAt: now,
-                }
+              ? { ...state.account, cashBalance: state.account.cashBalance - totalCost, updatedAt: now }
               : null,
             positions: [...state.positions, newPosition],
             tradeHistory: [trade, ...state.tradeHistory],
           }));
         }
-        
-        // Recalculate account totals
+
+        // totals
         const newState = get();
         const portfolioValue = newState.positions.reduce((sum, p) => sum + p.marketValue, 0);
         const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
         const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
-        
+
         set((state) => ({
           account: state.account
             ? {
@@ -482,8 +476,8 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               }
             : null,
         }));
-        
-        // 🔥 Sync the new balance to Supabase (deduct cost)
+
+        // ✅ sync + persist (RLS-safe)
         const finalState = get();
         if (finalState.account) {
           syncCryptoBalanceToSupabase(
@@ -492,40 +486,28 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             -totalCost,
             `Crypto Buy: ${quantity} ${symbol}`
           );
-          // 🔥 CRITICAL: Persist positions to Supabase for cross-device sync
           savePortfolioToSupabase(finalState.account.userId, {
             account: finalState.account,
             positions: finalState.positions,
             tradeHistory: finalState.tradeHistory,
           });
         }
-        
+
         return { success: true };
       },
-      
-      // ==========================================
-      // SELL EXECUTION (Spot Model)
-      // ==========================================
+
       executeSell: (positionId, quantity, price, fee = 0) => {
         const state = get();
-        if (!state.account) {
-          return { success: false, error: 'Account not initialized' };
-        }
-        
+        if (!state.account) return { success: false, error: 'Account not initialized' };
+
         const position = state.positions.find((p) => p.id === positionId);
-        if (!position) {
-          return { success: false, error: 'Position not found' };
-        }
-        
-        if (quantity > position.quantity) {
-          return { success: false, error: 'Quantity exceeds position size' };
-        }
-        
+        if (!position) return { success: false, error: 'Position not found' };
+        if (quantity > position.quantity) return { success: false, error: 'Quantity exceeds position size' };
+
         const now = new Date();
         const proceeds = quantity * price - fee;
         const realizedPnL = calculateRealizedPnL(quantity, price, position.avgBuyPrice) - fee;
-        
-        // Create trade record
+
         const trade: SpotTrade = {
           id: `trade_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
           positionId,
@@ -541,9 +523,8 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           realizedPnL,
           executedAt: now,
         };
-        
+
         if (quantity === position.quantity) {
-          // Close entire position
           set((state) => ({
             account: state.account
               ? {
@@ -557,21 +538,21 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             tradeHistory: [trade, ...state.tradeHistory],
           }));
         } else {
-          // Partial close
           const remainingQty = position.quantity - quantity;
           const remainingCostBasis = position.avgBuyPrice * remainingQty;
           const marketValue = calculateMarketValue(remainingQty, position.currentPrice);
           const { pnl, pnlPercent } = calculateUnrealizedPnL(marketValue, remainingCostBasis);
-          
-          // Get display values
-          const displayValues = position.shieldEnabled && position.shieldSnapPrice
-            ? {
-                value: remainingQty * position.shieldSnapPrice,
-                pnl: (remainingQty * position.shieldSnapPrice) - remainingCostBasis,
-                pnlPercent: ((remainingQty * position.shieldSnapPrice) - remainingCostBasis) / remainingCostBasis * 100,
-              }
-            : { value: marketValue, pnl, pnlPercent };
-          
+
+          const displayValues =
+            position.shieldEnabled && position.shieldSnapPrice
+              ? {
+                  value: remainingQty * position.shieldSnapPrice,
+                  pnl: remainingQty * position.shieldSnapPrice - remainingCostBasis,
+                  pnlPercent:
+                    ((remainingQty * position.shieldSnapPrice - remainingCostBasis) / remainingCostBasis) * 100,
+                }
+              : { value: marketValue, pnl, pnlPercent };
+
           set((state) => ({
             account: state.account
               ? {
@@ -593,9 +574,7 @@ export const useSpotTradingStore = create<SpotTradingState>()(
                     displayValue: displayValues.value,
                     displayPnL: displayValues.pnl,
                     displayPnLPercent: displayValues.pnlPercent,
-                    shieldSnapValue: p.shieldEnabled && p.shieldSnapPrice
-                      ? remainingQty * p.shieldSnapPrice
-                      : null,
+                    shieldSnapValue: p.shieldEnabled && p.shieldSnapPrice ? remainingQty * p.shieldSnapPrice : null,
                     updatedAt: now,
                   }
                 : p
@@ -603,13 +582,13 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             tradeHistory: [trade, ...state.tradeHistory],
           }));
         }
-        
-        // Recalculate account totals
+
+        // totals
         const newState = get();
         const portfolioValue = newState.positions.reduce((sum, p) => sum + p.marketValue, 0);
         const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
         const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
-        
+
         set((state) => ({
           account: state.account
             ? {
@@ -621,8 +600,8 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               }
             : null,
         }));
-        
-        // 🔥 CRITICAL: Sync the new balance to Supabase
+
+        // ✅ sync + persist (RLS-safe)
         const finalState = get();
         if (finalState.account) {
           syncCryptoBalanceToSupabase(
@@ -631,45 +610,37 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             realizedPnL,
             `Crypto Sell: ${quantity} ${position.symbol}`
           );
-          // 🔥 CRITICAL: Persist positions to Supabase for cross-device sync
           savePortfolioToSupabase(finalState.account.userId, {
             account: finalState.account,
             positions: finalState.positions,
             tradeHistory: finalState.tradeHistory,
           });
         }
-        
+
         return { success: true, realizedPnL };
       },
-      
-      // ==========================================
-      // PRICE UPDATES (WebSocket Handler)
-      // This is the core of the Spot Model:
-      // When price changes, positions update automatically
-      // ==========================================
+
       updatePrice: (symbol, price) => {
         set((state) => {
           const newPrices = { ...state.prices, [symbol]: price };
-          
-          // Update positions with new price
+
           const updatedPositions = state.positions.map((p) => {
             if (p.symbol !== symbol) return p;
-            
+
             const marketValue = calculateMarketValue(p.quantity, price);
-            const { pnl, pnlPercent } = calculateUnrealizedPnL(
-              marketValue,
-              p.totalCostBasis
-            );
-            
-            // Display values respect shield mode
-            const displayValues = p.shieldEnabled && p.shieldSnapPrice !== null
-              ? {
-                  value: p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice,
-                  pnl: (p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice) - p.totalCostBasis,
-                  pnlPercent: ((p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice) - p.totalCostBasis) / p.totalCostBasis * 100,
-                }
-              : { value: marketValue, pnl, pnlPercent };
-            
+            const { pnl, pnlPercent } = calculateUnrealizedPnL(marketValue, p.totalCostBasis);
+
+            const displayValues =
+              p.shieldEnabled && p.shieldSnapPrice !== null
+                ? {
+                    value: p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice,
+                    pnl: (p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice) - p.totalCostBasis,
+                    pnlPercent:
+                      ((p.shieldSnapValue ?? p.quantity * p.shieldSnapPrice) - p.totalCostBasis) / p.totalCostBasis *
+                      100,
+                  }
+                : { value: marketValue, pnl, pnlPercent };
+
             return {
               ...p,
               currentPrice: price,
@@ -682,12 +653,11 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               updatedAt: new Date(),
             };
           });
-          
-          // Recalculate account totals
+
           const portfolioValue = updatedPositions.reduce((sum, p) => sum + p.marketValue, 0);
           const displayPortfolioValue = updatedPositions.reduce((sum, p) => sum + p.displayValue, 0);
           const totalUnrealizedPnL = updatedPositions.reduce((sum, p) => sum + p.displayPnL, 0);
-          
+
           return {
             prices: newPrices,
             positions: updatedPositions,
@@ -704,56 +674,46 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           };
         });
       },
-      
+
       updatePrices: (prices) => {
-        Object.entries(prices).forEach(([symbol, price]) => {
-          get().updatePrice(symbol, price);
-        });
+        Object.entries(prices).forEach(([symbol, price]) => get().updatePrice(symbol, price));
       },
-      
-      // ==========================================
-      // SHIELD MODE ACTIONS
-      // ==========================================
-      
-      /**
-       * Activate Shield: Locks the current price for a position
-       * The position value stays frozen at this "snap price" until deactivated
-       */
+
       activateShield: (positionId) => {
         const state = get();
         const position = state.positions.find((p) => p.id === positionId);
-        
-        if (!position) {
-          return { success: false, error: 'Position not found' };
-        }
-        
-        if (position.shieldEnabled) {
-          return { success: false, error: 'Shield already active' };
-        }
-        
+        if (!position) return { success: false, error: 'Position not found' };
+        if (position.shieldEnabled) return { success: false, error: 'Shield already active' };
+
         const now = new Date();
         const snapPrice = position.currentPrice;
         const snapValue = position.quantity * snapPrice;
-        
-        // Log shield activation to database for audit trail
-        if (isSupabaseConfigured() && state.account?.userId) {
-          supabase.from('shield_events').insert({
-            user_id: state.account.userId,
-            position_id: positionId,
-            symbol: position.symbol,
-            event_type: 'activated',
-            snap_price: snapPrice,
-            snap_value: snapValue,
-            market_price: position.currentPrice,
-            market_value: position.marketValue,
-            quantity: position.quantity,
-            cost_basis: position.totalCostBasis,
-          }).then(({ error }) => {
-            if (error) console.error('[Shield] Failed to log activation:', error);
-            else console.log(`[Shield] Activation logged: ${position.symbol} @ $${snapPrice.toFixed(2)}`);
+
+        // ✅ Log shield event with auth.uid() user_id
+        if (isSupabaseConfigured()) {
+          supabase.auth.getUser().then(({ data }) => {
+            const uid = data.user?.id;
+            if (!uid) return;
+            supabase
+              .from('shield_events')
+              .insert({
+                user_id: uid,
+                position_id: positionId,
+                symbol: position.symbol,
+                event_type: 'activated',
+                snap_price: snapPrice,
+                snap_value: snapValue,
+                market_price: position.currentPrice,
+                market_value: position.marketValue,
+                quantity: position.quantity,
+                cost_basis: position.totalCostBasis,
+              })
+              .then(({ error }) => {
+                if (error) console.error('[Shield] Failed to log activation:', error);
+              });
           });
         }
-        
+
         set((state) => ({
           positions: state.positions.map((p) =>
             p.id === positionId
@@ -763,7 +723,6 @@ export const useSpotTradingStore = create<SpotTradingState>()(
                   shieldSnapPrice: snapPrice,
                   shieldSnapValue: snapValue,
                   shieldActivatedAt: now,
-                  // Update display values to use snapped values
                   displayValue: snapValue,
                   displayPnL: snapValue - p.totalCostBasis,
                   displayPnLPercent: ((snapValue - p.totalCostBasis) / p.totalCostBasis) * 100,
@@ -772,12 +731,11 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               : p
           ),
         }));
-        
-        // Recalculate account totals
+
         const newState = get();
         const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
         const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
-        
+
         set((state) => ({
           account: state.account
             ? {
@@ -789,8 +747,7 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               }
             : null,
         }));
-        
-        // Save shield state to Supabase
+
         const postActivate = get();
         if (postActivate.account) {
           savePortfolioToSupabase(postActivate.account.userId, {
@@ -802,55 +759,47 @@ export const useSpotTradingStore = create<SpotTradingState>()(
 
         return { success: true };
       },
-      
-      /**
-       * Deactivate Shield: Unlocks the position to track live price again
-       */
+
       deactivateShield: (positionId) => {
         const state = get();
         const position = state.positions.find((p) => p.id === positionId);
-        
-        if (!position) {
-          return { success: false, error: 'Position not found' };
-        }
-        
-        if (!position.shieldEnabled) {
-          return { success: false, error: 'Shield not active' };
-        }
-        
+        if (!position) return { success: false, error: 'Position not found' };
+        if (!position.shieldEnabled) return { success: false, error: 'Shield not active' };
+
         const now = new Date();
         const marketValue = position.marketValue;
-        const { pnl, pnlPercent } = calculateUnrealizedPnL(
-          marketValue,
-          position.totalCostBasis
-        );
-        
-        // Calculate shield impact (difference between shielded and market value)
+        const { pnl, pnlPercent } = calculateUnrealizedPnL(marketValue, position.totalCostBasis);
         const shieldImpact = (position.shieldSnapValue ?? 0) - marketValue;
-        
-        // Log shield deactivation to database for audit trail
-        if (isSupabaseConfigured() && state.account?.userId) {
-          supabase.from('shield_events').insert({
-            user_id: state.account.userId,
-            position_id: positionId,
-            symbol: position.symbol,
-            event_type: 'deactivated',
-            snap_price: position.shieldSnapPrice,
-            snap_value: position.shieldSnapValue,
-            market_price: position.currentPrice,
-            market_value: marketValue,
-            quantity: position.quantity,
-            cost_basis: position.totalCostBasis,
-            shield_impact: shieldImpact,
-            duration_seconds: position.shieldActivatedAt 
-              ? Math.floor((now.getTime() - position.shieldActivatedAt.getTime()) / 1000) 
-              : null,
-          }).then(({ error }) => {
-            if (error) console.error('[Shield] Failed to log deactivation:', error);
-            else console.log(`[Shield] Deactivation logged: ${position.symbol} | Impact: ${shieldImpact >= 0 ? '+' : ''}$${shieldImpact.toFixed(2)}`);
+
+        // ✅ Log shield event with auth.uid() user_id
+        if (isSupabaseConfigured()) {
+          supabase.auth.getUser().then(({ data }) => {
+            const uid = data.user?.id;
+            if (!uid) return;
+            supabase
+              .from('shield_events')
+              .insert({
+                user_id: uid,
+                position_id: positionId,
+                symbol: position.symbol,
+                event_type: 'deactivated',
+                snap_price: position.shieldSnapPrice,
+                snap_value: position.shieldSnapValue,
+                market_price: position.currentPrice,
+                market_value: marketValue,
+                quantity: position.quantity,
+                cost_basis: position.totalCostBasis,
+                shield_impact: shieldImpact,
+                duration_seconds: position.shieldActivatedAt
+                  ? Math.floor((now.getTime() - position.shieldActivatedAt.getTime()) / 1000)
+                  : null,
+              })
+              .then(({ error }) => {
+                if (error) console.error('[Shield] Failed to log deactivation:', error);
+              });
           });
         }
-        
+
         set((state) => ({
           positions: state.positions.map((p) =>
             p.id === positionId
@@ -860,7 +809,6 @@ export const useSpotTradingStore = create<SpotTradingState>()(
                   shieldSnapPrice: null,
                   shieldSnapValue: null,
                   shieldActivatedAt: null,
-                  // Update display values to use live values
                   displayValue: marketValue,
                   displayPnL: pnl,
                   displayPnLPercent: pnlPercent,
@@ -869,12 +817,11 @@ export const useSpotTradingStore = create<SpotTradingState>()(
               : p
           ),
         }));
-        
-        // Recalculate account totals
+
         const newStateD = get();
         const displayPortfolioValueD = newStateD.positions.reduce((sum, p) => sum + p.displayValue, 0);
         const totalUnrealizedPnLD = newStateD.positions.reduce((sum, p) => sum + p.displayPnL, 0);
-        
+
         set((state) => ({
           account: state.account
             ? {
@@ -887,7 +834,6 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             : null,
         }));
 
-        // Save shield state to Supabase
         const postDeactivate = get();
         if (postDeactivate.account) {
           savePortfolioToSupabase(postDeactivate.account.userId, {
@@ -896,76 +842,39 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             tradeHistory: postDeactivate.tradeHistory,
           });
         }
-        
+
         return { success: true };
       },
-      
-      /**
-       * Toggle Shield: Convenience method to flip shield state
-       */
+
       toggleShield: (positionId) => {
-        const state = get();
-        const position = state.positions.find((p) => p.id === positionId);
-        
-        if (!position) {
-          return { success: false, error: 'Position not found' };
-        }
-        
-        return position.shieldEnabled
-          ? get().deactivateShield(positionId)
-          : get().activateShield(positionId);
+        const position = get().positions.find((p) => p.id === positionId);
+        if (!position) return { success: false, error: 'Position not found' };
+        return position.shieldEnabled ? get().deactivateShield(positionId) : get().activateShield(positionId);
       },
 
-      /**
-       * Enable shields on ALL positions (global on)
-       */
       enableAllShields: () => {
-        const state = get();
-        state.positions.forEach((p) => {
-          if (!p.shieldEnabled) {
-            get().activateShield(p.id);
-          }
+        get().positions.forEach((p) => {
+          if (!p.shieldEnabled) get().activateShield(p.id);
         });
       },
 
-      /**
-       * Disable shields on ALL positions (global off)
-       */
       disableAllShields: () => {
-        const state = get();
-        state.positions.forEach((p) => {
-          if (p.shieldEnabled) {
-            get().deactivateShield(p.id);
-          }
+        get().positions.forEach((p) => {
+          if (p.shieldEnabled) get().deactivateShield(p.id);
         });
       },
 
-      /**
-       * Toggle all shields on/off
-       */
       toggleGlobalShield: () => {
         const anyActive = get().positions.some((p) => p.shieldEnabled);
-        if (anyActive) {
-          get().disableAllShields();
-        } else {
-          get().enableAllShields();
-        }
+        anyActive ? get().disableAllShields() : get().enableAllShields();
       },
 
-      /**
-       * Check if any shield is active
-       */
-      isGlobalShieldActive: () => {
-        return get().positions.some((p) => p.shieldEnabled);
-      },
-      
-      /**
-       * Get summary of all active shields
-       */
+      isGlobalShieldActive: () => get().positions.some((p) => p.shieldEnabled),
+
       getShieldSummary: () => {
         const state = get();
         const shieldedPositions = state.positions.filter((p) => p.shieldEnabled);
-        
+
         return {
           totalShielded: shieldedPositions.reduce((sum, p) => sum + (p.shieldSnapValue ?? 0), 0),
           activeShields: shieldedPositions.length,
@@ -983,48 +892,33 @@ export const useSpotTradingStore = create<SpotTradingState>()(
           }),
         };
       },
-      
-      // ==========================================
-      // COMPUTED VALUES
-      // ==========================================
-      getTotalPortfolioValue: () => {
-        return get().positions.reduce((sum, p) => sum + p.marketValue, 0);
-      },
-      
-      getDisplayPortfolioValue: () => {
-        return get().positions.reduce((sum, p) => sum + p.displayValue, 0);
-      },
-      
+
+      getTotalPortfolioValue: () => get().positions.reduce((sum, p) => sum + p.marketValue, 0),
+      getDisplayPortfolioValue: () => get().positions.reduce((sum, p) => sum + p.displayValue, 0),
+
       getTotalEquity: () => {
         const state = get();
         if (!state.account) return 0;
         return state.account.cashBalance + get().getDisplayPortfolioValue();
       },
-      
-      getTotalUnrealizedPnL: () => {
-        return get().positions.reduce((sum, p) => sum + p.displayPnL, 0);
-      },
-      
-      getPositionBySymbol: (symbol) => {
-        return get().positions.find((p) => p.symbol === symbol);
-      },
+
+      getTotalUnrealizedPnL: () => get().positions.reduce((sum, p) => sum + p.displayPnL, 0),
+      getPositionBySymbol: (symbol) => get().positions.find((p) => p.symbol === symbol),
     }),
     {
       name: 'novatrade-spot-trading',
+      storage: zustandStorage,
       partialize: (state) => ({
         account: state.account,
         positions: state.positions,
-        tradeHistory: state.tradeHistory.slice(0, 100), // Keep last 100 trades
+        tradeHistory: state.tradeHistory.slice(0, 100),
         prices: state.prices,
       }),
     }
   )
 );
 
-// ==========================================
-// CONVENIENCE HOOKS
-// ==========================================
-
+// Convenience hooks
 export function useSpotPosition(symbol: string) {
   return useSpotTradingStore((state) => state.positions.find((p) => p.symbol === symbol));
 }
@@ -1035,10 +929,10 @@ export function useShieldedPositions() {
 
 export function useSpotEquity() {
   const account = useSpotTradingStore((state) => state.account);
-  const displayPortfolioValue = useSpotTradingStore((state) => 
+  const displayPortfolioValue = useSpotTradingStore((state) =>
     state.positions.reduce((sum, p) => sum + p.displayValue, 0)
   );
-  
+
   return {
     cashBalance: account?.cashBalance ?? 0,
     portfolioValue: displayPortfolioValue,
