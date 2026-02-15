@@ -12,7 +12,12 @@ function cleanSymbols(raw: string) {
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean)
-    .filter((s) => /^[A-Z0-9.\-:_]{1,20}$/.test(s));
+    .filter((s) => /^[A-Z0-9.\-]{1,15}$/.test(s));
+}
+
+function n(v: any) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
 }
 
 export async function GET(req: NextRequest) {
@@ -21,10 +26,13 @@ export async function GET(req: NextRequest) {
   const symbols = cleanSymbols(raw);
 
   if (!symbols.length) {
-    return NextResponse.json({ ok: true, provider: 'twelvedata', symbols: [], data: {}, error: null }, { status: 200 });
+    return NextResponse.json({ ok: true, provider: 'alpaca', symbols: [], data: {}, error: null }, { status: 200 });
   }
 
-  const key = process.env.TWELVEDATA_API_KEY || process.env.TWELVE_DATA_API_KEY || '';
+  const key = process.env.ALPACA_API_KEY || '';
+  const secret = process.env.ALPACA_API_SECRET || '';
+  const feed = (process.env.ALPACA_DATA_FEED || 'iex').toLowerCase();
+
   const cacheKey = `quote:${symbols.join(',')}`;
 
   // cache hit
@@ -33,98 +41,82 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...hit.payload, cached: true }, { status: 200 });
   }
 
-  if (!key) {
-    const payload = {
-      ok: false,
-      provider: 'twelvedata',
-      symbols,
-      data: {},
-      error: 'missing_TWELVEDATA_API_KEY',
-      cached: false,
-    };
+  if (!key || !secret) {
+    const payload = { ok: false, provider: 'alpaca', symbols, data: {}, error: 'missing_ALPACA_keys', cached: false };
     cache.set(cacheKey, { ts: Date.now(), payload });
     return NextResponse.json(payload, { status: 200 });
   }
 
   try {
-    const apiUrl = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(
-      symbols.join(',')
-    )}&apikey=${encodeURIComponent(key)}`;
+    // Snapshots gives latestTrade/latestQuote + dailyBar + prevDailyBar
+    const apiUrl =
+      `https://data.alpaca.markets/v2/stocks/snapshots?symbols=${encodeURIComponent(symbols.join(','))}` +
+      `&feed=${encodeURIComponent(feed)}`;
 
-    const r = await fetch(apiUrl, { cache: 'no-store' });
-    const json = await r.json();
+    const r = await fetch(apiUrl, {
+      cache: 'no-store',
+      headers: {
+        accept: 'application/json',
+        'APCA-API-KEY-ID': key,
+        'APCA-API-SECRET-KEY': secret,
+      },
+    });
 
-    // TwelveData may return { status:"error", message:"..." }
-    if (!r.ok || json?.status === 'error') {
-      const payload = {
-        ok: false,
-        provider: 'twelvedata',
-        symbols,
-        data: {},
-        error: json?.message || `twelvedata_http_${r.status}`,
-        cached: false,
-      };
+    const text = await r.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch { json = null; }
 
-      // return last good cache if exists
+    if (!r.ok || !json) {
+      const payload = { ok: false, provider: 'alpaca', symbols, data: {}, error: `alpaca_http_${r.status}`, cached: false };
       if (hit?.payload?.data && Object.keys(hit.payload.data).length) {
         return NextResponse.json({ ...hit.payload, ok: false, error: payload.error, cached: true }, { status: 200 });
       }
-
       cache.set(cacheKey, { ts: Date.now(), payload });
       return NextResponse.json(payload, { status: 200 });
     }
 
-    // normalize multi/single response into a map
     const data: Record<string, any> = {};
-    if (json && typeof json === 'object' && !Array.isArray(json)) {
-      // multi symbol usually returns {AAPL:{...}, NVDA:{...}}
-      if (symbols.length > 1) {
-        for (const sym of symbols) {
-          const q = (json as any)[sym];
-          if (q && typeof q === 'object') {
-            data[sym] = {
-              symbol: sym,
-              price: Number(q.close ?? q.price ?? q.last ?? q?.quote?.close ?? 0) || 0,
-              open: Number(q.open ?? 0) || 0,
-              high: Number(q.high ?? 0) || 0,
-              low: Number(q.low ?? 0) || 0,
-              previous_close: Number(q.previous_close ?? 0) || 0,
-              change: Number(q.change ?? 0) || 0,
-              percent_change: Number(q.percent_change ?? 0) || 0,
-              timestamp: Date.now(),
-              raw: q,
-            };
-          }
-        }
-      } else {
-        const sym = symbols[0];
-        data[sym] = {
-          symbol: sym,
-          price: Number(json.close ?? json.price ?? json.last ?? 0) || 0,
-          open: Number(json.open ?? 0) || 0,
-          high: Number(json.high ?? 0) || 0,
-          low: Number(json.low ?? 0) || 0,
-          previous_close: Number(json.previous_close ?? 0) || 0,
-          change: Number(json.change ?? 0) || 0,
-          percent_change: Number(json.percent_change ?? 0) || 0,
-          timestamp: Date.now(),
-          raw: json,
-        };
-      }
+    for (const sym of symbols) {
+      const snap = json?.[sym];
+      if (!snap) continue;
+
+      const latestTradeP = n(snap?.latestTrade?.p);
+      const minuteClose = n(snap?.minuteBar?.c);
+      const daily = snap?.dailyBar;
+      const prev = snap?.prevDailyBar;
+
+      const price = latestTradeP || minuteClose || n(daily?.c);
+
+      const open = n(daily?.o);
+      const high = n(daily?.h);
+      const low = n(daily?.l);
+      const previous_close = n(prev?.c);
+
+      const change = price && previous_close ? price - previous_close : 0;
+      const percent_change = previous_close ? (change / previous_close) * 100 : 0;
+
+      data[sym] = {
+        symbol: sym,
+        price,
+        open,
+        high,
+        low,
+        previous_close,
+        change,
+        percent_change,
+        timestamp: Date.now(),
+        raw: snap,
+      };
     }
 
-    const payload = { ok: true, provider: 'twelvedata', symbols, data, error: null, cached: false };
+    const payload = { ok: true, provider: 'alpaca', symbols, data, error: null, cached: false };
     cache.set(cacheKey, { ts: Date.now(), payload });
 
     return NextResponse.json(payload, { status: 200 });
   } catch (e: any) {
-    // fall back to cached good response
     if (hit?.payload) {
-      return NextResponse.json({ ...hit.payload, ok: false, error: String(e?.message || e), cached: true }, { status: 200 });
+      return NextResponse.json({ ...hit.payload, ok: false, error: 'network_error', cached: true }, { status: 200 });
     }
-    return NextResponse.json(
-      { ok: false, provider: 'twelvedata', symbols, data: {}, error: String(e?.message || e), cached: false },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: false, provider: 'alpaca', symbols, data: {}, error: 'network_error', cached: false }, { status: 200 });
   }
 }

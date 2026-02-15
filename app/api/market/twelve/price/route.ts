@@ -8,46 +8,65 @@ function json(status: number, body: any) {
   return NextResponse.json(body, { status });
 }
 
-async function fetchWithTimeout(url: string, ms = 8000) {
+async function fetchWithTimeout(url: string, init: RequestInit, ms = 8000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
-    return res;
+    return await fetch(url, { ...init, signal: ctrl.signal, cache: "no-store" });
   } finally {
     clearTimeout(t);
   }
 }
 
+function clampSymbol(sym: string) {
+  const s = (sym || "").trim().toUpperCase();
+  if (!s) return "";
+  if (!/^[A-Z0-9.\-]{1,15}$/.test(s)) return "";
+  return s;
+}
+
 export async function GET(req: NextRequest) {
-  const key = process.env.TWELVE_DATA_API_KEY;
-  if (!key) return json(500, { error: "Missing TWELVE_DATA_API_KEY" });
+  const key = process.env.ALPACA_API_KEY;
+  const secret = process.env.ALPACA_API_SECRET;
+  const feed = (process.env.ALPACA_DATA_FEED || "iex").toLowerCase();
+
+  if (!key || !secret) return json(500, { error: "Missing ALPACA_API_KEY / ALPACA_API_SECRET" });
 
   const { searchParams } = new URL(req.url);
-  const symbol = (searchParams.get("symbol") || "").trim();
+  const symbol = clampSymbol(searchParams.get("symbol") || "");
 
-  if (!symbol) return json(400, { error: "Missing ?symbol=" });
+  if (!symbol) return json(400, { error: "Missing/invalid ?symbol=" });
 
   const url =
-    `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbol)}` +
-    `&apikey=${encodeURIComponent(key)}`;
+    `https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/trades/latest` +
+    `?feed=${encodeURIComponent(feed)}`;
 
   try {
-    const res = await fetchWithTimeout(url);
-    const data = await res.json();
+    const res = await fetchWithTimeout(url, {
+      headers: {
+        accept: "application/json",
+        "APCA-API-KEY-ID": key,
+        "APCA-API-SECRET-KEY": secret,
+      },
+    });
 
-    // Twelve error format can include status/message/code
-    if (!res.ok || data?.status === "error" || data?.code) {
-      return json(502, { error: "TwelveDataError", details: data });
+    const text = await res.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
     }
 
-    const price = Number.parseFloat(data?.price);
-    if (!Number.isFinite(price)) {
-      return json(502, { error: "Bad price from Twelve", details: data });
-    }
+    if (!res.ok || !data?.trade) return json(502, { error: "UpstreamError" });
 
-    return json(200, { symbol, price, ts: Date.now() });
-  } catch (e: any) {
-    return json(502, { error: "Price fetch failed", message: String(e?.message || e) });
+    const price = Number(data.trade?.p);
+    const ts = Date.parse(String(data.trade?.t || "")) || Date.now();
+
+    if (!Number.isFinite(price)) return json(502, { error: "Bad price" });
+
+    return json(200, { symbol, price, ts });
+  } catch {
+    return json(502, { error: "Price fetch failed" });
   }
 }
