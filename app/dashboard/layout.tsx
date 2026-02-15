@@ -62,6 +62,12 @@ const bottomNav = [
   { name: 'Help', href: '/dashboard/help', icon: HelpCircle },
 ];
 
+// ----- helpers
+const n = (v: any) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
+
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -69,10 +75,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
 
-  // Unified balance (from your existing system)
-  const { balance, isInitialized } = useUnifiedBalance();
+  // keep this hook if other pages depend on it, but DO NOT use it as the cash source
+  const { balance: unifiedBalance, isInitialized } = useUnifiedBalance();
 
-  // Trading store hooks (spot hold model updates here)
+  // Trading store hooks (spot/stocks logic)
   const initializeAccounts = useTradingAccountStore((s) => s.initializeAccounts);
   const syncBalanceFromUser = useTradingAccountStore((s) => s.syncBalanceFromUser);
   const loadStocksFromSupabase = useTradingAccountStore((s) => s.loadStocksFromSupabase);
@@ -81,36 +87,51 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // Redirect if not authenticated
+  // ✅ Redirect if not authenticated
   useEffect(() => {
     if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
 
-  // ✅ Initialize + keep store balance in sync (does NOT use FX logic)
+  // ✅ CASH ONLY (the source of truth for the header + stock-buy behavior)
+  // Prefer DB fields you showed: balance_available, balance_bonus, balance_locked
+  const availableCash =
+    n((user as any)?.balance_available) ||
+    n((user as any)?.balanceAvailable) ||
+    // only fallback to unified "available" (NOT total)
+    n((unifiedBalance as any)?.available);
+
+  const bonusCash =
+    n((user as any)?.balance_bonus) ||
+    n((user as any)?.bonusBalance) ||
+    n((unifiedBalance as any)?.bonus);
+
+  // optional if you want to show locked somewhere later
+  // const lockedCash = n((user as any)?.balance_locked) || n((unifiedBalance as any)?.locked);
+
+  // ✅ Initialize + sync trading store with CASH ONLY (never total)
   useEffect(() => {
     if (!user?.id) return;
     if (!isInitialized) return;
 
-    const baseBalance =
-      Number((balance as any)?.available ?? (balance as any)?.total ?? 0) || 0;
+    const baseBalance = availableCash; // ✅ cash-only
 
-    // Only re-init when user changes
+    // only re-init when user changes
     if (!spotUserId || spotUserId !== user.id) {
       initializeAccounts(user.id, baseBalance);
       loadStocksFromSupabase(user.id, baseBalance).catch(() => {});
+      return; // init handled
     }
 
-    // Always sync balances (doesn’t wipe positions)
+    // always sync cash (won’t wipe positions)
     syncBalanceFromUser(baseBalance);
   }, [
     user?.id,
     isInitialized,
-    (balance as any)?.total,
-    (balance as any)?.available,
+    availableCash,
     spotUserId,
     initializeAccounts,
-    syncBalanceFromUser,
     loadStocksFromSupabase,
+    syncBalanceFromUser,
   ]);
 
   const handleLogout = async () => {
@@ -129,12 +150,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     );
   }
 
-  const totalBal = Number((balance as any)?.total ?? 0) || 0;
-  const bonusBal = Number((balance as any)?.bonus ?? 0) || 0;
-
   return (
     <div className="min-h-screen bg-void flex">
-      {/* ✅ Stock live price sync (Twelve) — ONE TIME in layout */}
+      {/* ✅ Stock live price sync (throttled + chunked in component) */}
       <StockPriceSync />
 
       {/* Desktop Sidebar */}
@@ -150,11 +168,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <TrendingUp className="w-6 h-6 text-void" />
             </div>
             {sidebarOpen && (
-              <motion.span
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-xl font-display font-bold text-cream"
-              >
+              <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-xl font-display font-bold text-cream">
                 NOVA<span className="text-gold">TRADE</span>
               </motion.span>
             )}
@@ -259,9 +273,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             onClick={toggleSidebar}
             className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
           >
-            <ChevronDown
-              className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`}
-            />
+            <ChevronDown className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
             {sidebarOpen && <span className="text-sm">Collapse</span>}
           </button>
         </div>
@@ -284,7 +296,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               exit={{ x: -280 }}
               className="lg:hidden fixed inset-y-0 left-0 w-72 bg-obsidian border-r border-white/5 z-50 flex flex-col"
             >
-              {/* Mobile Logo */}
               <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
                 <Link href="/dashboard" className="flex items-center gap-2">
                   <div className="w-10 h-10 bg-gradient-to-br from-gold to-gold/60 rounded-xl flex items-center justify-center">
@@ -299,7 +310,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 </button>
               </div>
 
-              {/* Mobile Navigation */}
               <nav className="flex-1 overflow-y-auto py-4 px-3">
                 <ul className="space-y-1">
                   {navigation.map((item) => (
@@ -375,23 +385,15 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       </AnimatePresence>
 
       {/* Main Content */}
-      <div
-        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
-          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
-        }`}
-      >
+      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'}`}>
         {/* Top Header */}
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           {/* Left */}
           <div className="flex items-center gap-4">
-            <button
-              onClick={toggleMobileMenu}
-              className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors"
-            >
+            <button onClick={toggleMobileMenu} className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors">
               <Menu className="w-6 h-6" />
             </button>
 
-            {/* Search */}
             <div className="hidden sm:flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <Search className="w-4 h-4 text-slate-500" />
               <input
@@ -399,22 +401,20 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 placeholder="Search assets, traders..."
                 className="bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none w-48 lg:w-64"
               />
-              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">
-                ⌘K
-              </kbd>
+              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">⌘K</kbd>
             </div>
           </div>
 
           {/* Right */}
           <div className="flex items-center gap-3">
-            {/* Balance */}
+            {/* ✅ Balance (CASH ONLY) */}
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${totalBal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                {bonusBal > 0 && (
+                ${availableCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                {bonusCash > 0 && (
                   <span className="text-slate-400 text-[10px] ml-1">
-                    (incl. ${bonusBal.toLocaleString()} bonus)
+                    (bonus ${bonusCash.toLocaleString(undefined, { maximumFractionDigits: 2 })})
                   </span>
                 )}
               </p>
@@ -434,9 +434,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
-                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">
-                  Connect Wallet
-                </span>
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
               </Link>
             )}
 
@@ -449,7 +447,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               Deposit
             </Link>
 
-            {/* Notifications */}
             <NotificationPanel />
 
             {/* User Menu */}
@@ -473,9 +470,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                     className="absolute right-0 mt-2 w-56 bg-charcoal border border-white/10 rounded-xl shadow-2xl overflow-hidden"
                   >
                     <div className="p-3 border-b border-white/5">
-                      <p className="text-sm font-medium text-cream">
-                        {user.firstName || user.email.split('@')[0]}
-                      </p>
+                      <p className="text-sm font-medium text-cream">{user.firstName || user.email.split('@')[0]}</p>
                       <p className="text-xs text-slate-500">{user.email}</p>
                       {user.walletAddress && (
                         <div className="flex items-center gap-1.5 mt-1.5">
@@ -530,11 +525,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        {/* Page Content */}
         <main className="flex-1 p-4 lg:p-6">{children}</main>
       </div>
 
-      {/* Support Widget */}
       <SupportWidget />
     </div>
   );
