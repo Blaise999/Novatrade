@@ -29,8 +29,9 @@ import {
 
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore } from '@/lib/ui-store';
-import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
 import { useTradingAccountStore } from '@/lib/trading-store';
+
+import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 
 import SupportWidget from '@/components/SupportWidget';
 import NotificationPanel from '@/components/NotificationPanel';
@@ -63,9 +64,17 @@ const bottomNav = [
 ];
 
 // ----- helpers
-const n = (v: any) => {
+const n = (v: unknown) => {
   const x = Number(v);
   return Number.isFinite(x) ? x : 0;
+};
+
+type CashRow = {
+  balance_available?: string | number | null;
+  balanceAvailable?: string | number | null;
+  balance?: string | number | null;
+  balance_bonus?: string | number | null;
+  balance_locked?: string | number | null;
 };
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
@@ -74,9 +83,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
   const { user, logout, isAuthenticated, isLoading } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
-
-  // keep this hook if other pages depend on it, but DO NOT use it as the cash source
-  const { balance: unifiedBalance, isInitialized } = useUnifiedBalance();
 
   // Trading store hooks (spot/stocks logic)
   const initializeAccounts = useTradingAccountStore((s) => s.initializeAccounts);
@@ -87,47 +93,98 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // ✅ Redirect if not authenticated
+  // ✅ REAL CASH from DB (preferred)
+  const [dbCash, setDbCash] = useState<number | null>(null);
+
+  // Redirect if not authenticated
   useEffect(() => {
     if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
 
-  // ✅ CASH ONLY (the source of truth for the header + stock-buy behavior)
-  // Prefer DB fields you showed: balance_available, balance_bonus, balance_locked
-  const availableCash =
+  // Pull cash balance from DB (tries common tables) so header is correct even if store lacks fields
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadCash = async () => {
+      if (!user?.id) return;
+      if (!isSupabaseConfigured()) return;
+
+      const tryTables: Array<{ table: string; columns: string }> = [
+        { table: 'wallets', columns: 'balance_available,balance' },
+        { table: 'users', columns: 'balance_available,balance' },
+      ];
+
+      for (const t of tryTables) {
+        try {
+          const { data, error } = await supabase
+            .from(t.table)
+            .select(t.columns)
+            .eq('id', user.id)
+            .maybeSingle<CashRow>();
+
+          if (!error && data) {
+            const cash =
+              n(data.balance_available) ||
+              n((data as any).balanceAvailable) ||
+              n(data.balance);
+
+            if (!cancelled) setDbCash(cash);
+            return;
+          }
+        } catch {
+          // try next table
+        }
+      }
+
+      // If both tables fail, don’t crash. Just keep null.
+      if (!cancelled) setDbCash(null);
+    };
+
+    loadCash();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
+  // ✅ CASH (fallbacks from user object if DB fetch isn't available yet)
+  const userCash =
     n((user as any)?.balance_available) ||
     n((user as any)?.balanceAvailable) ||
-    // only fallback to unified "available" (NOT total)
-    n((unifiedBalance as any)?.available);
+    // LAST resort: old field names if you used them
+    n((user as any)?.balance);
 
-  const bonusCash =
-    n((user as any)?.balance_bonus) ||
-    n((user as any)?.bonusBalance) ||
-    n((unifiedBalance as any)?.bonus);
+  const cash = dbCash ?? userCash;
 
-  // optional if you want to show locked somewhere later
-  // const lockedCash = n((user as any)?.balance_locked) || n((unifiedBalance as any)?.locked);
+  // We only consider it "ready" if:
+  // - DB cash loaded, OR
+  // - user has a real cash field (even if 0)
+  const hasUserCashField =
+    (user as any)?.balance_available !== undefined ||
+    (user as any)?.balanceAvailable !== undefined ||
+    (user as any)?.balance !== undefined;
 
-  // ✅ Initialize + sync trading store with CASH ONLY (never total)
+  const cashReady = dbCash !== null || hasUserCashField;
+
+  // ✅ Initialize + sync trading store with CASH ONLY (never total, never bonus)
   useEffect(() => {
     if (!user?.id) return;
-    if (!isInitialized) return;
+    if (!cashReady) return;
 
-    const baseBalance = availableCash; // ✅ cash-only
+    const baseBalance = cash; // cash-only source of truth
 
-    // only re-init when user changes
+    // Only re-init when user changes
     if (!spotUserId || spotUserId !== user.id) {
       initializeAccounts(user.id, baseBalance);
       loadStocksFromSupabase(user.id, baseBalance).catch(() => {});
-      return; // init handled
+      return;
     }
 
-    // always sync cash (won’t wipe positions)
+    // Always sync cash (won’t wipe positions)
     syncBalanceFromUser(baseBalance);
   }, [
     user?.id,
-    isInitialized,
-    availableCash,
+    cashReady,
+    cash,
     spotUserId,
     initializeAccounts,
     loadStocksFromSupabase,
@@ -150,9 +207,15 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     );
   }
 
+  const formatCash = (val: number) =>
+    `$${val.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+
   return (
     <div className="min-h-screen bg-void flex">
-      {/* ✅ Stock live price sync (throttled + chunked in component) */}
+      {/* Stock live price sync */}
       <StockPriceSync />
 
       {/* Desktop Sidebar */}
@@ -195,9 +258,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
                           <ChevronDown
-                            className={`w-4 h-4 transition-transform ${
-                              expandedMenu === item.name ? 'rotate-180' : ''
-                            }`}
+                            className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
                           />
                         </>
                       )}
@@ -234,9 +295,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                   <Link
                     href={item.href}
                     className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                      isActive(item.href)
-                        ? 'bg-gold/10 text-gold'
-                        : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                      isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -256,9 +315,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <Link
                   href={item.href}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                    isActive(item.href)
-                      ? 'bg-gold/10 text-gold'
-                      : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                    isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -327,9 +384,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                             <item.icon className="w-5 h-5" />
                             <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
                             <ChevronDown
-                              className={`w-4 h-4 transition-transform ${
-                                expandedMenu === item.name ? 'rotate-180' : ''
-                              }`}
+                              className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
                             />
                           </button>
 
@@ -407,16 +462,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
           {/* Right */}
           <div className="flex items-center gap-3">
-            {/* ✅ Balance (CASH ONLY) */}
+            {/* ✅ Balance (REAL CASH ONLY) — bonus hint removed */}
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">
-                ${availableCash.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                {bonusCash > 0 && (
-                  <span className="text-slate-400 text-[10px] ml-1">
-                    (bonus ${bonusCash.toLocaleString(undefined, { maximumFractionDigits: 2 })})
-                  </span>
-                )}
+                {cashReady ? formatCash(cash) : '—'}
               </p>
             </div>
 
