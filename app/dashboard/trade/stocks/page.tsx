@@ -27,7 +27,7 @@ import { StockPosition } from '@/lib/trading-types';
 import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 
-// ✅ Twelve Data helpers we created
+// ✅ Twelve Data helpers
 import { fetchCandles, fetchQuotesBatch } from '@/lib/market/twelve';
 
 type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
@@ -121,11 +121,9 @@ function tfToTwelveInterval(tf: Timeframe) {
 }
 
 function parseTwelveDatetimeToMs(dt: string) {
-  // Twelve often returns "YYYY-MM-DD HH:mm:ss"
   if (!dt) return Date.now();
   const isoLike = dt.includes(' ') ? dt.replace(' ', 'T') : dt;
 
-  // Some Twelve feeds return local/UTC strings; try Z then fallback
   const withZ = isoLike.endsWith('Z') ? isoLike : `${isoLike}Z`;
   const t1 = Date.parse(withZ);
   if (Number.isFinite(t1)) return t1;
@@ -134,6 +132,16 @@ function parseTwelveDatetimeToMs(dt: string) {
   if (Number.isFinite(t2)) return t2;
 
   return Date.now();
+}
+
+function isTwelveCreditsError(msg: string) {
+  const s = (msg || '').toLowerCase();
+  return (
+    s.includes('api credits') ||
+    s.includes('current minute') ||
+    s.includes('limit being') ||
+    s.includes('twelvedata.com/pricing')
+  );
 }
 
 export default function StockTradingPage() {
@@ -146,8 +154,7 @@ export default function StockTradingPage() {
   /**
    * ✅ IMPORTANT BALANCE FIX (stocks only):
    * DO NOT initialize accounts here.
-   * You already have useUnifiedBalance (seen in logs) initializing accounts in the dashboard shell.
-   * Initializing again inside this page causes repeated “reset” of cash after buy/sell -> looks like balance is increasing.
+   * You already have unified balance initializing accounts in the dashboard shell.
    */
   const spotAccount = useTradingAccountStore((s) => s.spotAccount);
   const stockPositions = useTradingAccountStore((s) => s.stockPositions);
@@ -172,6 +179,13 @@ export default function StockTradingPage() {
   }, []);
 
   const [selectedSymbol, setSelectedSymbol] = useState<string>(stockAssets[0]?.symbol ?? 'AAPL');
+  useEffect(() => {
+    // keep selected symbol valid if assets list changes
+    if (!stockAssets.length) return;
+    const exists = stockAssets.some((a) => a.symbol === selectedSymbol);
+    if (!exists) setSelectedSymbol(stockAssets[0].symbol);
+  }, [stockAssets, selectedSymbol]);
+
   const selectedAsset = useMemo(
     () => stockAssets.find((a) => a.symbol === selectedSymbol) ?? stockAssets[0],
     [stockAssets, selectedSymbol]
@@ -208,18 +222,36 @@ export default function StockTradingPage() {
   const [positionToSell, setPositionToSell] = useState<StockPosition | null>(null);
   const [sellQty, setSellQty] = useState(0);
 
-  // ---- Live quotes (Twelve Data polling)
+  // ---- Live quotes (rate-limited polling)
   const [sseState, setSseState] = useState<'connecting' | 'live' | 'down'>('connecting');
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const prevCloseRef = useRef<Record<string, number>>({});
 
+  // ✅ HARD LIMIT to stop TwelveData credits/min blow-ups
+  const MAX_LIVE_SYMBOLS = 8;
+
   const subscribedSymbols = useMemo(() => {
-    // poll all symbols so switching is instant
-    return stockAssets.map((a) => a.symbol).slice(0, 50);
-  }, [stockAssets]);
+    // ONLY: selected + watchlist, capped
+    const set = new Set<string>();
+    set.add(String(selectedSymbol || '').toUpperCase());
+    for (const s of favorites) set.add(String(s || '').toUpperCase());
+    return Array.from(set).filter(Boolean).slice(0, MAX_LIVE_SYMBOLS);
+  }, [selectedSymbol, favorites]);
+
+  // ✅ Poll interval tuned for low-tier plans (assume ~1 credit per symbol)
+  const POLL_MS = useMemo(() => {
+    const k = subscribedSymbols.length || 1;
+    if (k >= 7) return 60_000;
+    if (k >= 5) return 50_000;
+    if (k >= 3) return 40_000;
+    return 30_000;
+  }, [subscribedSymbols.length]);
+
+  const pollingKey = useMemo(() => subscribedSymbols.join(','), [subscribedSymbols]);
 
   const toggleFavorite = (symbol: string) => {
-    setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
+    const sym = String(symbol || '').toUpperCase();
+    setFavorites((prev) => (prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]));
   };
 
   const filteredAssets = useMemo(() => {
@@ -228,28 +260,73 @@ export default function StockTradingPage() {
     return stockAssets.filter((a) => a.symbol.toLowerCase().includes(q) || a.name.toLowerCase().includes(q));
   }, [stockAssets, searchQuery]);
 
-  const pollingKey = useMemo(() => subscribedSymbols.join(','), [subscribedSymbols]);
-
   useEffect(() => {
     if (!subscribedSymbols.length) return;
 
     let alive = true;
     let timer: number | null = null;
+    let cooldownTimer: number | null = null;
+
+    const stopTimers = () => {
+      if (timer) window.clearInterval(timer);
+      if (cooldownTimer) window.clearTimeout(cooldownTimer);
+      timer = null;
+      cooldownTimer = null;
+    };
+
+    const scheduleResumeAfterRateLimit = (message: string) => {
+      stopTimers();
+      setSseState('down');
+
+      // pause into next minute window
+      cooldownTimer = window.setTimeout(() => {
+        if (!alive) return;
+        setSseState('connecting');
+        void tick(); // immediate refresh
+        timer = window.setInterval(() => void tick(), POLL_MS);
+      }, 65_000);
+
+      pushNotif(
+        {
+          type: 'error',
+          message: 'TwelveData limit reached. Pausing live prices for ~1 minute (free tier limit).',
+        },
+        4500
+      );
+
+      // eslint-disable-next-line no-console
+      console.warn('[Stocks] Twelve rate-limited:', message);
+    };
 
     const tick = async () => {
       try {
         if (!alive) return;
+
+        // ✅ don’t burn credits when tab is hidden
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
         setSseState((s) => (s === 'live' ? 'live' : 'connecting'));
 
-        const data = await fetchQuotesBatch(subscribedSymbols);
-        if (!alive) return;
+        // fetchQuotesBatch might return either:
+        // - { AAPL: {...}, MSFT:{...} }
+        // - OR wrapper { ok, data, error }
+        const raw: any = await fetchQuotesBatch(subscribedSymbols);
+
+        if (raw?.ok === false) {
+          const msg = String(raw?.error || raw?.message || 'Quotes failed');
+          if (isTwelveCreditsError(msg)) return scheduleResumeAfterRateLimit(msg);
+          throw new Error(msg);
+        }
+
+        const dataMap: any =
+          raw && typeof raw === 'object' && raw.data && typeof raw.data === 'object' ? raw.data : raw;
 
         setQuotes((prev) => {
           const next: Record<string, LiveQuote> = { ...prev };
 
           for (const sym of subscribedSymbols) {
             const key = String(sym || '').toUpperCase();
-            const q: any = (data as any)?.[key] || (data as any)?.[sym] || null;
+            const q: any = dataMap?.[key] || dataMap?.[sym] || null;
             if (!q) continue;
 
             const price = n(q?.price ?? q?.close ?? q?.last, 0);
@@ -266,8 +343,7 @@ export default function StockTradingPage() {
             if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
 
             const pctRaw = q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? undefined;
-            const pct =
-              Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
+            const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
 
             const bid = price * 0.9999;
             const ask = price * 1.0001;
@@ -294,20 +370,38 @@ export default function StockTradingPage() {
         });
 
         setSseState('live');
-      } catch {
+      } catch (e: any) {
         if (!alive) return;
+        const msg = String(e?.message || e);
+
+        if (isTwelveCreditsError(msg)) return scheduleResumeAfterRateLimit(msg);
+
         setSseState('down');
       }
     };
 
-    tick();
-    timer = window.setInterval(tick, 6000);
+    const onVisibility = () => {
+      if (!alive) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void tick(); // quick refresh when user returns
+      }
+    };
+
+    void tick();
+    timer = window.setInterval(() => void tick(), POLL_MS);
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility);
+    }
 
     return () => {
       alive = false;
-      if (timer) window.clearInterval(timer);
+      stopTimers();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibility);
+      }
     };
-  }, [pollingKey, updateStockPositionPrice, subscribedSymbols]);
+  }, [pollingKey, updateStockPositionPrice, subscribedSymbols, POLL_MS]);
 
   // ---- History (candles) from Twelve Data
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -315,38 +409,52 @@ export default function StockTradingPage() {
 
   useEffect(() => {
     let alive = true;
+    const ctrl = new AbortController();
+
     setLoadingChart(true);
 
     const load = async () => {
       try {
         const interval = tfToTwelveInterval(chartTimeframe);
+
+        // fetchCandles() should return Candle[] like:
+        // [{ time, open, high, low, close }]
+        // If yours returns wrapper, just update lib/market/twelve.ts accordingly.
         const raw = await fetchCandles(selectedSymbol, interval, 220);
 
-        if (!alive) return;
+        if (!alive || ctrl.signal.aborted) return;
 
         const out: Candle[] = (raw || [])
           .map((c: any, i: number) => ({
-            t: parseTwelveDatetimeToMs(String(c?.time || '')) || Date.now() + i,
-            o: n(c?.open, 0),
-            h: n(c?.high, 0),
-            l: n(c?.low, 0),
-            c: n(c?.close, 0),
-            v: undefined,
+            t: parseTwelveDatetimeToMs(String(c?.time || c?.datetime || c?.date || '')) || Date.now() + i,
+            o: n(c?.open ?? c?.o, 0),
+            h: n(c?.high ?? c?.h, 0),
+            l: n(c?.low ?? c?.l, 0),
+            c: n(c?.close ?? c?.c, 0),
+            v: c?.volume != null ? n(c?.volume, 0) : undefined,
           }))
           .filter((x) => x.h > 0 && x.l > 0 && x.c > 0);
 
         setCandles(out);
-      } catch {
+      } catch (e: any) {
         if (!alive) return;
+        const msg = String(e?.message || e);
+        if (isTwelveCreditsError(msg)) {
+          pushNotif({ type: 'error', message: 'TwelveData limit hit while loading candles. Try again in a minute.' }, 3500);
+          // keep previous candles (don’t blank chart)
+          return;
+        }
         setCandles([]);
       } finally {
         if (alive) setLoadingChart(false);
       }
     };
 
-    load();
+    void load();
+
     return () => {
       alive = false;
+      ctrl.abort();
     };
   }, [selectedSymbol, chartTimeframe]);
 
@@ -441,7 +549,13 @@ export default function StockTradingPage() {
       return;
     }
 
-    const result = executeStockBuy(selectedSymbol, selectedAsset?.name ?? selectedSymbol, effectiveShares, safeAsk, commission);
+    const result = executeStockBuy(
+      selectedSymbol,
+      selectedAsset?.name ?? selectedSymbol,
+      effectiveShares,
+      safeAsk,
+      commission
+    );
 
     if ((result as any)?.success) {
       await refreshUser?.();
@@ -646,6 +760,7 @@ export default function StockTradingPage() {
               className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg ${
                 sseState === 'live' ? 'bg-profit/10' : 'bg-white/5'
               }`}
+              title={`Watching ${subscribedSymbols.length}/${MAX_LIVE_SYMBOLS} symbols • Poll ${Math.round(POLL_MS / 1000)}s`}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
@@ -1145,6 +1260,9 @@ export default function StockTradingPage() {
                       className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-cream/30 focus:outline-none focus:border-gold"
                     />
                   </div>
+                  <p className="mt-2 text-[11px] text-cream/40">
+                    Live quotes are limited to {MAX_LIVE_SYMBOLS} symbols (selected + watchlist) to avoid provider rate limits.
+                  </p>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2">
@@ -1285,7 +1403,9 @@ export default function StockTradingPage() {
                       <input
                         type="number"
                         value={sellQty}
-                        onChange={(e) => setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))}
+                        onChange={(e) =>
+                          setSellQty(Math.min(positionToSell.qty, Math.max(1, parseInt(e.target.value) || 1)))
+                        }
                         className="flex-1 h-10 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
                       />
                       <button

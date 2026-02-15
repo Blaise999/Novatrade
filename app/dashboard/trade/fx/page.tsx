@@ -119,13 +119,15 @@ const FX_PAIRS = [
 
 const MULTIPLIERS = [10, 25, 50, 100, 200, 500, 1000] as const;
 
+// ✅ IMPORTANT: pollMs must be >= your server min upstream interval (default ~9000ms)
+// and should be a bit higher to avoid 429s / provider-credit burn.
 const TIMEFRAMES: { label: string; value: TF; pollMs: number }[] = [
-  { label: '1m', value: '1m', pollMs: 7000 },
-  { label: '5m', value: '5m', pollMs: 12000 },
-  { label: '15m', value: '15m', pollMs: 20000 },
-  { label: '1h', value: '1h', pollMs: 30000 },
-  { label: '4h', value: '4h', pollMs: 45000 },
-  { label: '1D', value: '1D', pollMs: 60000 },
+  { label: '1m', value: '1m', pollMs: 12000 },
+  { label: '5m', value: '5m', pollMs: 15000 },
+  { label: '15m', value: '15m', pollMs: 25000 },
+  { label: '1h', value: '1h', pollMs: 35000 },
+  { label: '4h', value: '4h', pollMs: 50000 },
+  { label: '1D', value: '1D', pollMs: 65000 },
 ];
 
 function clampNum(v: unknown, fallback = 0) {
@@ -343,6 +345,18 @@ function readStoredAccessToken(): string | null {
   return pick(window.sessionStorage) || pick(window.localStorage);
 }
 
+/** ---------- candles errors (429 aware) ---------- */
+class CandlesError extends Error {
+  status: number;
+  retryAfterMs?: number;
+  constructor(message: string, status: number, retryAfterMs?: number) {
+    super(message);
+    this.name = 'CandlesError';
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 /** --------- candles fetch ---------- */
 async function fetchFxCandles(
   display: string,
@@ -364,8 +378,18 @@ async function fetchFxCandles(
     json = null;
   }
 
-  if (res.status === 403) throw new Error(json?.message || 'FX candles access denied');
-  if (!res.ok) throw new Error(json?.error || `Candles failed (${res.status})`);
+  if (res.status === 403) throw new CandlesError(json?.message || 'FX candles access denied', 403);
+
+  // ✅ if server rate-limits, respect Retry-After / retryAfterSec
+  if (res.status === 429) {
+    const raHeader = res.headers.get('retry-after');
+    const raSecFromHeader = raHeader ? clampNum(raHeader, 0) : 0;
+    const raSecFromBody = json?.retryAfterSec != null ? clampNum(json.retryAfterSec, 0) : 0;
+    const raSec = Math.max(raSecFromHeader, raSecFromBody, 5);
+    throw new CandlesError(json?.error || 'Rate limited (candles).', 429, Math.max(1000, raSec * 1000));
+  }
+
+  if (!res.ok) throw new CandlesError(json?.error || `Candles failed (${res.status})`, res.status);
 
   const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
 
@@ -435,6 +459,11 @@ export default function FXTradePage() {
   const chartAbortRef = useRef<AbortController | null>(null);
   const chartInFlightRef = useRef(false);
 
+  // polling refs (adaptive + visibility-aware)
+  const pollTimeoutRef = useRef<number | null>(null);
+  const retryAfterMsRef = useRef<number>(0);
+  const unmountedRef = useRef(false);
+
   // price push throttle
   const lastPushAtRef = useRef<number>(0);
   const lastPushedPriceRef = useRef<number | null>(null);
@@ -477,7 +506,6 @@ export default function FXTradePage() {
       lastPushAtRef.current = now;
       lastPushedPriceRef.current = px;
 
-      // ✅ server will now call revalue_fx_trades() and update pnl + SL/TP
       await fetch('/api/trades', {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -524,7 +552,6 @@ export default function FXTradePage() {
 
       setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
 
-      // ✅ refresh global user so top header balance updates everywhere
       try {
         await refreshUser();
       } catch {}
@@ -621,8 +648,11 @@ export default function FXTradePage() {
     try {
       await initChartIfNeeded();
 
-      const candles = await fetchFxCandles(asset, tf, 320, ac.signal);
+      const candles = await fetchFxCandles(asset, tf, 260, ac.signal);
       if (ac.signal.aborted) return;
+
+      // ✅ success => clear retryAfter
+      retryAfterMsRef.current = 0;
 
       if (!candles.length) {
         setChartNote('No candles returned.');
@@ -658,20 +688,31 @@ export default function FXTradePage() {
         chartApiRef.current?.timeScale?.()?.fitContent?.();
       } catch {}
     } catch (e: any) {
-      setChartNote(e?.message || 'Failed to load chart');
+      if (e?.name === 'CandlesError' && typeof e?.retryAfterMs === 'number' && e.retryAfterMs > 0) {
+        retryAfterMsRef.current = e.retryAfterMs;
+        setChartNote(`Rate limited. Retrying in ${Math.ceil(e.retryAfterMs / 1000)}s…`);
+      } else {
+        setChartNote(e?.message || 'Failed to load chart');
+      }
     } finally {
       chartInFlightRef.current = false;
     }
   };
 
+  // mount
   useEffect(() => {
-    void loadTrades('active');
-    void loadChart();
+    unmountedRef.current = false;
 
-    // also refresh user on mount so header is correct
+    void loadTrades('active');
     void refreshUser().catch(() => {});
 
     return () => {
+      unmountedRef.current = true;
+
+      try {
+        if (pollTimeoutRef.current) window.clearTimeout(pollTimeoutRef.current);
+      } catch {}
+
       try {
         chartAbortRef.current?.abort();
       } catch {}
@@ -689,15 +730,69 @@ export default function FXTradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ✅ single adaptive polling loop (replaces setInterval + duplicate loadChart effects)
   useEffect(() => {
-    void loadChart();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asset, tf]);
+    const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
 
-  useEffect(() => {
-    const pollMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 12000;
-    const id = window.setInterval(() => void loadChart(), pollMs);
-    return () => window.clearInterval(id);
+    const clear = () => {
+      try {
+        if (pollTimeoutRef.current) window.clearTimeout(pollTimeoutRef.current);
+      } catch {}
+      pollTimeoutRef.current = null;
+    };
+
+    let cancelled = false;
+
+    const jitter = () => Math.floor(Math.random() * 700); // spread requests
+
+    const tick = async () => {
+      if (cancelled || unmountedRef.current) return;
+
+      if (typeof document !== 'undefined' && document.hidden) {
+        // pause-ish while hidden (don’t hammer credits when tab not visible)
+        clear();
+        pollTimeoutRef.current = window.setTimeout(tick, Math.max(20000, baseMs));
+        return;
+      }
+
+      await loadChart();
+
+      const retryMs = retryAfterMsRef.current;
+      const next = (retryMs > 0 ? retryMs : baseMs) + jitter();
+
+      clear();
+      pollTimeoutRef.current = window.setTimeout(tick, next);
+    };
+
+    const onVis = () => {
+      if (cancelled || unmountedRef.current) return;
+      if (!document.hidden) {
+        // when user comes back, refresh quickly once
+        retryAfterMsRef.current = 0;
+        void loadChart();
+        clear();
+        pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
+      } else {
+        clear();
+      }
+    };
+
+    // start immediately on pair/tf change
+    void loadChart();
+    clear();
+    pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
+
+    try {
+      document.addEventListener('visibilitychange', onVis);
+    } catch {}
+
+    return () => {
+      cancelled = true;
+      clear();
+      try {
+        document.removeEventListener('visibilitychange', onVis);
+      } catch {}
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset, tf]);
 
@@ -767,7 +862,6 @@ export default function FXTradePage() {
 
       if (lastClose != null && lastClose > 0) void pushPriceToServer(asset, lastClose);
 
-      // ✅ update global header balance everywhere
       try {
         await refreshUser();
       } catch {}
@@ -821,7 +915,6 @@ export default function FXTradePage() {
 
       await loadTrades(mode);
 
-      // ✅ update global header balance everywhere
       try {
         await refreshUser();
       } catch {}
