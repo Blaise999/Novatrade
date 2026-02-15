@@ -139,12 +139,31 @@ function tfToMs(tf: Timeframe) {
   }
 }
 
+function tfPollMs(tf: Timeframe) {
+  // poll slightly slower than bucket duration to avoid hammering provider
+  switch (tf) {
+    case '1m':
+      return 65_000;
+    case '5m':
+      return 305_000;
+    case '15m':
+      return 905_000;
+    case '1h':
+      return 3_605_000;
+    case '4h':
+      return 14_405_000;
+    case '1D':
+      return 86_405_000;
+    default:
+      return 905_000;
+  }
+}
+
 function parseTwelveDatetimeToMs(dt: string) {
   // Twelve often returns "YYYY-MM-DD HH:mm:ss"
   if (!dt) return Date.now();
   const isoLike = dt.includes(' ') ? dt.replace(' ', 'T') : dt;
 
-  // Some Twelve feeds return local/UTC strings; try Z then fallback
   const withZ = isoLike.endsWith('Z') ? isoLike : `${isoLike}Z`;
   const t1 = Date.parse(withZ);
   if (Number.isFinite(t1)) return t1;
@@ -179,7 +198,6 @@ function ssSet(key: string, value: any) {
 
 // ===============================
 // ✅ Quota/rate-limit handling
-// - hides provider details from user, but pauses calls
 // ===============================
 function looksLikeQuota(msg: string) {
   const m = (msg || '').toLowerCase();
@@ -197,7 +215,7 @@ function userFacingMarketMessage(_msg: string) {
 }
 
 // ===============================
-// ✅ "Always chart" fallback helpers
+// ✅ Always-chart fallback helpers
 // ===============================
 type Tick = { t: number; p: number };
 
@@ -301,6 +319,28 @@ function generateSyntheticCandles(seedPrice: number, intervalMs: number, count: 
   return out;
 }
 
+// ===============================
+// ✅ Seed + Tail candle strategy
+// ===============================
+const SEED_CANDLE_LIMIT = 220; // first load / resync
+const TAIL_CANDLE_LIMIT = 3; // frequent updates
+const RESEED_EVERY_MS = 10 * 60 * 1000; // 10 mins
+
+function mergeCandles(prev: Candle[], incoming: Candle[], maxKeep = SEED_CANDLE_LIMIT): Candle[] {
+  if (!incoming?.length) return prev;
+
+  const map = new Map<number, Candle>();
+  for (const c of prev) map.set(c.t, c);
+  for (const c of incoming) map.set(c.t, c);
+
+  const merged = Array.from(map.values()).sort((a, b) => a.t - b.t);
+  return merged.length > maxKeep ? merged.slice(-maxKeep) : merged;
+}
+
+function jitter(ms = 1200) {
+  return Math.floor(Math.random() * ms);
+}
+
 export default function StockTradingPage() {
   // ✅ HYDRATION FIX
   const [hasMounted, setHasMounted] = useState(false);
@@ -327,11 +367,7 @@ export default function StockTradingPage() {
 
     return list.length
       ? list
-      : ([
-          { symbol: 'AAPL', name: 'Apple', price: 190, changePercent24h: 0, type: 'stock' },
-          { symbol: 'NVDA', name: 'NVIDIA', price: 650, changePercent24h: 0, type: 'stock' },
-          { symbol: 'TSLA', name: 'Tesla', price: 200, changePercent24h: 0, type: 'stock' },
-        ] as StockAsset[]);
+      : ([{ symbol: 'AAPL', name: 'Apple', price: 190, changePercent24h: 0, type: 'stock' }] as StockAsset[]);
   }, []);
 
   const [selectedSymbol, setSelectedSymbol] = useState<string>(stockAssets[0]?.symbol ?? 'AAPL');
@@ -391,16 +427,10 @@ export default function StockTradingPage() {
   const quoteSymbols = useMemo(() => {
     const set = new Set<string>();
 
-    // always selected
     set.add(String(selectedSymbol || '').toUpperCase());
-
-    // favorites (watchlist)
     for (const s of favorites) set.add(String(s || '').toUpperCase());
-
-    // holdings (for PnL)
     for (const p of stockPositions) set.add(String(p.symbol || '').toUpperCase());
 
-    // cap hard
     return Array.from(set).filter(Boolean).slice(0, 12);
   }, [selectedSymbol, favorites, stockPositions]);
 
@@ -412,12 +442,19 @@ export default function StockTradingPage() {
     let alive = true;
     let timer: number | null = null;
 
+    const pollMs = 22_000; // slower than 15s (saves credits)
     const tick = async () => {
       try {
         if (!alive) return;
 
-        // paused due to quota/rate-limit
+        // pause due to quota/rate-limit
         if (Date.now() < pauseUntilRef.current) {
+          setSseState('down');
+          return;
+        }
+
+        // stop polling when tab is hidden (saves credits)
+        if (typeof document !== 'undefined' && document.hidden) {
           setSseState('down');
           return;
         }
@@ -426,9 +463,6 @@ export default function StockTradingPage() {
 
         const resp: any = await fetchQuotesBatch(quoteSymbols);
 
-        // support both shapes:
-        // 1) direct map {AAPL:{...}}
-        // 2) wrapped { ok, data:{AAPL:{...}} }
         const dataMap: Record<string, any> =
           resp?.data && typeof resp.data === 'object' ? (resp.data as Record<string, any>) : (resp as Record<string, any>);
 
@@ -471,19 +505,15 @@ export default function StockTradingPage() {
             // ✅ keep trading-store prices in sync for correct PnL
             try {
               updateStockPositionPrice(key, price);
-            } catch {
-              // ignore
-            }
+            } catch {}
 
             // ✅ store ticks (for chart fallback)
             try {
               const tickKey = `${SS_PREFIX}:ticks:${key}`;
               const prevTicks = ssGet<Tick[]>(tickKey) || [];
-              const nextTicks = [...prevTicks, { t: Date.now(), p: price }].slice(-900); // keep last 900
+              const nextTicks = [...prevTicks, { t: Date.now(), p: price }].slice(-900);
               ssSet(tickKey, nextTicks);
-            } catch {
-              // ignore
-            }
+            } catch {}
           }
 
           return next;
@@ -496,9 +526,7 @@ export default function StockTradingPage() {
         const msg = String(e?.message || e || '');
         setSseState('down');
 
-        // ✅ If quota/rate-limit, pause hard and show "network" style message
         if (looksLikeQuota(msg)) {
-          // minute limit → pause 90s, day limit → pause 24h
           const lower = msg.toLowerCase();
           const isDay = lower.includes('for the day');
           pauseUntilRef.current = Date.now() + (isDay ? 24 * 60 * 60 * 1000 : 90_000);
@@ -507,17 +535,35 @@ export default function StockTradingPage() {
       }
     };
 
-    tick();
-    // ✅ slower polling to save credits
-    timer = window.setInterval(tick, 15_000);
+    const loop = async () => {
+      if (!alive) return;
+      await tick();
+      if (!alive) return;
+      timer = window.setTimeout(loop, pollMs + jitter());
+    };
+
+    // kick
+    void loop();
+
+    const onVis = () => {
+      if (!alive) return;
+      if (!document.hidden) void tick();
+    };
+
+    try {
+      document.addEventListener('visibilitychange', onVis);
+    } catch {}
 
     return () => {
       alive = false;
-      if (timer) window.clearInterval(timer);
+      if (timer) window.clearTimeout(timer);
+      try {
+        document.removeEventListener('visibilitychange', onVis);
+      } catch {}
     };
   }, [pollingKey, quoteSymbols, updateStockPositionPrice]);
 
-  // ---- History (candles) with ALWAYS-CHART fallback
+  // ---- History (candles) with seed + tail + ALWAYS-CHART fallback
   const [candles, setCandles] = useState<Candle[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
   const [candlesUpdatedAt, setCandlesUpdatedAt] = useState<number>(0);
@@ -525,57 +571,80 @@ export default function StockTradingPage() {
 
   const live = quotes[selectedSymbol];
 
+  // candle polling refs
+  const candleTimerRef = useRef<number | null>(null);
+  const candleSeedKeyRef = useRef<string>('');
+  const candleLastSeedAtRef = useRef<number>(0);
+  const candleInFlightRef = useRef(false);
+  const candleReqIdRef = useRef(0);
+
   useEffect(() => {
     let alive = true;
 
     const intervalStr = tfToTwelveInterval(chartTimeframe);
     const intervalMs = tfToMs(chartTimeframe);
-    const cacheKey = `${SS_PREFIX}:candles:${selectedSymbol}:${intervalStr}`;
+    const pollMs = tfPollMs(chartTimeframe);
 
-    // ✅ 1) Instant: cached candles
+    const cacheKey = `${SS_PREFIX}:candles:${selectedSymbol}:${intervalStr}`;
+    const seedKey = `${selectedSymbol}:${intervalStr}`;
+
+    const clearTimer = () => {
+      try {
+        if (candleTimerRef.current) window.clearTimeout(candleTimerRef.current);
+      } catch {}
+      candleTimerRef.current = null;
+    };
+
+    // ✅ 1) Instant render: cached candles OR ticks OR synthetic
     const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
     if (cached?.candles?.length) {
       setCandles(cached.candles);
       setCandlesUpdatedAt(cached.ts || Date.now());
       setCandlesStale(true);
     } else {
-      // ✅ 2) build from ticks
       const ticks = ssGet<Tick[]>(`${SS_PREFIX}:ticks:${selectedSymbol}`) || [];
-      const built = buildCandlesFromTicks(ticks, intervalMs, 220);
+      const built = buildCandlesFromTicks(ticks, intervalMs, SEED_CANDLE_LIMIT);
       if (built.length) {
         setCandles(built);
         setCandlesUpdatedAt(Date.now());
         setCandlesStale(true);
       } else {
-        // ✅ 3) synthetic (never blank)
         const seedPrice = live?.price ?? selectedAsset?.price ?? 100;
-        const synth = generateSyntheticCandles(seedPrice, intervalMs, 220, `${selectedSymbol}:${intervalStr}`);
+        const synth = generateSyntheticCandles(seedPrice, intervalMs, SEED_CANDLE_LIMIT, seedKey);
         setCandles(synth);
         setCandlesUpdatedAt(Date.now());
         setCandlesStale(true);
       }
     }
 
-    // ✅ Fresh cache: skip API call
-    const now = Date.now();
-    const isFresh = cached?.ts && now - cached.ts < 5 * 60_000;
-    if (isFresh) return () => void (alive = false);
+    const loadCandles = async (opts?: { forceSeed?: boolean }) => {
+      if (!alive) return;
+      if (Date.now() < pauseUntilRef.current) return;
 
-    // ✅ paused due to quota: skip
-    if (Date.now() < pauseUntilRef.current) return () => void (alive = false);
+      // don’t waste credits while hidden
+      if (typeof document !== 'undefined' && document.hidden) return;
 
-    setLoadingChart(true);
+      if (candleInFlightRef.current) return;
+      candleInFlightRef.current = true;
 
-    const load = async () => {
+      const reqId = ++candleReqIdRef.current;
+
       try {
-        // fetchCandles returns array from lib/market/twelve.ts
-        const raw: any = await fetchCandles(selectedSymbol, intervalStr, 220);
+        const now = Date.now();
+        const needsSeed =
+          opts?.forceSeed === true ||
+          candleSeedKeyRef.current !== seedKey ||
+          now - candleLastSeedAtRef.current > RESEED_EVERY_MS;
+
+        const limit = needsSeed ? SEED_CANDLE_LIMIT : TAIL_CANDLE_LIMIT;
+
+        setLoadingChart(needsSeed);
+
+        const raw: any = await fetchCandles(selectedSymbol, intervalStr, limit);
 
         if (!alive) return;
+        if (reqId !== candleReqIdRef.current) return;
 
-        // Support both:
-        // - array of {time/open/high/low/close}
-        // - wrapped { candles:[{time/open/...}] }
         const arr: any[] = Array.isArray(raw) ? raw : Array.isArray(raw?.candles) ? raw.candles : [];
 
         const out: Candle[] = arr
@@ -589,19 +658,27 @@ export default function StockTradingPage() {
           }))
           .filter((x) => x.o > 0 && x.h > 0 && x.l > 0 && x.c > 0);
 
-        if (!out.length) return;
+        if (!out.length) {
+          setCandlesStale(true);
+          return;
+        }
 
-        setCandles(out);
+        setCandles((prev) => (needsSeed ? out : mergeCandles(prev, out, SEED_CANDLE_LIMIT)));
 
         const ts = Date.now();
-        ssSet(cacheKey, { ts, candles: out });
+        ssSet(cacheKey, { ts, candles: needsSeed ? out : mergeCandles(ssGet<any>(cacheKey)?.candles || [], out, SEED_CANDLE_LIMIT) });
+
         setCandlesUpdatedAt(ts);
         setCandlesStale(false);
+
+        if (needsSeed) {
+          candleSeedKeyRef.current = seedKey;
+          candleLastSeedAtRef.current = now;
+        }
       } catch (e: any) {
         const msg = String(e?.message || e || '');
         console.error('[Stocks] Candles error:', msg);
 
-        // ✅ keep chart (do NOT clear)
         setCandlesStale(true);
 
         if (looksLikeQuota(msg)) {
@@ -611,13 +688,39 @@ export default function StockTradingPage() {
           pushNotif({ type: 'error', message: userFacingMarketMessage(msg) }, 4500);
         }
       } finally {
+        candleInFlightRef.current = false;
         if (alive) setLoadingChart(false);
       }
     };
 
-    load();
+    const loop = async () => {
+      if (!alive) return;
+      await loadCandles();
+      if (!alive) return;
+      clearTimer();
+      candleTimerRef.current = window.setTimeout(loop, pollMs + jitter());
+    };
+
+    // ✅ on symbol/tf change: force seed then start loop
+    void loadCandles({ forceSeed: true });
+    clearTimer();
+    candleTimerRef.current = window.setTimeout(loop, pollMs + jitter());
+
+    const onVis = () => {
+      if (!alive) return;
+      if (!document.hidden) void loadCandles();
+    };
+
+    try {
+      document.addEventListener('visibilitychange', onVis);
+    } catch {}
+
     return () => {
       alive = false;
+      clearTimer();
+      try {
+        document.removeEventListener('visibilitychange', onVis);
+      } catch {}
     };
   }, [selectedSymbol, chartTimeframe, live?.price, selectedAsset?.price]);
 
@@ -680,7 +783,6 @@ export default function StockTradingPage() {
   const commission = effectiveShares > 0 ? Math.max(0.99, orderValue * 0.001) : 0;
   const totalCost = orderValue + commission;
 
-  // ✅ user.balance already includes bonus (per your system)
   const userBalance = Number(user?.balance ?? 0);
   const cashBalance =
     (spotAccount as any)?.availableToTrade ?? (spotAccount as any)?.cash ?? (spotAccount as any)?.balance ?? userBalance;
@@ -719,7 +821,6 @@ export default function StockTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // ✅ save to trades history (best-effort)
       try {
         if (user?.id) {
           const state = useTradingAccountStore.getState();
@@ -745,9 +846,7 @@ export default function StockTradingPage() {
             saveTradeToHistory(payload).catch((e) => console.error('[Stocks] Trade history save failed:', e));
           }
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
 
       pushNotif({ type: 'success', message: `Bought ${effectiveShares} ${selectedSymbol} @ $${safeAsk.toFixed(2)}` });
     } else {
@@ -771,7 +870,6 @@ export default function StockTradingPage() {
       const pnl = Number((result as any)?.realizedPnL ?? 0);
       await refreshUser?.();
 
-      // partial vs full close
       try {
         if (user?.id) {
           const after = useTradingAccountStore.getState().stockPositions;
@@ -806,9 +904,7 @@ export default function StockTradingPage() {
             closeTradeInHistory(payload).catch((e) => console.error('[Stocks] Trade history close failed:', e));
           }
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
 
       pushNotif({
         type: 'success',
@@ -975,7 +1071,8 @@ export default function StockTradingPage() {
               </div>
               <div className="flex items-center gap-2">
                 <div className="hidden sm:block text-xs text-cream/40">
-                  {candlesStale ? 'Cached' : 'Live'} {candlesUpdatedAt ? `· ${new Date(candlesUpdatedAt).toLocaleTimeString()}` : ''}
+                  {candlesStale ? 'Cached' : 'Live'}{' '}
+                  {candlesUpdatedAt ? `· ${new Date(candlesUpdatedAt).toLocaleTimeString()}` : ''}
                 </div>
                 <div className="flex items-center gap-1">
                   <button
@@ -1002,11 +1099,9 @@ export default function StockTradingPage() {
             >
               {loadingChart && (
                 <div className="absolute top-2 right-2 z-10 px-2 py-1 rounded-lg bg-white/5 border border-white/10">
-                  <span className="text-xs text-cream/60">Updating…</span>
+                  <span className="text-xs text-cream/60">Syncing…</span>
                 </div>
               )}
-
-              {/* NEVER show "No chart data" anymore - we always render something */}
 
               <svg className="w-full h-full block" viewBox={`0 0 ${chart.w} ${chart.h}`} preserveAspectRatio="xMidYMid meet">
                 {/* grid */}
@@ -1252,7 +1347,9 @@ export default function StockTradingPage() {
                     <p className="text-xs text-loss text-center">Amount too small — shares becomes 0.</p>
                   ) : (
                     <>
-                      <p className="text-xs text-loss text-center mb-1">Insufficient funds. Need ${(totalCost - cashBalance).toFixed(2)} more.</p>
+                      <p className="text-xs text-loss text-center mb-1">
+                        Insufficient funds. Need ${(totalCost - cashBalance).toFixed(2)} more.
+                      </p>
                       <Link
                         href="/dashboard/wallet"
                         className="flex items-center justify-center gap-1 text-xs text-gold hover:text-gold/80 font-medium"

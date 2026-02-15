@@ -119,16 +119,23 @@ const FX_PAIRS = [
 
 const MULTIPLIERS = [10, 25, 50, 100, 200, 500, 1000] as const;
 
-// ✅ IMPORTANT: pollMs must be >= your server min upstream interval (default ~9000ms)
-// and should be a bit higher to avoid 429s / provider-credit burn.
+/**
+ * ✅ Poll at candle-speed (not every 12s).
+ * If you want "faster feeling", set TF = 1m.
+ */
 const TIMEFRAMES: { label: string; value: TF; pollMs: number }[] = [
-  { label: '1m', value: '1m', pollMs: 12000 },
-  { label: '5m', value: '5m', pollMs: 15000 },
-  { label: '15m', value: '15m', pollMs: 25000 },
-  { label: '1h', value: '1h', pollMs: 35000 },
-  { label: '4h', value: '4h', pollMs: 50000 },
-  { label: '1D', value: '1D', pollMs: 65000 },
+  { label: '1m', value: '1m', pollMs: 65_000 },
+  { label: '5m', value: '5m', pollMs: 305_000 },
+  { label: '15m', value: '15m', pollMs: 905_000 },
+  { label: '1h', value: '1h', pollMs: 3_605_000 },
+  { label: '4h', value: '4h', pollMs: 14_405_000 },
+  { label: '1D', value: '1D', pollMs: 86_405_000 },
 ];
+
+// ✅ Seed + tail strategy
+const SEED_LIMIT = 260; // first load / occasional resync
+const TAIL_LIMIT = 3; // frequent updates: just last few candles
+const RESEED_EVERY_MS = 10 * 60 * 1000; // every 10 mins do a full resync
 
 function clampNum(v: unknown, fallback = 0) {
   const n = typeof v === 'number' ? v : Number(v);
@@ -387,7 +394,6 @@ async function fetchFxCandles(
     json = null;
   }
 
-  // Some backends return ok:false with 200; treat as error.
   if (res.ok && json && json.ok === false) {
     throw new CandlesError(json?.error || 'Candles failed (ok:false)', 502);
   }
@@ -396,7 +402,6 @@ async function fetchFxCandles(
     throw new CandlesError(json?.error || json?.message || 'FX candles access denied', 403);
   }
 
-  // ✅ if server rate-limits, respect Retry-After / retryAfterSec
   if (res.status === 429) {
     const raHeader = res.headers.get('retry-after');
     const raSecFromHeader = raHeader ? clampNum(raHeader, 0) : 0;
@@ -491,6 +496,10 @@ export default function FXTradePage() {
   const retryAfterMsRef = useRef<number>(0);
   const unmountedRef = useRef(false);
 
+  // ✅ seed refs
+  const seededKeyRef = useRef<string>(''); // tracks asset|tf that was fully seeded
+  const lastSeedAtRef = useRef<number>(0); // last time we pulled full history
+
   // price push throttle
   const lastPushAtRef = useRef<number>(0);
   const lastPushedPriceRef = useRef<number | null>(null);
@@ -522,6 +531,7 @@ export default function FXTradePage() {
     try {
       const now = Date.now();
 
+      // ✅ don't spam mark_price
       if (now - lastPushAtRef.current < 5000) return;
 
       const last = lastPushedPriceRef.current;
@@ -657,7 +667,7 @@ export default function FXTradePage() {
     } catch {}
   };
 
-  const loadChart = async () => {
+  const loadChart = async (opts?: { forceSeed?: boolean }) => {
     if (unmountedRef.current) return;
 
     setChartNote(null);
@@ -677,7 +687,18 @@ export default function FXTradePage() {
     try {
       await initChartIfNeeded();
 
-      const result = await fetchFxCandles(asset, tf, 260, ac.signal);
+      // ✅ SEED ONCE, THEN TAIL UPDATES
+      const key = `${asset}|${tf}`;
+      const now = Date.now();
+
+      const needsSeed =
+        opts?.forceSeed === true ||
+        seededKeyRef.current !== key ||
+        now - lastSeedAtRef.current > RESEED_EVERY_MS;
+
+      const limit = needsSeed ? SEED_LIMIT : TAIL_LIMIT;
+
+      const result = await fetchFxCandles(asset, tf, limit, ac.signal);
       if (ac.signal.aborted || unmountedRef.current) return;
 
       // ✅ success => clear retryAfter
@@ -699,6 +720,7 @@ export default function FXTradePage() {
       const lc = candles[candles.length - 1]?.close ?? null;
       setLastClose(lc);
 
+      // ✅ keep market price + PnL correct (updates trades on-screen + server revalue)
       if (lc != null && lc > 0) {
         setMarketPrice(lc.toFixed(5));
 
@@ -711,7 +733,7 @@ export default function FXTradePage() {
         void pushPriceToServer(asset, lc);
       }
 
-      const data = candles.map((c) => ({
+      const bars = candles.map((c) => ({
         time: c.time as any,
         open: c.open,
         high: c.high,
@@ -719,10 +741,20 @@ export default function FXTradePage() {
         close: c.close,
       }));
 
+      // ✅ Chart update strategy:
+      // - Seed: setData(full)
+      // - Tail: update(last few) (fast + cheap)
       try {
-        candleSeriesRef.current?.setData?.(data);
+        if (needsSeed) {
+          candleSeriesRef.current?.setData?.(bars);
+          seededKeyRef.current = key;
+          lastSeedAtRef.current = now;
+        } else {
+          for (const b of bars) candleSeriesRef.current?.update?.(b);
+        }
         chartApiRef.current?.timeScale?.()?.fitContent?.();
       } catch {}
+
     } catch (e: any) {
       if (e?.name === 'CandlesError' && typeof e?.retryAfterMs === 'number' && e.retryAfterMs > 0) {
         retryAfterMsRef.current = e.retryAfterMs;
@@ -766,9 +798,9 @@ export default function FXTradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅ single adaptive polling loop (replaces setInterval + duplicate loadChart effects)
+  // ✅ single adaptive polling loop (candle-speed + retry aware + visibility-aware)
   useEffect(() => {
-    const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
+    const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 305_000;
 
     const clear = () => {
       try {
@@ -779,14 +811,14 @@ export default function FXTradePage() {
 
     let cancelled = false;
 
-    const jitter = () => Math.floor(Math.random() * 700); // spread requests
+    const jitter = () => Math.floor(Math.random() * 1500); // spread requests
 
     const tick = async () => {
       if (cancelled || unmountedRef.current) return;
 
       if (typeof document !== 'undefined' && document.hidden) {
         clear();
-        pollTimeoutRef.current = window.setTimeout(tick, Math.max(20000, baseMs));
+        pollTimeoutRef.current = window.setTimeout(tick, Math.max(30_000, Math.min(120_000, baseMs)));
         return;
       }
 
@@ -812,8 +844,9 @@ export default function FXTradePage() {
       }
     };
 
-    // start immediately on pair/tf change
-    void loadChart();
+    // start immediately on pair/tf change (force seed)
+    void loadChart({ forceSeed: true });
+
     clear();
     pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
 
@@ -832,8 +865,13 @@ export default function FXTradePage() {
   }, [asset, tf]);
 
   const onRefresh = async () => {
+    // ✅ manual refresh = force reseed chart
+    seededKeyRef.current = '';
+    lastSeedAtRef.current = 0;
+
     await loadTrades(mode);
-    await loadChart();
+    await loadChart({ forceSeed: true });
+
     try {
       await refreshUser();
     } catch {}
