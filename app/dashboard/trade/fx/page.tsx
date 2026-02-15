@@ -357,20 +357,29 @@ class CandlesError extends Error {
   }
 }
 
-/** --------- candles fetch ---------- */
+type CandlesFetchResult = {
+  candles: Candle[];
+  cache: string | null; // HIT|MISS|STALE|DEDUPED (from server)
+  stale?: boolean;
+  warning?: string;
+};
+
+/** --------- candles fetch (429 + cache aware) ---------- */
 async function fetchFxCandles(
   display: string,
   tf: TF,
   limit = 260,
   signal?: AbortSignal
-): Promise<Candle[]> {
+): Promise<CandlesFetchResult> {
   const url =
     `/api/market/fx/candles?display=${encodeURIComponent(display)}` +
     `&tf=${encodeURIComponent(tf)}&limit=${limit}`;
 
   const res = await fetch(url, { method: 'GET', cache: 'no-store', signal });
 
+  const cacheHeader = res.headers.get('x-cache'); // HIT | MISS | STALE | DEDUPED
   const text = await res.text();
+
   let json: any = null;
   try {
     json = JSON.parse(text);
@@ -378,7 +387,14 @@ async function fetchFxCandles(
     json = null;
   }
 
-  if (res.status === 403) throw new CandlesError(json?.message || 'FX candles access denied', 403);
+  // Some backends return ok:false with 200; treat as error.
+  if (res.ok && json && json.ok === false) {
+    throw new CandlesError(json?.error || 'Candles failed (ok:false)', 502);
+  }
+
+  if (res.status === 403) {
+    throw new CandlesError(json?.error || json?.message || 'FX candles access denied', 403);
+  }
 
   // ✅ if server rate-limits, respect Retry-After / retryAfterSec
   if (res.status === 429) {
@@ -386,10 +402,16 @@ async function fetchFxCandles(
     const raSecFromHeader = raHeader ? clampNum(raHeader, 0) : 0;
     const raSecFromBody = json?.retryAfterSec != null ? clampNum(json.retryAfterSec, 0) : 0;
     const raSec = Math.max(raSecFromHeader, raSecFromBody, 5);
-    throw new CandlesError(json?.error || 'Rate limited (candles).', 429, Math.max(1000, raSec * 1000));
+    throw new CandlesError(
+      json?.error || 'Rate limited (candles).',
+      429,
+      Math.max(1000, raSec * 1000)
+    );
   }
 
-  if (!res.ok) throw new CandlesError(json?.error || `Candles failed (${res.status})`, res.status);
+  if (!res.ok) {
+    throw new CandlesError(json?.error || json?.message || `Candles failed (${res.status})`, res.status);
+  }
 
   const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
 
@@ -420,9 +442,14 @@ async function fetchFxCandles(
     return vol != null ? { ...base, volume: vol } : base;
   });
 
-  return mapped
-    .filter((x): x is Candle => x !== null)
-    .sort((a, b) => a.time - b.time);
+  return {
+    candles: mapped
+      .filter((x): x is Candle => x !== null)
+      .sort((a, b) => a.time - b.time),
+    cache: cacheHeader,
+    stale: !!json?.stale,
+    warning: typeof json?.warning === 'string' ? json.warning : undefined,
+  };
 }
 
 export default function FXTradePage() {
@@ -631,6 +658,8 @@ export default function FXTradePage() {
   };
 
   const loadChart = async () => {
+    if (unmountedRef.current) return;
+
     setChartNote(null);
 
     const el = chartWrapRef.current;
@@ -648,11 +677,18 @@ export default function FXTradePage() {
     try {
       await initChartIfNeeded();
 
-      const candles = await fetchFxCandles(asset, tf, 260, ac.signal);
-      if (ac.signal.aborted) return;
+      const result = await fetchFxCandles(asset, tf, 260, ac.signal);
+      if (ac.signal.aborted || unmountedRef.current) return;
 
       // ✅ success => clear retryAfter
       retryAfterMsRef.current = 0;
+
+      // ✅ if server served stale/cached data, show a note (not an error)
+      if (result.cache === 'STALE' || result.stale) {
+        setChartNote(result.warning || 'Using cached candles (rate-limited protection).');
+      }
+
+      const candles = result.candles;
 
       if (!candles.length) {
         setChartNote('No candles returned.');
@@ -749,7 +785,6 @@ export default function FXTradePage() {
       if (cancelled || unmountedRef.current) return;
 
       if (typeof document !== 'undefined' && document.hidden) {
-        // pause-ish while hidden (don’t hammer credits when tab not visible)
         clear();
         pollTimeoutRef.current = window.setTimeout(tick, Math.max(20000, baseMs));
         return;
@@ -766,8 +801,8 @@ export default function FXTradePage() {
 
     const onVis = () => {
       if (cancelled || unmountedRef.current) return;
+
       if (!document.hidden) {
-        // when user comes back, refresh quickly once
         retryAfterMsRef.current = 0;
         void loadChart();
         clear();
@@ -1010,7 +1045,9 @@ export default function FXTradePage() {
                       type="button"
                       onClick={() => setTf(t.value)}
                       className={`px-3 py-2 rounded-xl border text-sm transition ${
-                        tf === t.value ? 'bg-white/10 border-white/20' : 'bg-white/5 border-white/10 hover:bg-white/10'
+                        tf === t.value
+                          ? 'bg-white/10 border-white/20'
+                          : 'bg-white/5 border-white/10 hover:bg-white/10'
                       }`}
                     >
                       {t.label}
@@ -1241,7 +1278,11 @@ export default function FXTradePage() {
                                 : 'bg-rose-500/15 border-rose-500/30 text-rose-100'
                             }`}
                           >
-                            {t.direction === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                            {t.direction === 'buy' ? (
+                              <TrendingUp className="h-3 w-3" />
+                            ) : (
+                              <TrendingDown className="h-3 w-3" />
+                            )}
                             {t.direction.toUpperCase()}
                           </span>
                         </td>
@@ -1260,7 +1301,9 @@ export default function FXTradePage() {
                         </td>
 
                         <td className="px-4 py-3 text-right">
-                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>{t.status}</span>
+                          <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${statusBadge}`}>
+                            {t.status}
+                          </span>
                         </td>
 
                         <td className="px-4 py-3 text-right">

@@ -1,24 +1,41 @@
 // app/api/market/fx/candles/route.ts
 /**
- * FX CANDLES API - TWELVE DATA OHLC (RATE-LIMITED + CACHED)
- * =========================================================
+ * FX CANDLES API - TWELVE DATA OHLC (SHARED CACHE + "fresh=1" REFRESH)
+ * ====================================================================
  *
- * Goals:
- * - Stop blowing TwelveData credits on client polling
- * - Cache per symbol+tf+limit
- * - Deduplicate concurrent requests (1 upstream call per key)
- * - Enforce a global upstream budget (credits/min)
- * - Serve stale cache when rate-limited / upstream fails
+ * Key idea:
+ * - Client can poll THIS endpoint often.
+ * - This endpoint ONLY calls TwelveData when:
+ *    - cache is missing, OR
+ *    - request includes fresh=1 AND per-key interval + budgets allow it.
  *
- * Env knobs (optional):
- * - FX_TWELVEDATA_CREDITS_PER_MIN      (default 7)
- * - FX_TWELVEDATA_MIN_INTERVAL_MS     (default 9000)
- * - FX_CANDLES_CACHE_TTL_MS           (default 10000)
- * - FX_CANDLES_CACHE_STALE_MS         (default 60000)
- * - FX_CANDLES_MAX_CACHE_ITEMS        (default 500)
+ * This prevents:
+ * - blowing TwelveData daily cap (800/day)
+ * - per-minute cap (8/min)
+ * - serverless multi-instance bypass (shared cache + shared budget)
+ *
+ * Query:
+ * - display=EUR/USD (preferred)
+ * - symbol=OANDA:EUR_USD (converted)
+ * - tf=1m|5m|15m|1h|4h|1D
+ * - limit=10..500 (default 120)
+ * - fresh=1 (force refresh from TwelveData if allowed)
+ *
+ * Env:
+ * - TWELVEDATA_API_KEY (required)
+ * - NEXT_PUBLIC_SUPABASE_URL (required for shared cache)
+ * - SUPABASE_SERVICE_ROLE_KEY (required for shared cache + budgets)
+ *
+ * Knobs (optional):
+ * - FX_TWELVEDATA_CREDITS_PER_MIN   (default 7)
+ * - FX_TWELVEDATA_CREDITS_PER_DAY   (default 760)  // keep a safety buffer under 800
+ * - FX_TWELVEDATA_MIN_INTERVAL_MS   (default 120000) // 2 min per pair+tf+limit
+ * - FX_CANDLES_CACHE_TTL_MS         (default 120000) // "fresh" threshold for UI
+ * - FX_CANDLES_STALE_MAX_MS         (default 21600000) // 6h: still serve stale if provider blocks
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,33 +43,16 @@ export const dynamic = 'force-dynamic';
 const TWELVE_BASE = 'https://api.twelvedata.com';
 const DEBUG = process.env.DEBUG_MARKET === '1';
 
-const UPSTREAM_CREDITS_PER_MIN = Math.max(
-  1,
-  Number.parseInt(process.env.FX_TWELVEDATA_CREDITS_PER_MIN || '7', 10) || 7
-);
+const CREDITS_PER_MIN = Math.max(1, parseInt(process.env.FX_TWELVEDATA_CREDITS_PER_MIN || '7', 10) || 7);
+const CREDITS_PER_DAY = Math.max(1, parseInt(process.env.FX_TWELVEDATA_CREDITS_PER_DAY || '760', 10) || 760);
 
-// Minimum time between upstream fetches for the same key (pair+tf+limit)
 const MIN_UPSTREAM_INTERVAL_MS = Math.max(
-  1000,
-  Number.parseInt(process.env.FX_TWELVEDATA_MIN_INTERVAL_MS || '9000', 10) || 9000
+  5_000,
+  parseInt(process.env.FX_TWELVEDATA_MIN_INTERVAL_MS || '120000', 10) || 120000
 );
 
-// If cache is newer than this, always return it (no upstream call)
-const CACHE_TTL_MS = Math.max(
-  500,
-  Number.parseInt(process.env.FX_CANDLES_CACHE_TTL_MS || '10000', 10) || 10000
-);
-
-// If cache is older than TTL but within this stale window, we may still serve it
-const CACHE_STALE_MS = Math.max(
-  CACHE_TTL_MS,
-  Number.parseInt(process.env.FX_CANDLES_CACHE_STALE_MS || '60000', 10) || 60000
-);
-
-const MAX_CACHE_ITEMS = Math.max(
-  50,
-  Number.parseInt(process.env.FX_CANDLES_MAX_CACHE_ITEMS || '500', 10) || 500
-);
+const CACHE_TTL_MS = Math.max(5_000, parseInt(process.env.FX_CANDLES_CACHE_TTL_MS || '120000', 10) || 120000);
+const STALE_MAX_MS = Math.max(CACHE_TTL_MS, parseInt(process.env.FX_CANDLES_STALE_MAX_MS || '21600000', 10) || 21600000);
 
 function log(...args: any[]) {
   if (DEBUG) console.log('[FX/candles]', ...args);
@@ -63,9 +63,9 @@ function safeSnippet(v: string, max = 240) {
   return t.length > max ? t.slice(0, max) + '…' : t;
 }
 
-// ============================================
+// =====================
 // TIMEFRAME UTILITIES
-// ============================================
+// =====================
 
 function tfNorm(tf: string): string {
   const t = String(tf || '').trim();
@@ -99,32 +99,27 @@ function tfToTwelveInterval(tfRaw: string): string {
   }
 }
 
-// ============================================
+// =====================
 // SYMBOL CONVERSION
-// ============================================
+// =====================
 
 function toTwelveDisplay(symbolParam: string, displayParam: string): string {
   const symbol = (symbolParam || '').trim();
   const display = (displayParam || '').trim();
 
-  // Prefer display if provided: EUR/USD
   if (display) return display.toUpperCase();
 
-  // OANDA:EUR_USD -> EUR/USD
   if (symbol && symbol.includes(':')) {
     const stripped = symbol.split(':').slice(1).join(':');
     return stripped.toUpperCase().split('_').join('/');
   }
 
-  // EUR_USD -> EUR/USD
   if (symbol && symbol.includes('_')) return symbol.toUpperCase().split('_').join('/');
 
-  // EURUSD -> EUR/USD
   if (symbol && symbol.length === 6) {
     return `${symbol.slice(0, 3).toUpperCase()}/${symbol.slice(3).toUpperCase()}`;
   }
 
-  // Already EUR/USD
   return symbol.toUpperCase();
 }
 
@@ -133,9 +128,9 @@ function toFinnhubStyleSymbolFromDisplay(display: string): string {
   return `OANDA:${clean}`;
 }
 
-// ============================================
-// CANDLE TYPE
-// ============================================
+// =====================
+// CANDLE PARSING
+// =====================
 
 type RawCandle = {
   timestamp: string; // ISO
@@ -147,15 +142,11 @@ type RawCandle = {
   volume: number;
 };
 
-// TwelveData returns "YYYY-MM-DD HH:mm:ss" (not strict ISO).
 function parseTwelveDatetimeToEpochSec(dt: string): number {
   const s = String(dt || '').trim();
   if (!s) return 0;
-
-  // Convert "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DDTHH:mm:ssZ"
   const iso = s.includes('T') ? s : `${s.replace(' ', 'T')}Z`;
   const ms = Date.parse(iso);
-
   if (!Number.isFinite(ms)) return 0;
   return Math.floor(ms / 1000);
 }
@@ -164,9 +155,9 @@ function epochToIso(sec: number): string {
   return new Date(sec * 1000).toISOString();
 }
 
-// ============================================
-// IN-MEMORY CACHE + RATE LIMIT (per instance)
-// ============================================
+// =====================
+// PAYLOAD TYPES
+// =====================
 
 type CachedPayload = {
   ok: true;
@@ -187,84 +178,118 @@ type CachedPayload = {
   source: string;
   stale?: boolean;
   warning?: string;
+  ageSec?: number;
+  lastUpdatedAt?: string;
 };
 
-type CacheEntry = {
-  fetchedAt: number;
-  payload: CachedPayload;
-};
+// =====================
+// SUPABASE (SHARED CACHE)
+// =====================
 
-type InflightValue = {
-  fetchedAt: number;
-  entry: CacheEntry;
-};
+function getSupabaseAdmin(): SupabaseClient | null {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-type Budget = {
-  tokens: number;
-  refillAt: number; // epoch ms
-};
+  if (!url || !key) return null;
 
-type FxState = {
-  cache: Map<string, CacheEntry>;
-  inflight: Map<string, Promise<InflightValue>>;
-  lastUpstreamByKey: Map<string, number>;
-  budget: Budget;
-};
-
-function getState(): FxState {
   const g = globalThis as any;
-  if (!g.__fxCandlesState) {
-    g.__fxCandlesState = {
-      cache: new Map<string, CacheEntry>(),
-      inflight: new Map<string, Promise<InflightValue>>(),
-      lastUpstreamByKey: new Map<string, number>(),
-      budget: {
-        tokens: UPSTREAM_CREDITS_PER_MIN,
-        refillAt: Date.now() + 60_000,
-      },
-    } satisfies FxState;
+  if (!g.__sbAdminFxCache) {
+    g.__sbAdminFxCache = createClient(url, key, {
+      auth: { persistSession: false },
+    });
   }
-  return g.__fxCandlesState as FxState;
+  return g.__sbAdminFxCache as SupabaseClient;
 }
 
-function refillBudget(budget: Budget, now: number) {
-  if (now >= budget.refillAt) {
-    budget.tokens = UPSTREAM_CREDITS_PER_MIN;
-    budget.refillAt = now + 60_000;
-  }
+type CacheRow = { key: string; payload: any; updated_at: string };
+
+async function readSharedCache(sb: SupabaseClient, key: string): Promise<{ payload: CachedPayload; updatedAtMs: number; updatedAtIso: string } | null> {
+  const { data, error } = await sb
+    .from('market_cache')
+    .select('key,payload,updated_at')
+    .eq('key', key)
+    .maybeSingle<CacheRow>();
+
+  if (error || !data?.payload || !data.updated_at) return null;
+
+  const ms = Date.parse(data.updated_at);
+  if (!Number.isFinite(ms)) return null;
+
+  return { payload: data.payload as CachedPayload, updatedAtMs: ms, updatedAtIso: data.updated_at };
 }
 
-function pruneCache(state: FxState) {
-  if (state.cache.size <= MAX_CACHE_ITEMS) return;
+async function writeSharedCache(sb: SupabaseClient, key: string, payload: CachedPayload): Promise<void> {
+  const row = { key, payload, updated_at: new Date().toISOString() };
+  await sb.from('market_cache').upsert(row, { onConflict: 'key' });
+}
 
-  // Remove oldest entries first
-  const items = Array.from(state.cache.entries())
-    .sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+// =====================
+// SHARED BUDGET (RPC)
+// =====================
 
-  const removeCount = state.cache.size - MAX_CACHE_ITEMS;
-  for (let i = 0; i < removeCount; i++) {
-    state.cache.delete(items[i]![0]);
+async function trySpendBudget(sb: SupabaseClient, args: {
+  provider: string;
+  bucket: 'minute' | 'day';
+  windowStartIso: string;
+  limit: number;
+  cost: number;
+}): Promise<{ allowed: boolean; retryAfterSec: number }> {
+  // Requires SQL RPC: try_spend_market_budget(...)
+  const { data, error } = await sb.rpc('try_spend_market_budget', {
+    p_provider: args.provider,
+    p_bucket: args.bucket,
+    p_window_start: args.windowStartIso,
+    p_limit: args.limit,
+    p_cost: args.cost,
+  });
+
+  if (error) {
+    // If RPC missing, do NOT block, but log (you should add the SQL below)
+    log('Budget RPC error (missing SQL?):', error.message);
+    return { allowed: true, retryAfterSec: 5 };
   }
+
+  const row = Array.isArray(data) ? data[0] : data;
+  const allowed = !!row?.allowed;
+  const retryAfterSec = Math.max(1, Number(row?.retry_after_sec ?? 5));
+  return { allowed, retryAfterSec };
+}
+
+function minuteWindowStartIso(nowMs: number): string {
+  const start = Math.floor(nowMs / 60_000) * 60_000;
+  return new Date(start).toISOString();
+}
+
+function dayWindowStartIsoUtc(nowMs: number): string {
+  const d = new Date(nowMs);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0);
+  return new Date(start).toISOString();
+}
+
+// =====================
+// IN-FLIGHT DEDUPE (per instance)
+// =====================
+
+type InflightValue = { payload: CachedPayload; updatedAtIso: string };
+
+function getInflight() {
+  const g = globalThis as any;
+  if (!g.__fxCandlesInflight) g.__fxCandlesInflight = new Map<string, Promise<InflightValue>>();
+  return g.__fxCandlesInflight as Map<string, Promise<InflightValue>>;
 }
 
 function makeKey(display: string, interval: string, limit: number) {
-  return `${display}|${interval}|${limit}`;
+  return `fxcandles|${display}|${interval}|${limit}`;
 }
 
-function retryAfterSeconds(now: number, a?: number, b?: number) {
-  const candidates = [a, b].filter((x): x is number => typeof x === 'number' && x > now);
-  if (!candidates.length) return 5;
-  return Math.max(1, Math.ceil((Math.max(...candidates) - now) / 1000));
-}
-
-// ============================================
+// =====================
 // TWELVE DATA FETCHER
-// ============================================
+// =====================
 
 async function fetchTwelveCandles(params: {
-  display: string;   // EUR/USD
-  interval: string;  // 5min etc
-  limit: number;     // outputsize
+  display: string;
+  interval: string;
+  limit: number;
   apiKey: string;
 }): Promise<{ candles: RawCandle[] | null; error: string | null; status: number }> {
   const url = new URL(`${TWELVE_BASE}/time_series`);
@@ -276,12 +301,9 @@ async function fetchTwelveCandles(params: {
   log('Upstream fetch:', { symbol: params.display, interval: params.interval, limit: params.limit });
 
   try {
-    const res = await fetch(url.toString(), {
-      headers: { accept: 'application/json' },
-      cache: 'no-store',
-    });
-
+    const res = await fetch(url.toString(), { headers: { accept: 'application/json' }, cache: 'no-store' });
     const text = await res.text();
+
     let json: any = null;
     try { json = JSON.parse(text); } catch { json = null; }
 
@@ -292,8 +314,6 @@ async function fetchTwelveCandles(params: {
         (res.status === 429 ? 'Rate limited by data provider (try again shortly).' : `Upstream error (${res.status})`);
 
       log('Upstream error:', { status: res.status, body: safeSnippet(text) });
-
-      // If TwelveData returns 200 but status:"error", treat as 502
       const status = res.ok ? 502 : res.status;
       return { candles: null, error: msg, status };
     }
@@ -330,25 +350,20 @@ async function fetchTwelveCandles(params: {
   }
 }
 
-// ============================================
+// =====================
 // MAIN HANDLER
-// ============================================
+// =====================
 
 export async function GET(req: NextRequest) {
   const started = Date.now();
-  const state = getState();
-  const now = Date.now();
-  refillBudget(state.budget, now);
 
   try {
     const apiKey = process.env.TWELVEDATA_API_KEY;
-    if (!apiKey) {
-      log('Missing TWELVEDATA_API_KEY');
-      return NextResponse.json({ ok: false, error: 'Missing TWELVEDATA_API_KEY' }, { status: 500 });
-    }
+    if (!apiKey) return NextResponse.json({ ok: false, error: 'Missing TWELVEDATA_API_KEY' }, { status: 500 });
+
+    const sb = getSupabaseAdmin();
 
     const { searchParams } = new URL(req.url);
-
     const symbolParam = (searchParams.get('symbol') || '').trim();
     const displayParam = (searchParams.get('display') || '').trim();
 
@@ -358,142 +373,171 @@ export async function GET(req: NextRequest) {
     const rawLimit = Number(searchParams.get('limit') || 120);
     const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 120, 10), 500);
 
+    const fresh = (searchParams.get('fresh') || '').trim() === '1';
+
     const display = toTwelveDisplay(symbolParam, displayParam);
     if (!display) {
-      return NextResponse.json(
-        { ok: false, error: 'Missing symbol=OANDA:EUR_USD or display=EUR/USD' },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: 'Missing symbol=OANDA:EUR_USD or display=EUR/USD' }, { status: 400 });
     }
 
     const symbol = toFinnhubStyleSymbolFromDisplay(display);
     const resolution = tfToResolution(tf);
     const interval = tfToTwelveInterval(tf);
-
     const key = makeKey(display, interval, limit);
-    const cached = state.cache.get(key);
 
-    // 1) HARD CACHE HIT (fresh)
-    if (cached && now - cached.fetchedAt <= CACHE_TTL_MS) {
-      log('Cache HIT:', { key, ageMs: now - cached.fetchedAt });
-      return NextResponse.json(cached.payload, {
+    // 1) shared cache read (if supabase configured)
+    let cached: { payload: CachedPayload; updatedAtMs: number; updatedAtIso: string } | null = null;
+    if (sb) cached = await readSharedCache(sb, key);
+
+    const now = Date.now();
+
+    const respondCached = (payload: CachedPayload, updatedAtIso: string, cacheTag: string, extraHeaders?: Record<string, string>) => {
+      const updatedAtMs = Date.parse(updatedAtIso);
+      const ageSec = Number.isFinite(updatedAtMs) ? Math.max(0, Math.floor((now - updatedAtMs) / 1000)) : 0;
+
+      const isStaleForUi = Number.isFinite(updatedAtMs) ? (now - updatedAtMs) > CACHE_TTL_MS : false;
+
+      const out: CachedPayload = {
+        ...payload,
+        symbol,
+        display,
+        tf,
+        resolution,
+        ageSec,
+        lastUpdatedAt: updatedAtIso,
+        stale: payload.stale ?? isStaleForUi,
+      };
+
+      return NextResponse.json(out, {
         status: 200,
         headers: {
           'Cache-Control': 'no-store',
-          'X-Cache': 'HIT',
+          'X-Cache': cacheTag,
+          'X-Cache-Age': String(ageSec),
+          ...(extraHeaders || {}),
         },
       });
+    };
+
+    // 2) If NOT fresh and we have cache, ALWAYS serve it (even if "old") to avoid burning credits.
+    if (!fresh && cached) {
+      const ageMs = now - cached.updatedAtMs;
+      if (ageMs <= STALE_MAX_MS) {
+        log('Serve cached (no fresh):', { key, ageMs });
+        return respondCached(cached.payload, cached.updatedAtIso, ageMs <= CACHE_TTL_MS ? 'HIT' : 'STALE');
+      }
+      // too old -> allow refresh attempt below
+      log('Cache too old, will refresh:', { key, ageMs });
     }
 
-    // 2) IN-FLIGHT DEDUPE
-    const inflight = state.inflight.get(key);
-    if (inflight) {
-      log('Inflight WAIT:', { key });
-      const done = await inflight;
-      return NextResponse.json(done.entry.payload, {
-        status: 200,
-        headers: {
-          'Cache-Control': 'no-store',
-          'X-Cache': 'DEDUPED',
-        },
-      });
+    // 3) In-flight dedupe (per instance)
+    const inflight = getInflight();
+    const running = inflight.get(key);
+    if (running) {
+      log('Inflight wait:', { key });
+      const done = await running;
+      return respondCached(done.payload, done.updatedAtIso, 'DEDUPED');
     }
 
-    // 3) PER-KEY MIN INTERVAL (avoid hammering same pair)
-    const lastUp = state.lastUpstreamByKey.get(key) || 0;
-    const nextAllowedByKey = lastUp ? lastUp + MIN_UPSTREAM_INTERVAL_MS : 0;
+    // 4) If no Supabase, fall back to safe behavior: block frequent refreshes hard
+    if (!sb) {
+      if (cached) return respondCached(cached.payload, cached.updatedAtIso, 'HIT_NO_SB');
+      return NextResponse.json(
+        { ok: false, error: 'Server cache not configured (SUPABASE_SERVICE_ROLE_KEY missing). Add it to enable shared cache.' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } }
+      );
+    }
 
-    // 4) GLOBAL UPSTREAM BUDGET
-    const canSpend = state.budget.tokens > 0;
-    const nextBudgetRefill = state.budget.refillAt;
+    // 5) Per-key interval gate using updated_at as last refresh time (shared across instances)
+    if (cached) {
+      const sinceLast = now - cached.updatedAtMs;
+      if (sinceLast < MIN_UPSTREAM_INTERVAL_MS) {
+        const retryAfterSec = Math.max(1, Math.ceil((MIN_UPSTREAM_INTERVAL_MS - sinceLast) / 1000));
+        log('Blocked by per-key interval:', { key, retryAfterSec });
 
-    const blockedByKey = nextAllowedByKey && now < nextAllowedByKey;
-    const blockedByBudget = !canSpend;
+        // Serve cached and tell client when it can refresh again
+        return respondCached(
+          { ...cached.payload, stale: true, warning: 'Refresh too soon; served cached candles.' },
+          cached.updatedAtIso,
+          'STALE_BLOCKED',
+          { 'Retry-After': String(retryAfterSec), 'X-RateLimit-Reason': 'per-key' }
+        );
+      }
+    }
 
-    if (blockedByKey || blockedByBudget) {
-      // If we have cache that is not *too* old, serve it instead of error
-      if (cached && now - cached.fetchedAt <= CACHE_STALE_MS) {
-        log('Serve STALE (blocked):', {
-          key,
-          blockedByKey,
-          blockedByBudget,
-          ageMs: now - cached.fetchedAt,
-        });
+    // 6) Shared budgets (minute + day) BEFORE calling TwelveData
+    const cost = 1;
+    const minuteSpend = await trySpendBudget(sb, {
+      provider: 'twelvedata',
+      bucket: 'minute',
+      windowStartIso: minuteWindowStartIso(now),
+      limit: CREDITS_PER_MIN,
+      cost,
+    });
 
-        const payload: CachedPayload = {
-          ...cached.payload,
-          stale: true,
-          warning: blockedByBudget
-            ? 'Upstream budget exhausted; served cached candles.'
-            : 'Requests too frequent; served cached candles.',
-          source: `${cached.payload.source}+cache`,
-        };
+    if (!minuteSpend.allowed) {
+      const retry = minuteSpend.retryAfterSec;
+      log('Blocked by minute budget:', { key, retry });
 
-        return NextResponse.json(payload, {
-          status: 200,
-          headers: {
-            'Cache-Control': 'no-store',
-            'X-Cache': 'STALE',
-          },
-        });
+      if (cached && (now - cached.updatedAtMs) <= STALE_MAX_MS) {
+        return respondCached(
+          { ...cached.payload, stale: true, warning: 'Minute budget exhausted; served cached candles.' },
+          cached.updatedAtIso,
+          'STALE_BUDGET_MIN',
+          { 'Retry-After': String(retry), 'X-RateLimit-Reason': 'minute-budget' }
+        );
       }
 
-      // No acceptable cache -> 429 with Retry-After
-      const retrySec = retryAfterSeconds(
-        now,
-        blockedByKey ? nextAllowedByKey : undefined,
-        blockedByBudget ? nextBudgetRefill : undefined
-      );
-
-      log('429 (no cache):', { key, blockedByKey, blockedByBudget, retrySec });
-
       return NextResponse.json(
-        {
-          ok: false,
-          error: 'Rate limited (server) to protect data provider credits. Try again shortly.',
-          symbol,
-          display,
-          tf,
-          retryAfterSec: retrySec,
-        },
-        {
-          status: 429,
-          headers: {
-            'Cache-Control': 'no-store',
-            'Retry-After': String(retrySec),
-            'X-RateLimit-Reason': blockedByBudget ? 'budget' : 'per-key',
-          },
-        }
+        { ok: false, error: 'Rate limited (server minute budget). Try again shortly.', retryAfterSec: retry, symbol, display, tf },
+        { status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'minute-budget' } }
       );
     }
 
-    // 5) Spend 1 upstream token and fetch (deduped)
-    state.budget.tokens -= 1;
-    state.lastUpstreamByKey.set(key, now);
+    const daySpend = await trySpendBudget(sb, {
+      provider: 'twelvedata',
+      bucket: 'day',
+      windowStartIso: dayWindowStartIsoUtc(now),
+      limit: CREDITS_PER_DAY,
+      cost,
+    });
 
+    if (!daySpend.allowed) {
+      const retry = daySpend.retryAfterSec;
+      log('Blocked by day budget:', { key, retry });
+
+      if (cached && (now - cached.updatedAtMs) <= STALE_MAX_MS) {
+        return respondCached(
+          { ...cached.payload, stale: true, warning: 'Daily budget exhausted; served cached candles.' },
+          cached.updatedAtIso,
+          'STALE_BUDGET_DAY',
+          { 'Retry-After': String(retry), 'X-RateLimit-Reason': 'day-budget' }
+        );
+      }
+
+      return NextResponse.json(
+        { ok: false, error: 'Daily budget exhausted (server). Try later.', retryAfterSec: retry, symbol, display, tf },
+        { status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'day-budget' } }
+      );
+    }
+
+    // 7) Upstream fetch (deduped)
     const p = (async (): Promise<InflightValue> => {
-      const { candles, error } = await fetchTwelveCandles({
-        display,
-        interval,
-        limit,
-        apiKey,
-      });
+      const { candles, error } = await fetchTwelveCandles({ display, interval, limit, apiKey });
 
       if (error || !candles) {
-        // Upstream failed: fallback to cache if available
-        const fallback = state.cache.get(key);
-        if (fallback && Date.now() - fallback.fetchedAt <= CACHE_STALE_MS) {
+        // fallback to cache if exists
+        const fallback = await readSharedCache(sb, key);
+        if (fallback && (Date.now() - fallback.updatedAtMs) <= STALE_MAX_MS) {
           const payload: CachedPayload = {
             ...fallback.payload,
             stale: true,
             warning: error || 'Upstream error; served cached candles.',
             source: `${fallback.payload.source}+cache`,
           };
-          const entry: CacheEntry = { fetchedAt: fallback.fetchedAt, payload };
-          return { fetchedAt: entry.fetchedAt, entry };
+          return { payload, updatedAtIso: fallback.updatedAtIso };
         }
 
-        // No cache to fallback -> throw so handler returns error
         throw new Error(error || 'Upstream error');
       }
 
@@ -518,33 +562,20 @@ export async function GET(req: NextRequest) {
         source: 'twelvedata',
       };
 
-      const entry: CacheEntry = { fetchedAt: Date.now(), payload };
-      state.cache.set(key, entry);
-      pruneCache(state);
+      await writeSharedCache(sb, key, payload);
 
-      return { fetchedAt: entry.fetchedAt, entry };
+      const updatedAtIso = new Date().toISOString();
+      return { payload, updatedAtIso };
     })();
 
-    state.inflight.set(key, p);
+    inflight.set(key, p);
 
     try {
       const done = await p;
-      log('200:', {
-        key,
-        count: done.entry.payload.count,
-        tookMs: Date.now() - started,
-        budgetLeft: state.budget.tokens,
-      });
-
-      return NextResponse.json(done.entry.payload, {
-        status: 200,
-        headers: {
-          'Cache-Control': 'no-store',
-          'X-Cache': 'MISS',
-        },
-      });
+      log('200:', { key, count: done.payload.count, tookMs: Date.now() - started });
+      return respondCached(done.payload, done.updatedAtIso, 'MISS');
     } finally {
-      state.inflight.delete(key);
+      inflight.delete(key);
     }
   } catch (err: any) {
     log('Exception:', err?.message);

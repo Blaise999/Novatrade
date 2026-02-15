@@ -1,26 +1,33 @@
 // lib/market/twelve.ts
+
 export type TwelveQuote = {
   symbol: string;
   name?: string;
   currency?: string;
   exchange?: string;
   timestamp?: string;
-  price?: string | number;
-  close?: string | number;
-  open?: string | number;
-  high?: string | number;
-  low?: string | number;
-  volume?: string | number;
-  percent_change?: string | number;
-  previous_close?: string | number;
+  price?: any;
+  close?: any;
+  open?: any;
+  high?: any;
+  low?: any;
+  volume?: any;
+  percent_change?: any;
+
+  // some wrappers use these:
+  previous_close?: any;
+  prev_close?: any;
+  change_percent?: any;
+  last?: any;
 };
 
 export type Candle = {
-  time: string; // datetime (or ISO string)
+  time: string; // datetime string (or ISO)
   open: number;
   high: number;
   low: number;
   close: number;
+  volume?: number;
 };
 
 function toNum(v: any, fallback = 0) {
@@ -28,135 +35,161 @@ function toNum(v: any, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function asUpper(s: any) {
-  return String(s || '').trim().toUpperCase();
+function asErrMsg(data: any, fallback: string) {
+  const msg = data?.error || data?.message || data?.details?.message || fallback;
+  return String(msg || fallback);
 }
 
-// Your stock page calls these:
-const QUOTE_URL = (symbolsCsv: string) =>
-  `/api/market/twelve/quote?symbol=${encodeURIComponent(symbolsCsv)}`;
+async function fetchJson(url: string) {
+  const r = await fetch(url, { cache: 'no-store' });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(asErrMsg(data, `HTTP_${r.status}`));
+  return data;
+}
 
-const TS_URL = (symbol: string, interval: string, outputsize: number) =>
-  `/api/market/twelve/time-series?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(
-    interval
-  )}&outputsize=${encodeURIComponent(String(outputsize))}`;
-
-/**
- * Normalize quote response:
- * - Some handlers return { ok, data: {AAPL:{...}} }
- * - Some return {AAPL:{...}}
- * - Some return single {symbol:"AAPL", ...}
- */
-function normalizeQuotePayload(payload: any): Record<string, TwelveQuote> {
-  if (!payload) return {};
-
-  // wrapper: { ok, data: {...} }
-  if (payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object') {
-    return payload.data as Record<string, TwelveQuote>;
+// ✅ try multiple possible route paths (your repo has both /market and /markets)
+async function fetchFirstOk(urls: string[]) {
+  let lastErr: any = null;
+  for (const u of urls) {
+    try {
+      return await fetchJson(u);
+    } catch (e: any) {
+      lastErr = e;
+    }
   }
-
-  // single quote: { symbol: "AAPL", ... }
-  if (payload && typeof payload === 'object' && payload.symbol) {
-    const sym = asUpper(payload.symbol);
-    return sym ? { [sym]: payload as TwelveQuote } : {};
-  }
-
-  // keyed: { AAPL:{...}, MSFT:{...} }
-  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-    return payload as Record<string, TwelveQuote>;
-  }
-
-  return {};
+  throw lastErr || new Error('fetch_failed');
 }
 
 export async function fetchQuote(symbol: string): Promise<TwelveQuote> {
-  const sym = asUpper(symbol);
-  const r = await fetch(QUOTE_URL(sym), { cache: 'no-store' });
-  const data = await r.json();
+  const s = symbol.trim();
+  const data = await fetchFirstOk([
+    `/api/market/twelve/quote?symbol=${encodeURIComponent(s)}`,
+    `/api/markets/twelve/quote?symbol=${encodeURIComponent(s)}`,
+  ]);
 
-  // your server often returns 200 even on error, so handle both
-  const map = normalizeQuotePayload(data);
-  const q = map[sym];
-
-  if (!q) {
-    const err = (data && (data.error || data.message)) || 'Quote failed';
-    throw new Error(String(err));
+  // wrapper: { ok, data, error }
+  if (typeof data?.ok === 'boolean') {
+    if (!data.ok) throw new Error(asErrMsg(data, 'Quote failed'));
+    if (data.data && typeof data.data === 'object') {
+      const key = Object.keys(data.data)[0];
+      return (data.data[key] || {}) as TwelveQuote;
+    }
+    return (data as any) as TwelveQuote;
   }
 
-  return q;
+  // direct
+  return data as TwelveQuote;
 }
 
+// batch: ["AAPL","MSFT"]
 export async function fetchQuotesBatch(symbols: string[]): Promise<Record<string, TwelveQuote>> {
-  const uniq = Array.from(new Set(symbols.map(asUpper).filter(Boolean)));
+  const uniq = Array.from(
+    new Set(
+      symbols
+        .map((s) => String(s || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+  );
   if (uniq.length === 0) return {};
 
-  const r = await fetch(QUOTE_URL(uniq.join(',')), { cache: 'no-store' });
-  const json = await r.json();
+  const qs = encodeURIComponent(uniq.join(','));
 
-  const map = normalizeQuotePayload(json);
-  return map;
-}
+  const data = await fetchFirstOk([
+    `/api/market/twelve/quote?symbol=${qs}`,
+    `/api/markets/twelve/quote?symbol=${qs}`,
+  ]);
 
-/**
- * Normalize time-series response:
- * - Some handlers return { ok, candles: [{time, open, high, low, close}] }
- * - Some return { meta, candles: [{time, o, h, l, c}] }
- * - Some return Twelve raw { values: [{datetime, open, high, low, close}] }
- */
-function normalizeCandlesPayload(payload: any): Candle[] {
-  if (!payload) return [];
-
-  // wrapper candles (your time-series route)
-  const candles1 = Array.isArray(payload.candles) ? payload.candles : null;
-  if (candles1) {
-    return candles1
-      .map((x: any) => {
-        const timeRaw = x?.time ?? x?.datetime ?? x?.date ?? '';
-        // if server already sent ms epoch, turn it into ISO
-        const time =
-          typeof timeRaw === 'number'
-            ? new Date(timeRaw).toISOString()
-            : String(timeRaw || '');
-
-        return {
-          time,
-          open: toNum(x?.open ?? x?.o),
-          high: toNum(x?.high ?? x?.h),
-          low: toNum(x?.low ?? x?.l),
-          close: toNum(x?.close ?? x?.c),
-        } satisfies Candle;
-      })
-      .filter((c: Candle) => c.time && c.high > 0 && c.low > 0 && c.close > 0);
+  // ✅ wrapper
+  if (typeof data?.ok === 'boolean') {
+    if (!data.ok) throw new Error(asErrMsg(data, 'Batch quote failed'));
+    const map = data.data && typeof data.data === 'object' ? data.data : {};
+    return map as Record<string, TwelveQuote>;
   }
 
-  // Twelve raw format: { values: [{ datetime, open, high, low, close }] }
-  const values = Array.isArray(payload.values) ? payload.values : [];
-  return values
-    .slice()
-    .reverse() // newest-first -> oldest-first
-    .map((x: any) => ({
-      time: String(x?.datetime || x?.time || ''),
-      open: toNum(x?.open),
-      high: toNum(x?.high),
-      low: toNum(x?.low),
-      close: toNum(x?.close),
-    }))
-    .filter((c: Candle) => c.time && c.high > 0 && c.low > 0 && c.close > 0);
+  // ✅ single quote object
+  if (data && typeof data === 'object' && (data as any).symbol) {
+    const sym = String((data as any).symbol).toUpperCase();
+    return { [sym]: data as TwelveQuote };
+  }
+
+  // ✅ keyed response: {AAPL:{...}, MSFT:{...}}
+  return data as Record<string, TwelveQuote>;
 }
 
 export async function fetchCandles(symbol: string, interval = '1min', outputsize = 200): Promise<Candle[]> {
-  const sym = asUpper(symbol);
+  const sym = symbol.trim().toUpperCase();
+  const out = Math.max(20, Math.min(500, Number.isFinite(Number(outputsize)) ? Number(outputsize) : 200));
 
-  const r = await fetch(TS_URL(sym, interval, outputsize), { cache: 'no-store' });
-  const json = await r.json();
+  const data = await fetchFirstOk([
+    // common
+    `/api/market/twelve/time-series?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&outputsize=${encodeURIComponent(String(out))}`,
+    // alternate naming you showed
+    `/api/markets/twelve/candles?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&outputsize=${encodeURIComponent(String(out))}`,
+  ]);
 
-  // If your server encodes errors but returns 200, candles may be empty with ok=false
-  const candles = normalizeCandlesPayload(json);
+  // wrapper shape: { ok, candles, error }
+  if (typeof data?.ok === 'boolean') {
+    if (!data.ok) throw new Error(asErrMsg(data, 'Candles failed'));
+    const candles = Array.isArray(data.candles) ? data.candles : [];
+    // could be {time:number, open...} or {t,o,h,l,c,time}
+    return candles.map((c: any) => {
+      if (typeof c?.time === 'string') {
+        return {
+          time: String(c.time),
+          open: toNum(c.open ?? c.o),
+          high: toNum(c.high ?? c.h),
+          low: toNum(c.low ?? c.l),
+          close: toNum(c.close ?? c.c),
+          volume: c.volume != null ? toNum(c.volume) : undefined,
+        } as Candle;
+      }
 
-  if (!candles.length) {
-    // only throw if the server explicitly said it's an error
-    if (json?.ok === false) throw new Error(json?.error || 'Candles failed');
+      if (typeof c?.time === 'number' && Number.isFinite(c.time)) {
+        return {
+          time: new Date(c.time).toISOString(),
+          open: toNum(c.open ?? c.o),
+          high: toNum(c.high ?? c.h),
+          low: toNum(c.low ?? c.l),
+          close: toNum(c.close ?? c.c),
+          volume: c.volume != null ? toNum(c.volume) : undefined,
+        } as Candle;
+      }
+
+      // fallback
+      return {
+        time: String(c?.datetime || c?.date || ''),
+        open: toNum(c.open ?? c.o),
+        high: toNum(c.high ?? c.h),
+        low: toNum(c.low ?? c.l),
+        close: toNum(c.close ?? c.c),
+        volume: c.volume != null ? toNum(c.volume) : undefined,
+      } as Candle;
+    });
   }
 
-  return candles;
+  // route shape: { meta, candles:[{t,time,o,h,l,c}] }
+  if (Array.isArray(data?.candles)) {
+    const candles = data.candles as any[];
+    return candles.map((c: any) => ({
+      time: String(c?.time || c?.datetime || (typeof c?.t === 'number' ? new Date(c.t).toISOString() : '')),
+      open: toNum(c?.open ?? c?.o),
+      high: toNum(c?.high ?? c?.h),
+      low: toNum(c?.low ?? c?.l),
+      close: toNum(c?.close ?? c?.c),
+      volume: c?.v != null ? toNum(c.v) : undefined,
+    }));
+  }
+
+  // Twelve raw time_series shape: { values:[{datetime/open/high/low/close}] }
+  const values = Array.isArray(data?.values) ? data.values : [];
+  const ordered = values.slice().reverse(); // newest-first -> oldest-first
+
+  return ordered.map((x: any) => ({
+    time: String(x.datetime || x.time || ''),
+    open: toNum(x.open),
+    high: toNum(x.high),
+    low: toNum(x.low),
+    close: toNum(x.close),
+    volume: x.volume != null ? toNum(x.volume) : undefined,
+  }));
 }
