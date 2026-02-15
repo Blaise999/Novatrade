@@ -119,24 +119,19 @@ const FX_PAIRS = [
 
 const MULTIPLIERS = [10, 25, 50, 100, 200, 500, 1000] as const;
 
-/**
- * ✅ Poll at candle-speed (not every 12s).
- * If you want "faster feeling", set TF = 1m.
- */
+// poll baselines (you can bump these higher to save more)
 const TIMEFRAMES: { label: string; value: TF; pollMs: number }[] = [
-  { label: '1m', value: '1m', pollMs: 65_000 },
-  { label: '5m', value: '5m', pollMs: 305_000 },
-  { label: '15m', value: '15m', pollMs: 905_000 },
-  { label: '1h', value: '1h', pollMs: 3_605_000 },
-  { label: '4h', value: '4h', pollMs: 14_405_000 },
-  { label: '1D', value: '1D', pollMs: 86_405_000 },
+  { label: '1m', value: '1m', pollMs: 12000 },
+  { label: '5m', value: '5m', pollMs: 15000 },
+  { label: '15m', value: '15m', pollMs: 25000 },
+  { label: '1h', value: '1h', pollMs: 35000 },
+  { label: '4h', value: '4h', pollMs: 50000 },
+  { label: '1D', value: '1D', pollMs: 65000 },
 ];
 
-// ✅ Seed + tail strategy
-const SEED_LIMIT = 260; // first load / occasional resync
-const TAIL_LIMIT = 3; // frequent updates: just last few candles
-const RESEED_EVERY_MS = 10 * 60 * 1000; // every 10 mins do a full resync
-
+// ===============================
+// helpers
+// ===============================
 function clampNum(v: unknown, fallback = 0) {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -252,7 +247,9 @@ function makeIdempotencyKey(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-/** --------- token helpers (robust) ---------- */
+// ===============================
+// JWT decode (for token caching)
+// ===============================
 function decodeJwtPayload(token: string): any | null {
   try {
     const parts = token.split('.');
@@ -352,7 +349,184 @@ function readStoredAccessToken(): string | null {
   return pick(window.sessionStorage) || pick(window.localStorage);
 }
 
-/** ---------- candles errors (429 aware) ---------- */
+// ===============================
+// FX "always chart" cache (client)
+// ===============================
+const SS_PREFIX = 'novatrade:fx';
+type Tick = { t: number; p: number }; // ms
+
+function ssGet<T>(key: string): T | null {
+  try {
+    if (typeof window === 'undefined') return null;
+    const raw = window.sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function ssSet(key: string, value: any) {
+  try {
+    if (typeof window === 'undefined') return;
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // ignore
+  }
+}
+
+function tfToMs(tf: TF) {
+  switch (tf) {
+    case '1m':
+      return 60_000;
+    case '5m':
+      return 5 * 60_000;
+    case '15m':
+      return 15 * 60_000;
+    case '1h':
+      return 60 * 60_000;
+    case '4h':
+      return 4 * 60 * 60_000;
+    case '1D':
+      return 24 * 60 * 60_000;
+    default:
+      return 5 * 60_000;
+  }
+}
+
+function hashStr(s: string) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildCandlesFromTicksFx(ticks: Tick[], intervalMs: number, count: number): Candle[] {
+  if (!ticks?.length) return [];
+
+  const now = Date.now();
+  const end = Math.floor(now / intervalMs) * intervalMs;
+  const start = end - count * intervalMs;
+
+  const sliced = ticks
+    .filter((x) => x.t >= start - intervalMs && x.t <= end + intervalMs)
+    .sort((a, b) => a.t - b.t);
+
+  if (!sliced.length) return [];
+
+  let idx = 0;
+  let lastClose = sliced[0].p;
+
+  const out: Candle[] = [];
+  for (let i = 0; i < count; i++) {
+    const b0 = start + i * intervalMs;
+    const b1 = b0 + intervalMs;
+
+    const bucket: Tick[] = [];
+    while (idx < sliced.length && sliced[idx].t < b0) {
+      lastClose = sliced[idx].p;
+      idx++;
+    }
+    while (idx < sliced.length && sliced[idx].t >= b0 && sliced[idx].t < b1) {
+      bucket.push(sliced[idx]);
+      idx++;
+    }
+
+    if (!bucket.length) {
+      const p = lastClose;
+      out.push({
+        time: Math.floor(b0 / 1000),
+        open: p,
+        high: p,
+        low: p,
+        close: p,
+      });
+      continue;
+    }
+
+    const o = bucket[0].p;
+    const c = bucket[bucket.length - 1].p;
+    let h = o;
+    let l = o;
+    for (const x of bucket) {
+      if (x.p > h) h = x.p;
+      if (x.p < l) l = x.p;
+    }
+
+    lastClose = c;
+    out.push({
+      time: Math.floor(b0 / 1000),
+      open: o,
+      high: h,
+      low: l,
+      close: c,
+    });
+  }
+
+  return out.filter((x) => x.open > 0 && x.high > 0 && x.low > 0 && x.close > 0);
+}
+
+function generateSyntheticCandlesFx(seedPrice: number, intervalMs: number, count: number, seedKey: string): Candle[] {
+  const p0 = Number.isFinite(seedPrice) && seedPrice > 0 ? seedPrice : 1;
+  const rng = mulberry32(hashStr(seedKey));
+
+  const now = Date.now();
+  const end = Math.floor(now / intervalMs) * intervalMs;
+  const start = end - count * intervalMs;
+
+  const baseVol = Math.max(0.00001, p0 * 0.0015);
+  let last = p0;
+
+  const out: Candle[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = start + i * intervalMs;
+
+    const drift = (rng() - 0.5) * baseVol;
+    const o = last;
+    const c = Math.max(0.00001, o + drift);
+
+    const wick = baseVol * (0.4 + rng());
+    const h = Math.max(o, c) + wick * rng();
+    const l = Math.max(0.00001, Math.min(o, c) - wick * rng());
+
+    out.push({
+      time: Math.floor(t / 1000),
+      open: o,
+      high: h,
+      low: l,
+      close: c,
+    });
+    last = c;
+  }
+
+  return out;
+}
+
+function pushFxTick(pair: string, price: number) {
+  try {
+    if (!pair || !Number.isFinite(price) || price <= 0) return;
+    const key = `${SS_PREFIX}:ticks:${pair}`;
+    const prev = ssGet<Tick[]>(key) || [];
+    const next = [...prev, { t: Date.now(), p: price }].slice(-2400);
+    ssSet(key, next);
+  } catch {
+    // ignore
+  }
+}
+
+// ===============================
+// candles fetch (429 + cache aware)
+// ===============================
 class CandlesError extends Error {
   status: number;
   retryAfterMs?: number;
@@ -371,7 +545,6 @@ type CandlesFetchResult = {
   warning?: string;
 };
 
-/** --------- candles fetch (429 + cache aware) ---------- */
 async function fetchFxCandles(
   display: string,
   tf: TF,
@@ -467,6 +640,11 @@ export default function FXTradePage() {
 
   const [balance, setBalance] = useState<number>(0);
   const [trades, setTrades] = useState<FxUiTrade[]>([]);
+  const tradesRef = useRef<FxUiTrade[]>([]);
+  useEffect(() => {
+    tradesRef.current = trades;
+  }, [trades]);
+
   const [exitDraft, setExitDraft] = useState<Record<string, string>>({});
 
   // ticket
@@ -491,18 +669,17 @@ export default function FXTradePage() {
   const chartAbortRef = useRef<AbortController | null>(null);
   const chartInFlightRef = useRef(false);
 
-  // polling refs (adaptive + visibility-aware)
+  // polling refs
   const pollTimeoutRef = useRef<number | null>(null);
   const retryAfterMsRef = useRef<number>(0);
   const unmountedRef = useRef(false);
 
-  // ✅ seed refs
-  const seededKeyRef = useRef<string>(''); // tracks asset|tf that was fully seeded
-  const lastSeedAtRef = useRef<number>(0); // last time we pulled full history
-
-  // price push throttle
+  // mark_price throttle
   const lastPushAtRef = useRef<number>(0);
   const lastPushedPriceRef = useRef<number | null>(null);
+
+  // token cache (stops wasting supabase calls)
+  const tokenCacheRef = useRef<{ token: string | null; expMs: number }>({ token: null, expMs: 0 });
 
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
@@ -510,29 +687,57 @@ export default function FXTradePage() {
   const headerAuthToken = async (): Promise<string | null> => {
     if (!canUseSupabase) return null;
 
+    const cached = tokenCacheRef.current;
+    if (cached.token && Date.now() < cached.expMs - 60_000) {
+      return cached.token;
+    }
+
+    const setCache = (tok: string) => {
+      const payload = decodeJwtPayload(tok);
+      const expSec = clampNum(payload?.exp, 0);
+      const expMs = expSec > 0 ? expSec * 1000 : Date.now() + 10 * 60_000;
+      tokenCacheRef.current = { token: tok, expMs };
+    };
+
     try {
       const { data, error: sErr } = await supabase.auth.getSession();
       if (!sErr) {
         const token = data.session?.access_token ?? null;
-        if (token) return token;
+        if (token) {
+          setCache(token);
+          return token;
+        }
       }
     } catch {}
 
     try {
       const { data } = await supabase.auth.refreshSession();
       const token = data.session?.access_token ?? null;
-      if (token) return token;
+      if (token) {
+        setCache(token);
+        return token;
+      }
     } catch {}
 
-    return readStoredAccessToken();
+    const raw = readStoredAccessToken();
+    if (raw) {
+      setCache(raw);
+      return raw;
+    }
+
+    return null;
   };
 
   const pushPriceToServer = async (pair: string, px: number) => {
     try {
-      const now = Date.now();
+      // ✅ only push if there is an ACTIVE trade for this pair
+      const hasActive = tradesRef.current.some((t) => t.status === 'active' && t.asset === pair);
+      if (!hasActive) return;
 
-      // ✅ don't spam mark_price
-      if (now - lastPushAtRef.current < 5000) return;
+      const now = Date.now();
+      const minPushMs = 8000;
+
+      if (now - lastPushAtRef.current < minPushMs) return;
 
       const last = lastPushedPriceRef.current;
       if (last != null && Math.abs(px - last) < 0.00001) return;
@@ -599,7 +804,9 @@ export default function FXTradePage() {
     }
   };
 
-  /** ---------- CHART INIT (dynamic import) ---------- */
+  // ===============================
+  // Chart init
+  // ===============================
   const initChartIfNeeded = async () => {
     const el = chartWrapRef.current;
     if (!el) return;
@@ -667,7 +874,22 @@ export default function FXTradePage() {
     } catch {}
   };
 
-  const loadChart = async (opts?: { forceSeed?: boolean }) => {
+  const setChartData = (candles: Candle[]) => {
+    const data = candles.map((c) => ({
+      time: c.time as any,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+
+    try {
+      candleSeriesRef.current?.setData?.(data);
+      chartApiRef.current?.timeScale?.()?.fitContent?.();
+    } catch {}
+  };
+
+  const loadChart = async () => {
     if (unmountedRef.current) return;
 
     setChartNote(null);
@@ -684,77 +906,106 @@ export default function FXTradePage() {
     const ac = new AbortController();
     chartAbortRef.current = ac;
 
+    const intervalMs = tfToMs(tf);
+    const count = 260;
+    const cacheKey = `${SS_PREFIX}:candles:${asset}:${tf}`;
+    const ticksKey = `${SS_PREFIX}:ticks:${asset}`;
+
+    // ✅ 1) INSTANT fallback: cache / ticks / synthetic
     try {
       await initChartIfNeeded();
 
-      // ✅ SEED ONCE, THEN TAIL UPDATES
-      const key = `${asset}|${tf}`;
+      const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const now = Date.now();
 
-      const needsSeed =
-        opts?.forceSeed === true ||
-        seededKeyRef.current !== key ||
-        now - lastSeedAtRef.current > RESEED_EVERY_MS;
+      if (cached?.candles?.length) {
+        setChartData(cached.candles);
+        setChartNote('Using cached candles.');
+        const lc = cached.candles[cached.candles.length - 1]?.close ?? null;
+        setLastClose(lc);
+        if (lc && lc > 0) {
+          setMarketPrice(lc.toFixed(5));
+          setTrades((prev) =>
+            prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
+          );
+          pushFxTick(asset, lc);
+          void pushPriceToServer(asset, lc);
+        }
+      } else {
+        const ticks = ssGet<Tick[]>(ticksKey) || [];
+        const built = buildCandlesFromTicksFx(ticks, intervalMs, Math.min(220, count));
+        if (built.length) {
+          setChartData(built);
+          setChartNote('Using locally built candles.');
+          const lc = built[built.length - 1]?.close ?? null;
+          setLastClose(lc);
+          if (lc && lc > 0) {
+            setMarketPrice(lc.toFixed(5));
+            setTrades((prev) =>
+              prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
+            );
+            void pushPriceToServer(asset, lc);
+          }
+        } else {
+          const seed = clampNum(lastClose ?? marketPrice, 1.0);
+          const synth = generateSyntheticCandlesFx(seed, intervalMs, Math.min(220, count), `${asset}:${tf}`);
+          setChartData(synth);
+          setChartNote('Market data unavailable — showing simulated chart.');
+          const lc = synth[synth.length - 1]?.close ?? null;
+          setLastClose(lc);
+          if (lc && lc > 0) setMarketPrice(lc.toFixed(5));
+        }
+      }
 
-      const limit = needsSeed ? SEED_LIMIT : TAIL_LIMIT;
+      // ✅ 2) Skip network if cache is fresh enough
+      const cached2 = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
+      const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
+      const freshMs = Math.max(20_000, Math.min(5 * 60_000, baseMs * 2));
+      const isFresh = !!cached2?.ts && now - cached2.ts < freshMs;
 
-      const result = await fetchFxCandles(asset, tf, limit, ac.signal);
+      if (isFresh) {
+        chartInFlightRef.current = false;
+        return;
+      }
+    } catch {
+      // if init fails, fall through to fetch attempt (won't crash UI)
+    }
+
+    // ✅ 3) Network fetch (best effort), but never clear chart on fail
+    try {
+      const result = await fetchFxCandles(asset, tf, 260, ac.signal);
       if (ac.signal.aborted || unmountedRef.current) return;
 
-      // ✅ success => clear retryAfter
       retryAfterMsRef.current = 0;
 
-      // ✅ if server served stale/cached data, show a note (not an error)
       if (result.cache === 'STALE' || result.stale) {
         setChartNote(result.warning || 'Using cached candles (rate-limited protection).');
       }
 
       const candles = result.candles;
-
       if (!candles.length) {
         setChartNote('No candles returned.');
         setLastClose(null);
         return;
       }
 
+      // write cache
+      ssSet(`${SS_PREFIX}:candles:${asset}:${tf}`, { ts: Date.now(), candles });
+
+      setChartData(candles);
+
       const lc = candles[candles.length - 1]?.close ?? null;
       setLastClose(lc);
 
-      // ✅ keep market price + PnL correct (updates trades on-screen + server revalue)
       if (lc != null && lc > 0) {
         setMarketPrice(lc.toFixed(5));
-
         setTrades((prev) =>
-          prev.map((t) =>
-            t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t
-          )
+          prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
         );
 
+        pushFxTick(asset, lc);
         void pushPriceToServer(asset, lc);
       }
-
-      const bars = candles.map((c) => ({
-        time: c.time as any,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }));
-
-      // ✅ Chart update strategy:
-      // - Seed: setData(full)
-      // - Tail: update(last few) (fast + cheap)
-      try {
-        if (needsSeed) {
-          candleSeriesRef.current?.setData?.(bars);
-          seededKeyRef.current = key;
-          lastSeedAtRef.current = now;
-        } else {
-          for (const b of bars) candleSeriesRef.current?.update?.(b);
-        }
-        chartApiRef.current?.timeScale?.()?.fitContent?.();
-      } catch {}
-
     } catch (e: any) {
       if (e?.name === 'CandlesError' && typeof e?.retryAfterMs === 'number' && e.retryAfterMs > 0) {
         retryAfterMsRef.current = e.retryAfterMs;
@@ -762,6 +1013,7 @@ export default function FXTradePage() {
       } else {
         setChartNote(e?.message || 'Failed to load chart');
       }
+      // ✅ do nothing else: chart stays on cached/built/synth
     } finally {
       chartInFlightRef.current = false;
     }
@@ -798,9 +1050,9 @@ export default function FXTradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅ single adaptive polling loop (candle-speed + retry aware + visibility-aware)
+  // adaptive polling loop
   useEffect(() => {
-    const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 305_000;
+    const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
 
     const clear = () => {
       try {
@@ -811,14 +1063,14 @@ export default function FXTradePage() {
 
     let cancelled = false;
 
-    const jitter = () => Math.floor(Math.random() * 1500); // spread requests
+    const jitter = () => Math.floor(Math.random() * 700);
 
     const tick = async () => {
       if (cancelled || unmountedRef.current) return;
 
       if (typeof document !== 'undefined' && document.hidden) {
         clear();
-        pollTimeoutRef.current = window.setTimeout(tick, Math.max(30_000, Math.min(120_000, baseMs)));
+        pollTimeoutRef.current = window.setTimeout(tick, Math.max(25000, baseMs));
         return;
       }
 
@@ -844,9 +1096,7 @@ export default function FXTradePage() {
       }
     };
 
-    // start immediately on pair/tf change (force seed)
-    void loadChart({ forceSeed: true });
-
+    void loadChart();
     clear();
     pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
 
@@ -865,13 +1115,8 @@ export default function FXTradePage() {
   }, [asset, tf]);
 
   const onRefresh = async () => {
-    // ✅ manual refresh = force reseed chart
-    seededKeyRef.current = '';
-    lastSeedAtRef.current = 0;
-
     await loadTrades(mode);
-    await loadChart({ forceSeed: true });
-
+    await loadChart();
     try {
       await refreshUser();
     } catch {}
@@ -933,7 +1178,10 @@ export default function FXTradePage() {
 
       await loadTrades(mode);
 
-      if (lastClose != null && lastClose > 0) void pushPriceToServer(asset, lastClose);
+      if (lastClose != null && lastClose > 0) {
+        pushFxTick(asset, lastClose);
+        void pushPriceToServer(asset, lastClose);
+      }
 
       try {
         await refreshUser();
@@ -1050,7 +1298,7 @@ export default function FXTradePage() {
           </div>
         ) : null}
 
-        {/* Main grid (PC-friendly) */}
+        {/* Main grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
           {/* Chart card */}
           <div className="lg:col-span-8 rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
@@ -1102,7 +1350,6 @@ export default function FXTradePage() {
               </div>
             ) : null}
 
-            {/* Taller chart */}
             <div className="p-4">
               <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
                 <div ref={chartWrapRef} className="w-full h-[420px] sm:h-[520px] lg:h-[640px]" />
