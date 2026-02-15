@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, type ReactNode, useMemo } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -81,16 +81,51 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
+  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY (safe even when user is null)
+  const cash = useMemo(() => {
+    if (!user) return 0;
+    return (
+      n((user as any)?.balance_available) ||
+      n((user as any)?.balanceAvailable) ||
+      n((user as any)?.balance) ||
+      0
+    );
+  }, [user]);
+
+  // Redirect unauthenticated users
   useEffect(() => {
     if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
 
-  // keep user fresh (optional but helps after server updates)
+  // Keep user fresh (optional)
   useEffect(() => {
     if (!user?.id) return;
     refreshUser?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
+
+  // ✅ IMPORTANT: hook is ABOVE any conditional return
+  useEffect(() => {
+    if (!user?.id) return;
+
+    // If spot store is not set for this user yet, initialize
+    if (!spotUserId || spotUserId !== user.id) {
+      initializeAccounts(user.id, cash);
+      loadStocksFromSupabase(user.id, cash).catch(() => {});
+      return;
+    }
+
+    // Otherwise just sync balance
+    syncBalanceFromUser(cash);
+  }, [
+    user?.id,
+    user?.id ? user.id : undefined,
+    cash,
+    spotUserId,
+    initializeAccounts,
+    loadStocksFromSupabase,
+    syncBalanceFromUser,
+  ]);
 
   if (isLoading || !user) {
     return (
@@ -99,26 +134,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       </div>
     );
   }
-
-  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY (matches dashboard)
-  const cash =
-    n((user as any)?.balance_available) ||
-    n((user as any)?.balanceAvailable) ||
-    n((user as any)?.balance) ||
-    0;
-
-  // ✅ Sync trading store from DB cash (but UI never displays store values)
-  useEffect(() => {
-    if (!user?.id) return;
-
-    if (!spotUserId || spotUserId !== user.id) {
-      initializeAccounts(user.id, cash);
-      loadStocksFromSupabase(user.id, cash).catch(() => {});
-      return;
-    }
-
-    syncBalanceFromUser(cash);
-  }, [user?.id, cash, spotUserId, initializeAccounts, loadStocksFromSupabase, syncBalanceFromUser]);
 
   const handleLogout = async () => {
     await logout();
@@ -147,7 +162,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <TrendingUp className="w-6 h-6 text-void" />
             </div>
             {sidebarOpen && (
-              <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-xl font-display font-bold text-cream">
+              <motion.span
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-xl font-display font-bold text-cream"
+              >
                 NOVA<span className="text-gold">TRADE</span>
               </motion.span>
             )}
@@ -172,7 +191,11 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                       {sidebarOpen && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                          <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
+                          <ChevronDown
+                            className={`w-4 h-4 transition-transform ${
+                              expandedMenu === item.name ? 'rotate-180' : ''
+                            }`}
+                          />
                         </>
                       )}
                     </button>
@@ -208,7 +231,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                   <Link
                     href={item.href}
                     className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                      isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                      isActive(item.href)
+                        ? 'bg-gold/10 text-gold'
+                        : 'text-slate-400 hover:text-cream hover:bg-white/5'
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -227,7 +252,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 <Link
                   href={item.href}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                    isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                    isActive(item.href)
+                      ? 'bg-gold/10 text-gold'
+                      : 'text-slate-400 hover:text-cream hover:bg-white/5'
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -241,7 +268,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             onClick={toggleSidebar}
             className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
           >
-            <ChevronDown className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
+            <ChevronDown
+              className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`}
+            />
             {sidebarOpen && <span className="text-sm">Collapse</span>}
           </button>
         </div>
@@ -285,7 +314,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                       {item.children ? (
                         <div>
                           <button
-                            onClick={() => setExpandedMenu(expandedMenu === item.name ? null : item.name)}
+                            onClick={() =>
+                              setExpandedMenu(expandedMenu === item.name ? null : item.name)
+                            }
                             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
                               isChildActive(item.children)
                                 ? 'bg-gold/10 text-gold'
@@ -293,8 +324,14 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                             }`}
                           >
                             <item.icon className="w-5 h-5" />
-                            <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                            <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
+                            <span className="flex-1 text-left text-sm font-medium">
+                              {item.name}
+                            </span>
+                            <ChevronDown
+                              className={`w-4 h-4 transition-transform ${
+                                expandedMenu === item.name ? 'rotate-180' : ''
+                              }`}
+                            />
                           </button>
 
                           <AnimatePresence>
@@ -330,7 +367,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                           href={item.href}
                           onClick={toggleMobileMenu}
                           className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                            isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                            isActive(item.href)
+                              ? 'bg-gold/10 text-gold'
+                              : 'text-slate-400 hover:text-cream hover:bg-white/5'
                           }`}
                         >
                           <item.icon className="w-5 h-5" />
@@ -346,10 +385,17 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         )}
       </AnimatePresence>
 
-      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'}`}>
+      <div
+        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
+          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
+        }`}
+      >
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           <div className="flex items-center gap-4">
-            <button onClick={toggleMobileMenu} className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors">
+            <button
+              onClick={toggleMobileMenu}
+              className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors"
+            >
               <Menu className="w-6 h-6" />
             </button>
 
@@ -360,12 +406,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 placeholder="Search assets, traders..."
                 className="bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none w-48 lg:w-64"
               />
-              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">⌘K</kbd>
+              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">
+                ⌘K
+              </kbd>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
-            {/* ✅ Balance (DB CASH ONLY) + bonus hint removed */}
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
               <p className="text-sm font-semibold text-cream">{formatCash(cash)}</p>
@@ -384,7 +431,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
-                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">
+                  Connect Wallet
+                </span>
               </Link>
             )}
 
@@ -418,7 +467,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                     className="absolute right-0 mt-2 w-56 bg-charcoal border border-white/10 rounded-xl shadow-2xl overflow-hidden"
                   >
                     <div className="p-3 border-b border-white/5">
-                      <p className="text-sm font-medium text-cream">{user.firstName || user.email.split('@')[0]}</p>
+                      <p className="text-sm font-medium text-cream">
+                        {user.firstName || user.email.split('@')[0]}
+                      </p>
                       <p className="text-xs text-slate-500">{user.email}</p>
                       {user.walletAddress && (
                         <div className="flex items-center gap-1.5 mt-1.5">
