@@ -211,7 +211,7 @@ function looksLikeQuota(msg: string) {
   );
 }
 function userFacingMarketMessage(_msg: string) {
-  return 'Market data temporarily unavailable. Showing last known chart.';
+  return 'Network error.';
 }
 
 // ===============================

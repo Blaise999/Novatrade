@@ -3,35 +3,13 @@
  * FX CANDLES API - TWELVE DATA OHLC (SHARED CACHE + "fresh=1" REFRESH)
  * ====================================================================
  *
- * Key idea:
- * - Client can poll THIS endpoint often.
- * - This endpoint ONLY calls TwelveData when:
- *    - cache is missing, OR
- *    - request includes fresh=1 AND per-key interval + budgets allow it.
+ * IMPORTANT (your request):
+ * - NEVER send TwelveData "message" / "error" text to the client.
+ * - Keep provider details strictly in server console logs for now.
  *
- * This prevents:
- * - blowing TwelveData daily cap (800/day)
- * - per-minute cap (8/min)
- * - serverless multi-instance bypass (shared cache + shared budget)
- *
- * Query:
- * - display=EUR/USD (preferred)
- * - symbol=OANDA:EUR_USD (converted)
- * - tf=1m|5m|15m|1h|4h|1D
- * - limit=10..500 (default 120)
- * - fresh=1 (force refresh from TwelveData if allowed)
- *
- * Env:
- * - TWELVEDATA_API_KEY (required)
- * - NEXT_PUBLIC_SUPABASE_URL (required for shared cache)
- * - SUPABASE_SERVICE_ROLE_KEY (required for shared cache + budgets)
- *
- * Knobs (optional):
- * - FX_TWELVEDATA_CREDITS_PER_MIN   (default 7)
- * - FX_TWELVEDATA_CREDITS_PER_DAY   (default 760)  // keep a safety buffer under 800
- * - FX_TWELVEDATA_MIN_INTERVAL_MS   (default 120000) // 2 min per pair+tf+limit
- * - FX_CANDLES_CACHE_TTL_MS         (default 120000) // "fresh" threshold for UI
- * - FX_CANDLES_STALE_MAX_MS         (default 21600000) // 6h: still serve stale if provider blocks
+ * Client always gets:
+ * - candles payload (prefer cached on any upstream/budget failure), OR
+ * - { ok:false, code, ... } with NO human-readable provider text.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -52,7 +30,10 @@ const MIN_UPSTREAM_INTERVAL_MS = Math.max(
 );
 
 const CACHE_TTL_MS = Math.max(5_000, parseInt(process.env.FX_CANDLES_CACHE_TTL_MS || '120000', 10) || 120000);
-const STALE_MAX_MS = Math.max(CACHE_TTL_MS, parseInt(process.env.FX_CANDLES_STALE_MAX_MS || '21600000', 10) || 21600000);
+const STALE_MAX_MS = Math.max(
+  CACHE_TTL_MS,
+  parseInt(process.env.FX_CANDLES_STALE_MAX_MS || '21600000', 10) || 21600000
+);
 
 function log(...args: any[]) {
   if (DEBUG) console.log('[FX/candles]', ...args);
@@ -76,26 +57,40 @@ function tfNorm(tf: string): string {
 function tfToResolution(tfRaw: string): string {
   const tf = tfNorm(tfRaw);
   switch (tf) {
-    case '1m': return '1';
-    case '5m': return '5';
-    case '15m': return '15';
-    case '1h': return '60';
-    case '4h': return '240';
-    case '1D': return 'D';
-    default: return '15';
+    case '1m':
+      return '1';
+    case '5m':
+      return '5';
+    case '15m':
+      return '15';
+    case '1h':
+      return '60';
+    case '4h':
+      return '240';
+    case '1D':
+      return 'D';
+    default:
+      return '15';
   }
 }
 
 function tfToTwelveInterval(tfRaw: string): string {
   const tf = tfNorm(tfRaw);
   switch (tf) {
-    case '1m': return '1min';
-    case '5m': return '5min';
-    case '15m': return '15min';
-    case '1h': return '1h';
-    case '4h': return '4h';
-    case '1D': return '1day';
-    default: return '15min';
+    case '1m':
+      return '1min';
+    case '5m':
+      return '5min';
+    case '15m':
+      return '15min';
+    case '1h':
+      return '1h';
+    case '4h':
+      return '4h';
+    case '1D':
+      return '1day';
+    default:
+      return '15min';
   }
 }
 
@@ -134,7 +129,7 @@ function toFinnhubStyleSymbolFromDisplay(display: string): string {
 
 type RawCandle = {
   timestamp: string; // ISO
-  time: number;      // epoch seconds
+  time: number; // epoch seconds
   open: number;
   high: number;
   low: number;
@@ -177,9 +172,27 @@ type CachedPayload = {
   }>;
   source: string;
   stale?: boolean;
-  warning?: string;
   ageSec?: number;
   lastUpdatedAt?: string;
+};
+
+type FailPayload = {
+  ok: false;
+  code:
+    | 'BAD_REQUEST'
+    | 'MISSING_API_KEY'
+    | 'CACHE_UNAVAILABLE'
+    | 'NO_DATA'
+    | 'PER_KEY_INTERVAL'
+    | 'MINUTE_BUDGET'
+    | 'DAY_BUDGET'
+    | 'UPSTREAM_LIMIT'
+    | 'UPSTREAM_ERROR'
+    | 'SERVER_ERROR';
+  retryAfterSec?: number;
+  symbol?: string;
+  display?: string;
+  tf?: string;
 };
 
 // =====================
@@ -203,7 +216,10 @@ function getSupabaseAdmin(): SupabaseClient | null {
 
 type CacheRow = { key: string; payload: any; updated_at: string };
 
-async function readSharedCache(sb: SupabaseClient, key: string): Promise<{ payload: CachedPayload; updatedAtMs: number; updatedAtIso: string } | null> {
+async function readSharedCache(
+  sb: SupabaseClient,
+  key: string
+): Promise<{ payload: CachedPayload; updatedAtMs: number; updatedAtIso: string } | null> {
   const { data, error } = await sb
     .from('market_cache')
     .select('key,payload,updated_at')
@@ -227,14 +243,16 @@ async function writeSharedCache(sb: SupabaseClient, key: string, payload: Cached
 // SHARED BUDGET (RPC)
 // =====================
 
-async function trySpendBudget(sb: SupabaseClient, args: {
-  provider: string;
-  bucket: 'minute' | 'day';
-  windowStartIso: string;
-  limit: number;
-  cost: number;
-}): Promise<{ allowed: boolean; retryAfterSec: number }> {
-  // Requires SQL RPC: try_spend_market_budget(...)
+async function trySpendBudget(
+  sb: SupabaseClient,
+  args: {
+    provider: string;
+    bucket: 'minute' | 'day';
+    windowStartIso: string;
+    limit: number;
+    cost: number;
+  }
+): Promise<{ allowed: boolean; retryAfterSec: number }> {
   const { data, error } = await sb.rpc('try_spend_market_budget', {
     p_provider: args.provider,
     p_bucket: args.bucket,
@@ -244,8 +262,8 @@ async function trySpendBudget(sb: SupabaseClient, args: {
   });
 
   if (error) {
-    // If RPC missing, do NOT block, but log (you should add the SQL below)
-    log('Budget RPC error (missing SQL?):', error.message);
+    // If RPC missing, do NOT block, but log
+    log('Budget RPC error:', error.message);
     return { allowed: true, retryAfterSec: 5 };
   }
 
@@ -283,7 +301,23 @@ function makeKey(display: string, interval: string, limit: number) {
 }
 
 // =====================
-// TWELVE DATA FETCHER
+// UPSTREAM ERROR CLASSIFIER (console-only details)
+// =====================
+
+type UpstreamFailKind = 'limit' | 'error';
+
+function isCreditOrQuotaMessage(m: string) {
+  return /run out of api credits|daily limit|quota|rate limit/i.test(m || '');
+}
+
+function classifyUpstream(providerMsg: string, httpStatus: number): UpstreamFailKind {
+  if (httpStatus === 429) return 'limit';
+  if (isCreditOrQuotaMessage(providerMsg)) return 'limit';
+  return 'error';
+}
+
+// =====================
+// TWELVE DATA FETCHER (NEVER returns provider text to client)
 // =====================
 
 async function fetchTwelveCandles(params: {
@@ -291,7 +325,12 @@ async function fetchTwelveCandles(params: {
   interval: string;
   limit: number;
   apiKey: string;
-}): Promise<{ candles: RawCandle[] | null; error: string | null; status: number }> {
+}): Promise<{
+  candles: RawCandle[] | null;
+  ok: boolean;
+  failKind?: UpstreamFailKind;
+  httpStatus?: number;
+}> {
   const url = new URL(`${TWELVE_BASE}/time_series`);
   url.searchParams.set('symbol', params.display);
   url.searchParams.set('interval', params.interval);
@@ -305,17 +344,29 @@ async function fetchTwelveCandles(params: {
     const text = await res.text();
 
     let json: any = null;
-    try { json = JSON.parse(text); } catch { json = null; }
+    try {
+      json = JSON.parse(text);
+    } catch {
+      json = null;
+    }
 
     if (!res.ok || json?.status === 'error') {
-      const msg =
-        json?.message ||
-        json?.error ||
-        (res.status === 429 ? 'Rate limited by data provider (try again shortly).' : `Upstream error (${res.status})`);
+      const providerMsg = String(json?.message || json?.error || '').trim() || `upstream_${res.status}`;
 
-      log('Upstream error:', { status: res.status, body: safeSnippet(text) });
-      const status = res.ok ? 502 : res.status;
-      return { candles: null, error: msg, status };
+      // ✅ console-only detail
+      log('Upstream error:', {
+        status: res.status,
+        kind: classifyUpstream(providerMsg, res.status),
+        providerMsg: safeSnippet(providerMsg),
+        body: safeSnippet(text),
+      });
+
+      return {
+        candles: null,
+        ok: false,
+        failKind: classifyUpstream(providerMsg, res.status),
+        httpStatus: res.status,
+      };
     }
 
     const values = Array.isArray(json?.values) ? json.values : [];
@@ -344,9 +395,11 @@ async function fetchTwelveCandles(params: {
       .filter(Boolean)
       .reverse();
 
-    return { candles, error: null, status: 200 };
+    return { candles, ok: true };
   } catch (err: any) {
-    return { candles: null, error: err?.message || 'Network error', status: 500 };
+    // ✅ console-only detail
+    log('Upstream exception:', err?.message || err);
+    return { candles: null, ok: false, failKind: 'error', httpStatus: 0 };
   }
 }
 
@@ -359,7 +412,10 @@ export async function GET(req: NextRequest) {
 
   try {
     const apiKey = process.env.TWELVEDATA_API_KEY;
-    if (!apiKey) return NextResponse.json({ ok: false, error: 'Missing TWELVEDATA_API_KEY' }, { status: 500 });
+    if (!apiKey) {
+      const out: FailPayload = { ok: false, code: 'MISSING_API_KEY' };
+      return NextResponse.json(out, { status: 500, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     const sb = getSupabaseAdmin();
 
@@ -377,7 +433,8 @@ export async function GET(req: NextRequest) {
 
     const display = toTwelveDisplay(symbolParam, displayParam);
     if (!display) {
-      return NextResponse.json({ ok: false, error: 'Missing symbol=OANDA:EUR_USD or display=EUR/USD' }, { status: 400 });
+      const out: FailPayload = { ok: false, code: 'BAD_REQUEST' };
+      return NextResponse.json(out, { status: 400, headers: { 'Cache-Control': 'no-store' } });
     }
 
     const symbol = toFinnhubStyleSymbolFromDisplay(display);
@@ -391,11 +448,16 @@ export async function GET(req: NextRequest) {
 
     const now = Date.now();
 
-    const respondCached = (payload: CachedPayload, updatedAtIso: string, cacheTag: string, extraHeaders?: Record<string, string>) => {
+    const respondCached = (
+      payload: CachedPayload,
+      updatedAtIso: string,
+      cacheTag: string,
+      extraHeaders?: Record<string, string>
+    ) => {
       const updatedAtMs = Date.parse(updatedAtIso);
       const ageSec = Number.isFinite(updatedAtMs) ? Math.max(0, Math.floor((now - updatedAtMs) / 1000)) : 0;
 
-      const isStaleForUi = Number.isFinite(updatedAtMs) ? (now - updatedAtMs) > CACHE_TTL_MS : false;
+      const isStaleForUi = Number.isFinite(updatedAtMs) ? now - updatedAtMs > CACHE_TTL_MS : false;
 
       const out: CachedPayload = {
         ...payload,
@@ -426,7 +488,6 @@ export async function GET(req: NextRequest) {
         log('Serve cached (no fresh):', { key, ageMs });
         return respondCached(cached.payload, cached.updatedAtIso, ageMs <= CACHE_TTL_MS ? 'HIT' : 'STALE');
       }
-      // too old -> allow refresh attempt below
       log('Cache too old, will refresh:', { key, ageMs });
     }
 
@@ -439,13 +500,11 @@ export async function GET(req: NextRequest) {
       return respondCached(done.payload, done.updatedAtIso, 'DEDUPED');
     }
 
-    // 4) If no Supabase, fall back to safe behavior: block frequent refreshes hard
+    // 4) If no Supabase, fall back: serve cache if exists, else fail with code only
     if (!sb) {
       if (cached) return respondCached(cached.payload, cached.updatedAtIso, 'HIT_NO_SB');
-      return NextResponse.json(
-        { ok: false, error: 'Server cache not configured (SUPABASE_SERVICE_ROLE_KEY missing). Add it to enable shared cache.' },
-        { status: 503, headers: { 'Cache-Control': 'no-store' } }
-      );
+      const out: FailPayload = { ok: false, code: 'CACHE_UNAVAILABLE', symbol, display, tf };
+      return NextResponse.json(out, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 
     // 5) Per-key interval gate using updated_at as last refresh time (shared across instances)
@@ -455,9 +514,9 @@ export async function GET(req: NextRequest) {
         const retryAfterSec = Math.max(1, Math.ceil((MIN_UPSTREAM_INTERVAL_MS - sinceLast) / 1000));
         log('Blocked by per-key interval:', { key, retryAfterSec });
 
-        // Serve cached and tell client when it can refresh again
+        // ✅ no UI text; just serve cached
         return respondCached(
-          { ...cached.payload, stale: true, warning: 'Refresh too soon; served cached candles.' },
+          { ...cached.payload, stale: true },
           cached.updatedAtIso,
           'STALE_BLOCKED',
           { 'Retry-After': String(retryAfterSec), 'X-RateLimit-Reason': 'per-key' }
@@ -467,6 +526,7 @@ export async function GET(req: NextRequest) {
 
     // 6) Shared budgets (minute + day) BEFORE calling TwelveData
     const cost = 1;
+
     const minuteSpend = await trySpendBudget(sb, {
       provider: 'twelvedata',
       bucket: 'minute',
@@ -479,19 +539,20 @@ export async function GET(req: NextRequest) {
       const retry = minuteSpend.retryAfterSec;
       log('Blocked by minute budget:', { key, retry });
 
-      if (cached && (now - cached.updatedAtMs) <= STALE_MAX_MS) {
+      if (cached && now - cached.updatedAtMs <= STALE_MAX_MS) {
         return respondCached(
-          { ...cached.payload, stale: true, warning: 'Minute budget exhausted; served cached candles.' },
+          { ...cached.payload, stale: true },
           cached.updatedAtIso,
           'STALE_BUDGET_MIN',
           { 'Retry-After': String(retry), 'X-RateLimit-Reason': 'minute-budget' }
         );
       }
 
-      return NextResponse.json(
-        { ok: false, error: 'Rate limited (server minute budget). Try again shortly.', retryAfterSec: retry, symbol, display, tf },
-        { status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'minute-budget' } }
-      );
+      const out: FailPayload = { ok: false, code: 'MINUTE_BUDGET', retryAfterSec: retry, symbol, display, tf };
+      return NextResponse.json(out, {
+        status: 429,
+        headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'minute-budget' },
+      });
     }
 
     const daySpend = await trySpendBudget(sb, {
@@ -506,42 +567,44 @@ export async function GET(req: NextRequest) {
       const retry = daySpend.retryAfterSec;
       log('Blocked by day budget:', { key, retry });
 
-      if (cached && (now - cached.updatedAtMs) <= STALE_MAX_MS) {
+      if (cached && now - cached.updatedAtMs <= STALE_MAX_MS) {
         return respondCached(
-          { ...cached.payload, stale: true, warning: 'Daily budget exhausted; served cached candles.' },
+          { ...cached.payload, stale: true },
           cached.updatedAtIso,
           'STALE_BUDGET_DAY',
           { 'Retry-After': String(retry), 'X-RateLimit-Reason': 'day-budget' }
         );
       }
 
-      return NextResponse.json(
-        { ok: false, error: 'Daily budget exhausted (server). Try later.', retryAfterSec: retry, symbol, display, tf },
-        { status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'day-budget' } }
-      );
+      const out: FailPayload = { ok: false, code: 'DAY_BUDGET', retryAfterSec: retry, symbol, display, tf };
+      return NextResponse.json(out, {
+        status: 429,
+        headers: { 'Cache-Control': 'no-store', 'Retry-After': String(retry), 'X-RateLimit-Reason': 'day-budget' },
+      });
     }
 
     // 7) Upstream fetch (deduped)
     const p = (async (): Promise<InflightValue> => {
-      const { candles, error } = await fetchTwelveCandles({ display, interval, limit, apiKey });
+      const upstream = await fetchTwelveCandles({ display, interval, limit, apiKey });
 
-      if (error || !candles) {
-        // fallback to cache if exists
+      if (!upstream.ok || !upstream.candles) {
+        // ✅ console already has provider detail; client gets cached silently if possible
         const fallback = await readSharedCache(sb, key);
-        if (fallback && (Date.now() - fallback.updatedAtMs) <= STALE_MAX_MS) {
+        if (fallback && Date.now() - fallback.updatedAtMs <= STALE_MAX_MS) {
           const payload: CachedPayload = {
             ...fallback.payload,
             stale: true,
-            warning: error || 'Upstream error; served cached candles.',
             source: `${fallback.payload.source}+cache`,
           };
           return { payload, updatedAtIso: fallback.updatedAtIso };
         }
 
-        throw new Error(error || 'Upstream error');
+        // No cache at all -> return failure via throw (handled below)
+        const kind = upstream.failKind || 'error';
+        throw new Error(kind === 'limit' ? 'UPSTREAM_LIMIT' : 'UPSTREAM_ERROR');
       }
 
-      const validated = candles.map((c) => ({
+      const validated = upstream.candles.map((c) => ({
         time: c.time,
         timestamp: c.timestamp,
         open: c.open,
@@ -574,11 +637,19 @@ export async function GET(req: NextRequest) {
       const done = await p;
       log('200:', { key, count: done.payload.count, tookMs: Date.now() - started });
       return respondCached(done.payload, done.updatedAtIso, 'MISS');
+    } catch (e: any) {
+      const msg = String(e?.message || '');
+      const code: FailPayload['code'] = msg === 'UPSTREAM_LIMIT' ? 'UPSTREAM_LIMIT' : 'UPSTREAM_ERROR';
+      log('No cache to serve; failing:', { key, code });
+
+      const out: FailPayload = { ok: false, code, symbol, display, tf };
+      return NextResponse.json(out, { status: code === 'UPSTREAM_LIMIT' ? 429 : 502, headers: { 'Cache-Control': 'no-store' } });
     } finally {
       inflight.delete(key);
     }
   } catch (err: any) {
-    log('Exception:', err?.message);
-    return NextResponse.json({ ok: false, error: err?.message || 'Server error' }, { status: 500 });
+    log('Exception:', err?.message || err);
+    const out: FailPayload = { ok: false, code: 'SERVER_ERROR' };
+    return NextResponse.json(out, { status: 500, headers: { 'Cache-Control': 'no-store' } });
   }
 }
