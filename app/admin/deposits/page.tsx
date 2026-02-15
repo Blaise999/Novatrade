@@ -135,11 +135,16 @@ export default function AdminDepositsPage() {
     }
   }
 
-  const pendingCount = deposits.filter((d) => d.status === 'pending').length;
-  const confirmedCount = deposits.filter((d) => ['confirmed', 'approved'].includes(d.status)).length;
-  const totalConfirmed = deposits
-    .filter((d) => ['confirmed', 'approved'].includes(d.status))
-    .reduce((sum, d) => sum + Number(d.amount), 0);
+const pendingCount = deposits.filter((d) => d.status === 'pending').length;
+
+const confirmedCount = deposits.filter((d) =>
+  ['confirmed', 'approved', 'completed'].includes(d.status)
+).length;
+
+const totalConfirmed = deposits
+  .filter((d) => ['confirmed', 'approved', 'completed'].includes(d.status))
+  .reduce((sum, d) => sum + Number(d.amount), 0);
+
 
   const filtered = deposits.filter((d) => {
     if (!search) return true;
