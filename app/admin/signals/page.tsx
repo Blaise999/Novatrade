@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
@@ -12,7 +12,7 @@ import {
   Copy,
   CheckCircle,
   Timer,
-  TrendingUp
+  TrendingUp,
 } from 'lucide-react';
 import { useAdminSessionStore } from '@/lib/admin-store';
 import { formatTime, generateTelegramMessage, TradeSignal } from '@/lib/admin-types';
@@ -22,11 +22,17 @@ export default function LiveSignalsPage() {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [copiedMessage, setCopiedMessage] = useState(false);
 
+  // ✅ Always treat signals as an array (prevents .length crash)
+  const activeSignals = useMemo<TradeSignal[]>(
+    () => (Array.isArray(activeSession?.signals) ? activeSession!.signals : []),
+    [activeSession]
+  );
+
+  const safeSessions = useMemo(() => (Array.isArray(sessions) ? sessions : []), [sessions]);
+
   // Update time every 100ms for smooth countdown
   useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 100);
+    const interval = setInterval(() => setCurrentTime(new Date()), 100);
     return () => clearInterval(interval);
   }, []);
 
@@ -35,7 +41,7 @@ export default function LiveSignalsPage() {
     if (!activeSession) return null;
     const now = currentTime.getTime();
     return (
-      activeSession.signals.find((signal) => {
+      activeSignals.find((signal) => {
         const start = new Date(signal.startTime).getTime();
         const end = new Date(signal.endTime).getTime();
         return now >= start && now < end;
@@ -48,7 +54,7 @@ export default function LiveSignalsPage() {
     if (!activeSession) return null;
     const now = currentTime.getTime();
     return (
-      activeSession.signals.find((signal) => {
+      activeSignals.find((signal) => {
         const start = new Date(signal.startTime).getTime();
         return start > now;
       }) || null
@@ -59,20 +65,14 @@ export default function LiveSignalsPage() {
   const getTimeUntilNext = (): number => {
     const nextSignal = getNextSignal();
     if (!nextSignal) return 0;
-    return Math.max(
-      0,
-      (new Date(nextSignal.startTime).getTime() - currentTime.getTime()) / 1000
-    );
+    return Math.max(0, (new Date(nextSignal.startTime).getTime() - currentTime.getTime()) / 1000);
   };
 
   // Get remaining time in current signal
   const getRemainingTime = (): number => {
     const currentSignal = getCurrentSignal();
     if (!currentSignal) return 0;
-    return Math.max(
-      0,
-      (new Date(currentSignal.endTime).getTime() - currentTime.getTime()) / 1000
-    );
+    return Math.max(0, (new Date(currentSignal.endTime).getTime() - currentTime.getTime()) / 1000);
   };
 
   // Format seconds to mm:ss
@@ -85,7 +85,10 @@ export default function LiveSignalsPage() {
   // Copy telegram message
   const copyTelegramMessage = () => {
     if (!activeSession) return;
-    const message = generateTelegramMessage(activeSession);
+    const message = generateTelegramMessage({
+      ...activeSession,
+      signals: activeSignals, // ✅ guarantee array
+    });
     navigator.clipboard.writeText(message);
     setCopiedMessage(true);
     setTimeout(() => setCopiedMessage(false), 2000);
@@ -97,7 +100,7 @@ export default function LiveSignalsPage() {
   const timeUntilNext = getTimeUntilNext();
 
   // Get scheduled sessions
-  const scheduledSessions = sessions.filter((s) => s.status === 'scheduled');
+  const scheduledSessions = safeSessions.filter((s) => s.status === 'scheduled');
 
   // Calculate session progress
   const getSessionProgress = (): number => {
@@ -110,9 +113,7 @@ export default function LiveSignalsPage() {
 
   // Count completed signals
   const completedSignals =
-    activeSession?.signals.filter((s) => {
-      return new Date(s.endTime).getTime() < currentTime.getTime();
-    }).length || 0;
+    activeSignals.filter((s) => new Date(s.endTime).getTime() < currentTime.getTime()).length || 0;
 
   return (
     <div className="space-y-6">
@@ -127,14 +128,13 @@ export default function LiveSignalsPage() {
             {currentTime.toLocaleTimeString('en-US', {
               hour: '2-digit',
               minute: '2-digit',
-              second: '2-digit'
+              second: '2-digit',
             })}
           </p>
         </div>
       </div>
 
       {activeSession ? (
-        /* Active Session View */
         <div className="space-y-6">
           {/* Session Info Bar */}
           <div className="p-4 bg-profit/5 border border-profit/20 rounded-2xl">
@@ -147,30 +147,22 @@ export default function LiveSignalsPage() {
               </div>
               <div className="flex items-center gap-4 text-sm">
                 <span className="text-slate-400">
-                  {completedSignals}/{activeSession.signals.length} signals
+                  {completedSignals}/{activeSignals.length} signals
                 </span>
-                <span className="text-slate-400">
-                  Ends {formatTime(new Date(activeSession.endTime))}
-                </span>
+                <span className="text-slate-400">Ends {formatTime(new Date(activeSession.endTime))}</span>
                 <button
                   onClick={copyTelegramMessage}
                   className="flex items-center gap-2 px-3 py-1.5 bg-electric/10 text-electric rounded-lg hover:bg-electric/20 transition-all"
                 >
-                  {copiedMessage ? (
-                    <CheckCircle className="w-4 h-4" />
-                  ) : (
-                    <Copy className="w-4 h-4" />
-                  )}
+                  {copiedMessage ? <CheckCircle className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   Copy TG
                 </button>
               </div>
             </div>
+
             {/* Progress Bar */}
             <div className="mt-3 h-2 bg-white/10 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-profit transition-all duration-300"
-                style={{ width: `${getSessionProgress()}%` }}
-              />
+              <div className="h-full bg-profit transition-all duration-300" style={{ width: `${getSessionProgress()}%` }} />
             </div>
           </div>
 
@@ -219,9 +211,7 @@ export default function LiveSignalsPage() {
                   {/* Countdown */}
                   <div className="flex items-center justify-center gap-2 text-2xl font-mono">
                     <Timer className="w-6 h-6 text-slate-400" />
-                    <span
-                      className={remainingTime <= 30 ? 'text-loss animate-pulse' : 'text-cream'}
-                    >
+                    <span className={remainingTime <= 30 ? 'text-loss animate-pulse' : 'text-cream'}>
                       {formatSeconds(remainingTime)}
                     </span>
                   </div>
@@ -259,21 +249,13 @@ export default function LiveSignalsPage() {
                       )}
                     </div>
                     <div>
-                      <p
-                        className={`text-2xl font-bold ${
-                          nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'
-                        }`}
-                      >
+                      <p className={`text-2xl font-bold ${nextSignal.direction === 'up' ? 'text-profit' : 'text-loss'}`}>
                         {nextSignal.direction.toUpperCase()}
                       </p>
-                      <p className="text-slate-400">
-                        at {formatTime(new Date(nextSignal.startTime))}
-                      </p>
+                      <p className="text-slate-400">at {formatTime(new Date(nextSignal.startTime))}</p>
                     </div>
                     <div className="flex-1 text-right">
-                      <p className="text-3xl font-mono font-bold text-cream">
-                        {formatSeconds(timeUntilNext)}
-                      </p>
+                      <p className="text-3xl font-mono font-bold text-cream">{formatSeconds(timeUntilNext)}</p>
                       <p className="text-xs text-slate-500">until start</p>
                     </div>
                   </div>
@@ -286,20 +268,18 @@ export default function LiveSignalsPage() {
               <div className="grid grid-cols-3 gap-4">
                 <div className="p-4 bg-white/5 rounded-xl text-center">
                   <p className="text-2xl font-bold text-profit">
-                    {activeSession.signals.filter((s) => s.direction === 'up').length}
+                    {activeSignals.filter((s) => s.direction === 'up').length}
                   </p>
                   <p className="text-xs text-slate-500">UP Signals</p>
                 </div>
                 <div className="p-4 bg-white/5 rounded-xl text-center">
                   <p className="text-2xl font-bold text-loss">
-                    {activeSession.signals.filter((s) => s.direction === 'down').length}
+                    {activeSignals.filter((s) => s.direction === 'down').length}
                   </p>
                   <p className="text-xs text-slate-500">DOWN Signals</p>
                 </div>
                 <div className="p-4 bg-white/5 rounded-xl text-center">
-                  <p className="text-2xl font-bold text-gold">
-                    {activeSession.signals.length - completedSignals}
-                  </p>
+                  <p className="text-2xl font-bold text-gold">{activeSignals.length - completedSignals}</p>
                   <p className="text-xs text-slate-500">Remaining</p>
                 </div>
               </div>
@@ -311,7 +291,7 @@ export default function LiveSignalsPage() {
             <h3 className="text-lg font-semibold text-cream mb-4">Signal Timeline</h3>
             <div className="overflow-x-auto pb-2">
               <div className="flex gap-3 min-w-max">
-                {activeSession.signals.map((signal, index) => {
+                {activeSignals.map((signal, index) => {
                   const now = currentTime.getTime();
                   const start = new Date(signal.startTime).getTime();
                   const end = new Date(signal.endTime).getTime();
@@ -332,28 +312,18 @@ export default function LiveSignalsPage() {
                       }`}
                     >
                       <p className="text-xs text-slate-400 mb-2">#{index + 1}</p>
-                      <p className="text-xs text-slate-500 mb-1">
-                        {formatTime(new Date(signal.startTime))}
-                      </p>
+                      <p className="text-xs text-slate-500 mb-1">{formatTime(new Date(signal.startTime))}</p>
                       <div className="flex justify-center">
                         {signal.direction === 'up' ? (
                           <ArrowUp
                             className={`w-6 h-6 ${
-                              isCurrent
-                                ? 'text-profit'
-                                : isPast
-                                ? 'text-slate-500'
-                                : 'text-profit/60'
+                              isCurrent ? 'text-profit' : isPast ? 'text-slate-500' : 'text-profit/60'
                             }`}
                           />
                         ) : (
                           <ArrowDown
                             className={`w-6 h-6 ${
-                              isCurrent
-                                ? 'text-loss'
-                                : isPast
-                                ? 'text-slate-500'
-                                : 'text-loss/60'
+                              isCurrent ? 'text-loss' : isPast ? 'text-slate-500' : 'text-loss/60'
                             }`}
                           />
                         )}
@@ -375,9 +345,7 @@ export default function LiveSignalsPage() {
                       </p>
                       {isCurrent && (
                         <div className="mt-2">
-                          <span className="px-2 py-0.5 text-xs bg-gold text-void rounded-full">
-                            NOW
-                          </span>
+                          <span className="px-2 py-0.5 text-xs bg-gold text-void rounded-full">NOW</span>
                         </div>
                       )}
                     </div>
@@ -388,7 +356,6 @@ export default function LiveSignalsPage() {
           </div>
         </div>
       ) : (
-        /* No Active Session */
         <div className="space-y-6">
           <div className="text-center py-16 bg-white/5 rounded-2xl border border-white/5">
             <Signal className="w-20 h-20 text-slate-600 mx-auto mb-4" />
@@ -408,30 +375,29 @@ export default function LiveSignalsPage() {
             <div className="bg-white/5 rounded-2xl border border-white/5 p-5">
               <h3 className="text-lg font-semibold text-cream mb-4">Scheduled Sessions</h3>
               <div className="space-y-3">
-                {scheduledSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className="flex items-center gap-4 p-4 bg-white/5 rounded-xl"
-                  >
-                    <div className="w-12 h-12 bg-gold/10 rounded-xl flex items-center justify-center">
-                      <Clock className="w-6 h-6 text-gold" />
+                {scheduledSessions.map((session) => {
+                  const sSignals = Array.isArray(session.signals) ? session.signals : [];
+                  return (
+                    <div key={session.id} className="flex items-center gap-4 p-4 bg-white/5 rounded-xl">
+                      <div className="w-12 h-12 bg-gold/10 rounded-xl flex items-center justify-center">
+                        <Clock className="w-6 h-6 text-gold" />
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-cream font-medium">{session.name}</p>
+                        <p className="text-sm text-slate-400">
+                          {session.assetSymbol} • {sSignals.length} signals • {formatTime(new Date(session.startTime))}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => activateSession(session.id)}
+                        className="flex items-center gap-2 px-4 py-2 bg-profit text-void font-semibold rounded-xl hover:bg-profit/90 transition-all"
+                      >
+                        <Play className="w-4 h-4" />
+                        Go Live
+                      </button>
                     </div>
-                    <div className="flex-1">
-                      <p className="text-cream font-medium">{session.name}</p>
-                      <p className="text-sm text-slate-400">
-                        {session.assetSymbol} • {session.signals.length} signals •{' '}
-                        {formatTime(new Date(session.startTime))}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => activateSession(session.id)}
-                      className="flex items-center gap-2 px-4 py-2 bg-profit text-void font-semibold rounded-xl hover:bg-profit/90 transition-all"
-                    >
-                      <Play className="w-4 h-4" />
-                      Go Live
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
