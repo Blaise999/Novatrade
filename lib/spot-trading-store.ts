@@ -1,3 +1,5 @@
+'use client';
+
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import {
@@ -41,6 +43,32 @@ async function getAuthUid(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function makeBaseAccount(userId: string, cash: number): SpotAccount {
+  const now = new Date();
+  return {
+    id: `spot_${userId}`,
+    userId,
+    cashBalance: isFiniteNumber(cash) ? cash : 0,
+    portfolioValue: 0,
+    displayPortfolioValue: 0,
+    totalEquity: isFiniteNumber(cash) ? cash : 0,
+    totalUnrealizedPnL: 0,
+    totalRealizedPnL: 0,
+    currency: 'USD',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function sumNum(v: any): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : 0;
 }
 
 // ==========================================
@@ -109,6 +137,9 @@ async function savePortfolioToSupabase(
 
   const uid = await getAuthUid();
   if (!uid) return;
+
+  // ✅ critical: never write if state belongs to a different user
+  if (state.account?.userId && state.account.userId !== uid) return;
 
   try {
     const payload = {
@@ -194,11 +225,17 @@ interface SpotTradingState {
   positions: SpotPosition[];
   tradeHistory: SpotTrade[];
   prices: Record<string, number>;
+
+  // ✅ hydration flags
   _hydrated: boolean;
+  _activeUserId: string | null;
 
   initializeAccount: (userId: string, initialCash?: number) => void;
   loadFromSupabase: (userId: string, fallbackCash?: number) => Promise<void>;
   syncCashFromUser: (cash: number) => void;
+
+  // ✅ safety: reset on logout / user switch
+  reset: (opts?: { clearPrices?: boolean }) => void;
 
   executeBuy: (
     symbol: string,
@@ -242,102 +279,146 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       positions: [],
       tradeHistory: [],
       prices: {},
+
       _hydrated: false,
+      _activeUserId: null,
+
+      reset: (opts) => {
+        const keepPrices = opts?.clearPrices === false;
+        set({
+          account: null,
+          positions: [],
+          tradeHistory: [],
+          prices: keepPrices ? get().prices : {},
+          _hydrated: false,
+          _activeUserId: null,
+        });
+      },
 
       initializeAccount: (userId, initialCash = 0) => {
         const existing = get();
 
+        // ✅ prevent cross-user leakage
         if (existing.account?.userId && existing.account.userId !== userId) {
-          set({ positions: [], tradeHistory: [] });
+          set({ account: null, positions: [], tradeHistory: [], _hydrated: false, _activeUserId: null });
         }
 
-        if (existing.account?.userId === userId && existing.positions.length > 0) {
-          if (initialCash > 0) {
+        const now = new Date();
+
+        // If already initialized for same user, just update cash if provided
+        if (existing.account?.userId === userId) {
+          if (isFiniteNumber(initialCash)) {
             set((state) => ({
               account: state.account
-                ? { ...state.account, cashBalance: initialCash, updatedAt: new Date() }
+                ? { ...state.account, cashBalance: initialCash, updatedAt: now }
                 : null,
             }));
           }
           return;
         }
 
-        const now = new Date();
-        const account: SpotAccount = {
-          id: `spot_${userId}`,
-          userId,
-          cashBalance: initialCash,
-          portfolioValue: 0,
-          displayPortfolioValue: 0,
-          totalEquity: initialCash,
-          totalUnrealizedPnL: 0,
-          totalRealizedPnL: 0,
-          currency: 'USD',
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        set({ account });
+        const account = makeBaseAccount(userId, initialCash);
+        set({ account, _activeUserId: userId });
       },
 
+      // ✅ THIS is what fixes incognito/logout: ALWAYS attempt remote hydrate
       loadFromSupabase: async (userId, fallbackCash = 0) => {
-        const remote = await loadPortfolioFromSupabase(userId);
+        // effective UID must be auth.uid()
+        const uid = await getAuthUid();
+        const effectiveUid = uid ?? userId;
+        if (!effectiveUid) {
+          set({ _hydrated: true, _activeUserId: null });
+          return;
+        }
 
-        if (remote && remote.positions && remote.positions.length > 0) {
-          const account = remote.account || {
-            id: `spot_${userId}`,
-            userId,
-            cashBalance: fallbackCash,
-            portfolioValue: 0,
-            displayPortfolioValue: 0,
-            totalEquity: fallbackCash,
-            totalUnrealizedPnL: 0,
-            totalRealizedPnL: 0,
-            currency: 'USD',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          };
+        // If switching users, clear immediately (prevents flash of old holdings)
+        const existing = get();
+        if (existing.account?.userId && existing.account.userId !== effectiveUid) {
+          set({
+            account: null,
+            positions: [],
+            tradeHistory: [],
+            _hydrated: false,
+            _activeUserId: null,
+          });
+        }
 
-          account.cashBalance = fallbackCash;
+        // try remote
+        const remote = await loadPortfolioFromSupabase(effectiveUid);
 
-          const portfolioValue = remote.positions.reduce((sum, p) => sum + p.marketValue, 0);
-          const displayPortfolioValue = remote.positions.reduce((sum, p) => sum + p.displayValue, 0);
+        if (remote) {
+          const positions = Array.isArray(remote.positions) ? remote.positions : [];
+          const tradeHistory = Array.isArray(remote.tradeHistory) ? remote.tradeHistory : [];
+
+          const base = remote.account ?? makeBaseAccount(effectiveUid, fallbackCash);
+          const account: SpotAccount = { ...base };
+
+          // ✅ wallet balance is source-of-truth for cash (you sync it to users.balance_available)
+          if (isFiniteNumber(fallbackCash)) account.cashBalance = fallbackCash;
+
+          // recompute totals (safe even if stored fields are missing)
+          const portfolioValue = positions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0);
+          const displayPortfolioValue = positions.reduce(
+            (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+            0
+          );
+          const totalUnrealizedPnL = positions.reduce(
+            (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+            0
+          );
 
           account.portfolioValue = portfolioValue;
           account.displayPortfolioValue = displayPortfolioValue;
-          account.totalEquity = fallbackCash + displayPortfolioValue;
+          account.totalUnrealizedPnL = totalUnrealizedPnL;
+          account.totalEquity = account.cashBalance + displayPortfolioValue;
+          account.updatedAt = new Date();
 
           set({
             account,
-            positions: remote.positions,
-            tradeHistory: remote.tradeHistory || [],
+            positions,
+            tradeHistory,
             _hydrated: true,
+            _activeUserId: effectiveUid,
           });
           return;
         }
 
-        // If local (session) has data for this user, keep it and sync
+        // no remote row yet → keep local if it belongs to this user
         const local = get();
-        if (local.account?.userId === userId && local.positions.length > 0) {
-          set({ _hydrated: true });
-          savePortfolioToSupabase(userId, {
-            account: local.account,
-            positions: local.positions,
-            tradeHistory: local.tradeHistory,
-          });
+        if (local.account?.userId === effectiveUid) {
+          // still make sure cash is correct
+          if (local.account && isFiniteNumber(fallbackCash)) {
+            const displayPortfolioValue = local.positions.reduce((sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue), 0);
+            set({
+              account: {
+                ...local.account,
+                cashBalance: fallbackCash,
+                totalEquity: fallbackCash + displayPortfolioValue,
+                updatedAt: new Date(),
+              },
+              _hydrated: true,
+              _activeUserId: effectiveUid,
+            });
+          } else {
+            set({ _hydrated: true, _activeUserId: effectiveUid });
+          }
           return;
         }
 
-        get().initializeAccount(userId, fallbackCash);
-        set({ _hydrated: true });
+        // truly empty -> create base
+        get().initializeAccount(effectiveUid, fallbackCash);
+        set({ _hydrated: true, _activeUserId: effectiveUid });
       },
 
       syncCashFromUser: (cash) => {
         const state = get();
         if (!state.account) return;
 
-        const portfolioValue = state.positions.reduce((sum, p) => sum + p.marketValue, 0);
-        const displayPortfolioValue = state.positions.reduce((sum, p) => sum + p.displayValue, 0);
+        const portfolioValue = state.positions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0);
+        const displayPortfolioValue = state.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+          0
+        );
 
         set({
           account: {
@@ -354,6 +435,11 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       executeBuy: (symbol, name, quantity, price, fee = 0, icon) => {
         const state = get();
         if (!state.account) return { success: false, error: 'Account not initialized' };
+
+        // safety: only allow ops for active user
+        if (state._activeUserId && state.account.userId !== state._activeUserId) {
+          return { success: false, error: 'Session mismatch' };
+        }
 
         const totalCost = quantity * price + fee;
         if (totalCost > state.account.cashBalance) return { success: false, error: 'Insufficient balance' };
@@ -461,9 +547,15 @@ export const useSpotTradingStore = create<SpotTradingState>()(
 
         // totals
         const newState = get();
-        const portfolioValue = newState.positions.reduce((sum, p) => sum + p.marketValue, 0);
-        const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
-        const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
+        const portfolioValue = newState.positions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0);
+        const displayPortfolioValue = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+          0
+        );
+        const totalUnrealizedPnL = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+          0
+        );
 
         set((state) => ({
           account: state.account
@@ -499,6 +591,11 @@ export const useSpotTradingStore = create<SpotTradingState>()(
       executeSell: (positionId, quantity, price, fee = 0) => {
         const state = get();
         if (!state.account) return { success: false, error: 'Account not initialized' };
+
+        // safety: only allow ops for active user
+        if (state._activeUserId && state.account.userId !== state._activeUserId) {
+          return { success: false, error: 'Session mismatch' };
+        }
 
         const position = state.positions.find((p) => p.id === positionId);
         if (!position) return { success: false, error: 'Position not found' };
@@ -585,9 +682,15 @@ export const useSpotTradingStore = create<SpotTradingState>()(
 
         // totals
         const newState = get();
-        const portfolioValue = newState.positions.reduce((sum, p) => sum + p.marketValue, 0);
-        const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
-        const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
+        const portfolioValue = newState.positions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0);
+        const displayPortfolioValue = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+          0
+        );
+        const totalUnrealizedPnL = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+          0
+        );
 
         set((state) => ({
           account: state.account
@@ -654,9 +757,15 @@ export const useSpotTradingStore = create<SpotTradingState>()(
             };
           });
 
-          const portfolioValue = updatedPositions.reduce((sum, p) => sum + p.marketValue, 0);
-          const displayPortfolioValue = updatedPositions.reduce((sum, p) => sum + p.displayValue, 0);
-          const totalUnrealizedPnL = updatedPositions.reduce((sum, p) => sum + p.displayPnL, 0);
+          const portfolioValue = updatedPositions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0);
+          const displayPortfolioValue = updatedPositions.reduce(
+            (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+            0
+          );
+          const totalUnrealizedPnL = updatedPositions.reduce(
+            (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+            0
+          );
 
           return {
             prices: newPrices,
@@ -689,7 +798,6 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         const snapPrice = position.currentPrice;
         const snapValue = position.quantity * snapPrice;
 
-        // ✅ Log shield event with auth.uid() user_id
         if (isSupabaseConfigured()) {
           supabase.auth.getUser().then(({ data }) => {
             const uid = data.user?.id;
@@ -733,8 +841,14 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         }));
 
         const newState = get();
-        const displayPortfolioValue = newState.positions.reduce((sum, p) => sum + p.displayValue, 0);
-        const totalUnrealizedPnL = newState.positions.reduce((sum, p) => sum + p.displayPnL, 0);
+        const displayPortfolioValue = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+          0
+        );
+        const totalUnrealizedPnL = newState.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+          0
+        );
 
         set((state) => ({
           account: state.account
@@ -771,7 +885,6 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         const { pnl, pnlPercent } = calculateUnrealizedPnL(marketValue, position.totalCostBasis);
         const shieldImpact = (position.shieldSnapValue ?? 0) - marketValue;
 
-        // ✅ Log shield event with auth.uid() user_id
         if (isSupabaseConfigured()) {
           supabase.auth.getUser().then(({ data }) => {
             const uid = data.user?.id;
@@ -819,8 +932,14 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         }));
 
         const newStateD = get();
-        const displayPortfolioValueD = newStateD.positions.reduce((sum, p) => sum + p.displayValue, 0);
-        const totalUnrealizedPnLD = newStateD.positions.reduce((sum, p) => sum + p.displayPnL, 0);
+        const displayPortfolioValueD = newStateD.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue),
+          0
+        );
+        const totalUnrealizedPnLD = newStateD.positions.reduce(
+          (sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL),
+          0
+        );
 
         set((state) => ({
           account: state.account
@@ -876,7 +995,7 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         const shieldedPositions = state.positions.filter((p) => p.shieldEnabled);
 
         return {
-          totalShielded: shieldedPositions.reduce((sum, p) => sum + (p.shieldSnapValue ?? 0), 0),
+          totalShielded: shieldedPositions.reduce((sum, p) => sum + sumNum((p as any).shieldSnapValue), 0),
           activeShields: shieldedPositions.length,
           positions: shieldedPositions.map((p) => {
             const change = calculateShieldedPriceChange(p);
@@ -893,8 +1012,9 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         };
       },
 
-      getTotalPortfolioValue: () => get().positions.reduce((sum, p) => sum + p.marketValue, 0),
-      getDisplayPortfolioValue: () => get().positions.reduce((sum, p) => sum + p.displayValue, 0),
+      getTotalPortfolioValue: () => get().positions.reduce((sum, p) => sum + sumNum((p as any).marketValue), 0),
+      getDisplayPortfolioValue: () =>
+        get().positions.reduce((sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue), 0),
 
       getTotalEquity: () => {
         const state = get();
@@ -902,7 +1022,9 @@ export const useSpotTradingStore = create<SpotTradingState>()(
         return state.account.cashBalance + get().getDisplayPortfolioValue();
       },
 
-      getTotalUnrealizedPnL: () => get().positions.reduce((sum, p) => sum + p.displayPnL, 0),
+      getTotalUnrealizedPnL: () =>
+        get().positions.reduce((sum, p) => sum + sumNum((p as any).displayPnL ?? (p as any).unrealizedPnL), 0),
+
       getPositionBySymbol: (symbol) => get().positions.find((p) => p.symbol === symbol),
     }),
     {
@@ -918,6 +1040,27 @@ export const useSpotTradingStore = create<SpotTradingState>()(
   )
 );
 
+// ✅ clear persisted session storage + reset state
+export function clearSpotTradingStorage() {
+  try {
+    useSpotTradingStore.persist?.clearStorage?.();
+  } catch {}
+  useSpotTradingStore.getState().reset({ clearPrices: true });
+}
+
+// ✅ auto-reset on SIGNED_OUT (prevents leaks + fixes logout behavior)
+if (typeof window !== 'undefined' && isSupabaseConfigured()) {
+  const g = globalThis as any;
+  if (!g.__novatrade_spot_auth_bound) {
+    g.__novatrade_spot_auth_bound = true;
+    supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') {
+        clearSpotTradingStorage();
+      }
+    });
+  }
+}
+
 // Convenience hooks
 export function useSpotPosition(symbol: string) {
   return useSpotTradingStore((state) => state.positions.find((p) => p.symbol === symbol));
@@ -930,7 +1073,7 @@ export function useShieldedPositions() {
 export function useSpotEquity() {
   const account = useSpotTradingStore((state) => state.account);
   const displayPortfolioValue = useSpotTradingStore((state) =>
-    state.positions.reduce((sum, p) => sum + p.displayValue, 0)
+    state.positions.reduce((sum, p) => sum + sumNum((p as any).displayValue ?? (p as any).marketValue), 0)
   );
 
   return {

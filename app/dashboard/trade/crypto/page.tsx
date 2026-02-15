@@ -383,8 +383,19 @@ export default function CryptoTradingPage() {
   const { user, refreshUser, loadTrades } = useStore();
 
   // Spot Trading Store
-  const { account, positions, initializeAccount, syncCashFromUser, executeBuy, executeSell, updatePrices, toggleShield, getShieldSummary } =
-    useSpotTradingStore();
+  const {
+  account,
+  positions,
+  _hydrated,
+  loadFromSupabase,
+  syncCashFromUser,
+  executeBuy,
+  executeSell,
+  updatePrices,
+  toggleShield,
+  getShieldSummary,
+} = useSpotTradingStore();
+
 
   // State
   const [selectedAsset, setSelectedAsset] = useState<CryptoAsset>(cryptoAssets[0]);
@@ -424,21 +435,29 @@ export default function CryptoTradingPage() {
   const currentPrice = prices[selectedSymbol] ?? selectedAsset.price;
   const liveChange = changes24h[selectedSymbol] ?? selectedAsset.change24h;
 
-  // Initialize account and sync balance
-  useEffect(() => {
-    refreshUser();
-    loadTrades();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+ // mount: load user + trades
+useEffect(() => {
+  refreshUser();
+  loadTrades();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
 
-  useEffect(() => {
-    if (user?.id && !account) {
-      initializeAccount(user.id, user.balance);
-    } else if (user?.balance !== undefined && account) {
-      syncCashFromUser(user.balance);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?.balance, !!account]);
+// ✅ hydrate portfolio from DB on fresh sessions (incognito)
+useEffect(() => {
+  if (!user?.id) return;
+  loadFromSupabase(user.id, user.balance ?? 0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [user?.id]);
+
+// keep cash in sync with user balance once hydrated
+useEffect(() => {
+  if (!user?.id) return;
+  if (!_hydrated) return;
+  if (user?.balance === undefined) return;
+  if (!account) return;
+  syncCashFromUser(user.balance);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [user?.balance, _hydrated, !!account]);
 
   // Calculate quantity from amount
   useEffect(() => {
@@ -755,13 +774,14 @@ export default function CryptoTradingPage() {
   const currentPosition = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
 
   // ✅ HYDRATION FIX: render loading until client has mounted
-  if (!hasMounted) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <div className="animate-pulse text-slate-500 text-sm">Loading crypto trading…</div>
-      </div>
-    );
-  }
+ if (!hasMounted || (user?.id && !_hydrated)) {
+  return (
+    <div className="min-h-screen bg-void flex items-center justify-center">
+      <div className="animate-pulse text-slate-500 text-sm">Loading crypto trading…</div>
+    </div>
+  );
+}
+
 
   return (
     <KYCGate action="trade cryptocurrency">
