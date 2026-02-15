@@ -6,11 +6,9 @@ import {
   Gift,
   Wallet,
   CheckCircle,
-  Clock,
   AlertCircle,
   Loader2,
   Sparkles,
-  ExternalLink,
   Shield,
 } from 'lucide-react';
 import { useStore } from '@/lib/supabase/store-supabase';
@@ -40,7 +38,8 @@ const AIRDROP_SEASONS: AirdropSeason[] = [
   {
     key: 'nova-s1',
     name: 'Season 1 — Genesis Drop',
-    description: 'Reward for early adopters and active traders. Claim your NOVA tokens based on trading volume and tier level.',
+    description:
+      'Reward for early adopters and active traders. Claim your NOVA tokens based on trading volume and tier level.',
     totalTokens: '10,000,000 NOVA',
     status: 'active',
     endDate: '2025-06-30',
@@ -63,6 +62,9 @@ export default function AirdropPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  // ✅ new: eligibility notice shown when user clicks "Claim Airdrop"
+  const [notice, setNotice] = useState('');
+
   useEffect(() => {
     async function load() {
       if (!user?.id || !isSupabaseConfigured()) {
@@ -81,64 +83,68 @@ export default function AirdropPage() {
       }
 
       // Pre-fill wallet
-      if (user.walletAddress) {
-        setWalletAddress(user.walletAddress);
+      if ((user as any).walletAddress) {
+        setWalletAddress((user as any).walletAddress);
       }
 
       setLoading(false);
     }
 
     load();
-  }, [user?.id, user?.walletAddress]);
+  }, [user?.id, (user as any)?.walletAddress]);
 
   async function handleClaim(seasonKey: string) {
-    if (!user?.id) return;
-    if (!walletAddress) {
-      setError('Please enter your wallet address');
-      return;
-    }
-
-    setClaimLoading(true);
+    // ✅ Always show "Not eligible..." on click (UI only)
     setError('');
     setSuccess('');
+    setNotice('Not eligible. Refer 20 users to earn $100 NOVA airdrop.');
+    return;
 
-    try {
-      // Check if already claimed
-      const existing = claims.find((c) => c.airdrop_key === seasonKey);
-      if (existing) {
-        setError('You have already claimed this airdrop.');
-        return;
-      }
-
-      // Insert claim directly into Supabase
-      const { error: insertErr } = await supabase.from('airdrop_claims').insert({
-        user_id: user.id,
-        season: seasonKey,
-        airdrop_key: seasonKey,
-        wallet_address: walletAddress,
-        claim_status: 'claimed',
-      });
-
-      if (insertErr) {
-        setError(insertErr.message || 'Claim failed');
-        return;
-      }
-
-      setSuccess('Airdrop claimed successfully! Tokens will be distributed soon.');
-
-      // Reload claims
-      const { data: updated } = await supabase
-        .from('airdrop_claims')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('claimed_at', { ascending: false });
-
-      if (updated) setClaims(updated as AirdropClaim[]);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Network error');
-    } finally {
-      setClaimLoading(false);
-    }
+    // --- (old claim logic stays below, unreachable until you remove the return) ---
+    // if (!user?.id) return;
+    // if (!walletAddress) {
+    //   setError('Please enter your wallet address');
+    //   return;
+    // }
+    //
+    // setClaimLoading(true);
+    // setError('');
+    // setSuccess('');
+    //
+    // try {
+    //   const existing = claims.find((c) => c.airdrop_key === seasonKey);
+    //   if (existing) {
+    //     setError('You have already claimed this airdrop.');
+    //     return;
+    //   }
+    //
+    //   const { error: insertErr } = await supabase.from('airdrop_claims').insert({
+    //     user_id: user.id,
+    //     season: seasonKey,
+    //     airdrop_key: seasonKey,
+    //     wallet_address: walletAddress,
+    //     claim_status: 'claimed',
+    //   });
+    //
+    //   if (insertErr) {
+    //     setError(insertErr.message || 'Claim failed');
+    //     return;
+    //   }
+    //
+    //   setSuccess('Airdrop claimed successfully! Tokens will be distributed soon.');
+    //
+    //   const { data: updated } = await supabase
+    //     .from('airdrop_claims')
+    //     .select('*')
+    //     .eq('user_id', user.id)
+    //     .order('claimed_at', { ascending: false });
+    //
+    //   if (updated) setClaims(updated as AirdropClaim[]);
+    // } catch (err: unknown) {
+    //   setError(err instanceof Error ? err.message : 'Network error');
+    // } finally {
+    //   setClaimLoading(false);
+    // }
   }
 
   if (loading) {
@@ -185,12 +191,20 @@ export default function AirdropPage() {
       </div>
 
       {/* Messages */}
+      {notice && (
+        <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+          <p className="text-sm text-blue-200">{notice}</p>
+        </div>
+      )}
+
       {error && (
         <div className="p-3 bg-loss/10 border border-loss/20 rounded-xl flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-loss flex-shrink-0" />
           <p className="text-sm text-loss">{error}</p>
         </div>
       )}
+
       {success && (
         <div className="p-3 bg-profit/10 border border-profit/20 rounded-xl flex items-center gap-2">
           <CheckCircle className="w-4 h-4 text-profit flex-shrink-0" />
@@ -215,9 +229,11 @@ export default function AirdropPage() {
             >
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                    isActive ? 'bg-gold/20' : 'bg-white/5'
-                  }`}>
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                      isActive ? 'bg-gold/20' : 'bg-white/5'
+                    }`}
+                  >
                     <Sparkles className={`w-5 h-5 ${isActive ? 'text-gold' : 'text-slate-500'}`} />
                   </div>
                   <div>
@@ -266,14 +282,10 @@ export default function AirdropPage() {
               ) : isActive ? (
                 <button
                   onClick={() => handleClaim(season.key)}
-                  disabled={claimLoading || !walletAddress}
+                  disabled={claimLoading}
                   className="w-full py-3 bg-gradient-to-r from-gold to-gold/80 text-void font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  {claimLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Gift className="w-4 h-4" />
-                  )}
+                  {claimLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Gift className="w-4 h-4" />}
                   Claim Airdrop
                 </button>
               ) : (
@@ -297,9 +309,7 @@ export default function AirdropPage() {
           </h3>
         </div>
         <p className="text-sm text-slate-400">
-          NOVA Airdrops use a Merkle-proof based smart contract built with OpenZeppelin libraries.
-          Claims are verified on-chain to prevent double-claiming. The contract includes pause
-          functionality and owner withdrawal of unclaimed tokens after the claim window.
+        
         </p>
       </div>
     </div>
