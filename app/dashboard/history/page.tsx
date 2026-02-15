@@ -5,16 +5,11 @@ import {
   RefreshCw,
   Search,
   TrendingUp,
-  TrendingDown,
   ArrowUpRight,
   ArrowDownRight,
-  Filter,
-  Calendar,
-  Download,
   Gift,
   CreditCard,
   Users,
-  Wallet,
   History,
 } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
@@ -55,6 +50,35 @@ function formatDate(dateStr: string) {
   });
 }
 
+const norm = (v: any) => String(v ?? '').trim().toLowerCase();
+
+/**
+ * ✅ Deposit status rule you asked for:
+ * - User submitted deposit => "pending"
+ * - Admin approves deposit => "confirmed"
+ *
+ * We also accept older values ("completed"/"approved") and treat them as confirmed,
+ * so history keeps working even if you migrate old rows.
+ */
+const DONE_DEPOSIT = new Set(['confirmed', 'completed', 'approved', 'success']);
+const PENDING_DEPOSIT = new Set(['pending', 'processing', 'submitted']);
+
+function normalizeDepositStatus(s: any): 'pending' | 'confirmed' | 'rejected' | 'unknown' {
+  const v = norm(s);
+  if (DONE_DEPOSIT.has(v)) return 'confirmed';
+  if (PENDING_DEPOSIT.has(v)) return 'pending';
+  if (['rejected', 'failed', 'declined', 'canceled', 'cancelled', 'expired'].includes(v)) return 'rejected';
+  return 'unknown';
+}
+
+function prettyDepositStatus(s: any) {
+  const v = normalizeDepositStatus(s);
+  if (v === 'confirmed') return 'confirmed';
+  if (v === 'pending') return 'pending';
+  if (v === 'rejected') return 'rejected';
+  return 'unknown';
+}
+
 export default function FullActivityHistoryPage() {
   const { user } = useStore();
   const [loading, setLoading] = useState(false);
@@ -86,17 +110,15 @@ export default function FullActivityHistoryPage() {
     try {
       const items: ActivityItem[] = [];
 
-      // Calculate date filter
+      // Date filter
       let dateFilter: Date | null = null;
-      if (dateRange === '7d') {
-        dateFilter = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      } else if (dateRange === '30d') {
-        dateFilter = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-      } else if (dateRange === '90d') {
-        dateFilter = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-      }
+      if (dateRange === '7d') dateFilter = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      if (dateRange === '30d') dateFilter = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      if (dateRange === '90d') dateFilter = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-      // Fetch trades
+      // =========================
+      // TRADES
+      // =========================
       let tradesQuery = supabase
         .from('trades')
         .select('*')
@@ -104,9 +126,7 @@ export default function FullActivityHistoryPage() {
         .order('created_at', { ascending: false })
         .limit(200);
 
-      if (dateFilter) {
-        tradesQuery = tradesQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) tradesQuery = tradesQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: trades } = await tradesQuery;
 
@@ -119,7 +139,9 @@ export default function FullActivityHistoryPage() {
           id: `trade-${t.id}`,
           kind: 'trade',
           label: t.symbol || t.pair || t.asset || 'Trade',
-          sublabel: `${direction.toUpperCase()} • ${marketType.toUpperCase() || 'SPOT'} • x${t.multiplier || t.leverage || 1}`,
+          sublabel: `${String(direction).toUpperCase()} • ${String(marketType).toUpperCase() || 'SPOT'} • x${
+            t.multiplier || t.leverage || 1
+          }`,
           amount: Number(t.amount ?? t.investment ?? 0),
           pnl,
           status: t.status || 'closed',
@@ -132,44 +154,46 @@ export default function FullActivityHistoryPage() {
         });
       });
 
-      // Fetch deposits
+      // =========================
+      // DEPOSITS  ✅ FIXED HERE
+      // =========================
       let depositsQuery = supabase
         .from('deposits')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(200);
 
-      if (dateFilter) {
-        depositsQuery = depositsQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) depositsQuery = depositsQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: deposits } = await depositsQuery;
 
       (deposits || []).forEach((d: any) => {
+        const uiStatus = normalizeDepositStatus(d.status); // pending | confirmed | rejected | unknown
+
         items.push({
           id: `dep-${d.id}`,
           kind: 'deposit',
           label: 'Deposit',
-          sublabel: `${d.network || d.currency || d.method || 'Funds'} • ${d.status}`,
+          sublabel: `${d.network || d.currency || d.method || 'Funds'} • ${prettyDepositStatus(d.status)}`,
           amount: Number(d.amount ?? 0),
           pnl: Number(d.amount ?? 0),
-          status: d.status,
+          status: uiStatus === 'unknown' ? (norm(d.status) || 'unknown') : uiStatus,
           created_at: d.created_at,
         });
       });
 
-      // Fetch withdrawals
+      // =========================
+      // WITHDRAWALS
+      // =========================
       let withdrawalsQuery = supabase
         .from('withdrawals')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(200);
 
-      if (dateFilter) {
-        withdrawalsQuery = withdrawalsQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) withdrawalsQuery = withdrawalsQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: withdrawals } = await withdrawalsQuery;
 
@@ -186,17 +210,17 @@ export default function FullActivityHistoryPage() {
         });
       });
 
-      // Fetch tier purchases
+      // =========================
+      // TIER PURCHASES
+      // =========================
       let tierQuery = supabase
         .from('tier_purchases')
         .select('*')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
-        .limit(50);
+        .limit(100);
 
-      if (dateFilter) {
-        tierQuery = tierQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) tierQuery = tierQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: tierPurchases } = await tierQuery;
 
@@ -220,18 +244,18 @@ export default function FullActivityHistoryPage() {
         });
       });
 
-      // Fetch bonus transactions
+      // =========================
+      // TRANSACTIONS / BONUSES
+      // =========================
       let bonusQuery = supabase
         .from('transactions')
         .select('*')
         .eq('user_id', user.id)
         .in('type', ['tier_bonus', 'bonus', 'deposit', 'referral_bonus'])
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(200);
 
-      if (dateFilter) {
-        bonusQuery = bonusQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) bonusQuery = bonusQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: bonuses } = await bonusQuery;
 
@@ -240,10 +264,10 @@ export default function FullActivityHistoryPage() {
           b.type === 'tier_bonus'
             ? 'Tier Bonus'
             : b.type === 'referral_bonus'
-              ? 'Referral Bonus'
-              : b.type === 'deposit'
-                ? 'Deposit Credit'
-                : 'Bonus';
+            ? 'Referral Bonus'
+            : b.type === 'deposit'
+            ? 'Deposit Credit'
+            : 'Bonus';
 
         items.push({
           id: `tx-${b.id}`,
@@ -257,17 +281,17 @@ export default function FullActivityHistoryPage() {
         });
       });
 
-      // Fetch referrals
+      // =========================
+      // REFERRALS
+      // =========================
       let referralsQuery = supabase
         .from('referrals')
         .select('*')
         .eq('referrer_id', user.id)
         .order('created_at', { ascending: false })
-        .limit(100);
+        .limit(200);
 
-      if (dateFilter) {
-        referralsQuery = referralsQuery.gte('created_at', dateFilter.toISOString());
-      }
+      if (dateFilter) referralsQuery = referralsQuery.gte('created_at', dateFilter.toISOString());
 
       const { data: referrals } = await referralsQuery;
 
@@ -276,9 +300,7 @@ export default function FullActivityHistoryPage() {
           id: `ref-${r.id}`,
           kind: 'referral',
           label: 'Referral',
-          sublabel: r.reward_paid
-            ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}`
-            : 'Pending tier purchase',
+          sublabel: r.reward_paid ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}` : 'Pending tier purchase',
           amount: Number(r.reward_amount ?? 0),
           pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
           status: r.reward_paid ? 'completed' : 'pending',
@@ -286,9 +308,7 @@ export default function FullActivityHistoryPage() {
         });
       });
 
-      // Sort by date descending
       items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
       setActivities(items);
     } catch (e: any) {
       setError(e?.message || 'Failed to load activity history');
@@ -304,9 +324,7 @@ export default function FullActivityHistoryPage() {
   }, [fetchAllActivity]);
 
   useEffect(() => {
-    if (firstLoadRef.current) {
-      fetchAllActivity();
-    }
+    if (firstLoadRef.current) fetchAllActivity();
   }, [dateRange, fetchAllActivity]);
 
   // Filtered activities
@@ -314,10 +332,8 @@ export default function FullActivityHistoryPage() {
     const query = searchQuery.trim().toLowerCase();
 
     return activities.filter((item) => {
-      // Kind filter
       if (filterKind !== 'all' && item.kind !== filterKind) return false;
 
-      // Search filter
       if (query) {
         const matchLabel = item.label.toLowerCase().includes(query);
         const matchSublabel = item.sublabel.toLowerCase().includes(query);
@@ -346,11 +362,14 @@ export default function FullActivityHistoryPage() {
     const withdrawals = activities.filter((a) => a.kind === 'withdrawal');
 
     const totalPnl = trades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+
+    // ✅ count both old + new "done" statuses (confirmed/completed/approved)
     const totalDeposited = deposits
-      .filter((d) => d.status === 'approved' || d.status === 'completed')
+      .filter((d) => normalizeDepositStatus(d.status) === 'confirmed')
       .reduce((sum, d) => sum + d.amount, 0);
+
     const totalWithdrawn = withdrawals
-      .filter((w) => w.status === 'approved' || w.status === 'completed')
+      .filter((w) => ['approved', 'completed', 'confirmed'].includes(norm(w.status)))
       .reduce((sum, w) => sum + w.amount, 0);
 
     const winTrades = trades.filter((t) => t.pnl > 0).length;
@@ -400,30 +419,27 @@ export default function FullActivityHistoryPage() {
         return { bg: 'bg-cyan-500/20', text: 'text-cyan-400' };
       case 'trade':
       default:
-        return pnl >= 0
-          ? { bg: 'bg-profit/20', text: 'text-profit' }
-          : { bg: 'bg-loss/20', text: 'text-loss' };
+        return pnl >= 0 ? { bg: 'bg-profit/20', text: 'text-profit' } : { bg: 'bg-loss/20', text: 'text-loss' };
     }
   };
 
   const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'approved':
-      case 'completed':
-      case 'won':
-      case 'closed':
-        return 'text-emerald-400';
-      case 'pending':
-      case 'active':
-      case 'open':
-        return 'text-yellow-400';
-      case 'rejected':
-      case 'lost':
-      case 'liquidated':
-        return 'text-rose-400';
-      default:
-        return 'text-white/50';
+    const s = norm(status);
+
+    // ✅ deposit rule: confirmed = "done"
+    if (s === 'confirmed' || s === 'completed' || s === 'approved' || s === 'won' || s === 'closed') {
+      return 'text-emerald-400';
     }
+
+    if (s === 'pending' || s === 'processing' || s === 'submitted' || s === 'active' || s === 'open') {
+      return 'text-yellow-400';
+    }
+
+    if (s === 'rejected' || s === 'failed' || s === 'lost' || s === 'liquidated' || s === 'expired') {
+      return 'text-rose-400';
+    }
+
+    return 'text-white/50';
   };
 
   return (
@@ -505,22 +521,18 @@ export default function FullActivityHistoryPage() {
         <div className="flex flex-wrap gap-2">
           {/* Type Filter */}
           <div className="flex gap-1 bg-white/5 rounded-xl p-1 border border-white/10">
-            {(['all', 'trade', 'deposit', 'withdrawal', 'tier', 'bonus', 'referral'] as ActivityKind[]).map(
-              (kind) => (
-                <button
-                  key={kind}
-                  type="button"
-                  onClick={() => setFilterKind(kind)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                    filterKind === kind
-                      ? 'bg-white/10 text-white'
-                      : 'text-white/50 hover:text-white/80'
-                  }`}
-                >
-                  {kind === 'all' ? 'All' : kind.charAt(0).toUpperCase() + kind.slice(1)}
-                </button>
-              )
-            )}
+            {(['all', 'trade', 'deposit', 'withdrawal', 'tier', 'bonus', 'referral'] as ActivityKind[]).map((kind) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => setFilterKind(kind)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                  filterKind === kind ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'
+                }`}
+              >
+                {kind === 'all' ? 'All' : kind.charAt(0).toUpperCase() + kind.slice(1)}
+              </button>
+            ))}
           </div>
 
           {/* Date Range */}
@@ -531,9 +543,7 @@ export default function FullActivityHistoryPage() {
                 type="button"
                 onClick={() => setDateRange(range)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                  dateRange === range
-                    ? 'bg-white/10 text-white'
-                    : 'text-white/50 hover:text-white/80'
+                  dateRange === range ? 'bg-white/10 text-white' : 'text-white/50 hover:text-white/80'
                 }`}
               >
                 {range === 'all' ? 'All Time' : range.toUpperCase()}
@@ -549,36 +559,21 @@ export default function FullActivityHistoryPage() {
           <div className="px-4 py-12 text-center text-white/60">Loading activity...</div>
         ) : pageItems.length === 0 ? (
           <div className="px-4 py-12 text-center text-white/60">
-            {searchQuery || filterKind !== 'all'
-              ? 'No matching activity found.'
-              : 'No activity yet.'}
+            {searchQuery || filterKind !== 'all' ? 'No matching activity found.' : 'No activity yet.'}
           </div>
         ) : (
           <div className="divide-y divide-white/5">
             {pageItems.map((item) => {
               const Icon = getKindIcon(item.kind);
               const colors = getKindColor(item.kind, item.pnl);
-              const isPositive =
-                item.kind === 'deposit' ||
-                item.kind === 'bonus' ||
-                item.kind === 'tier' ||
-                (item.kind === 'referral' && item.pnl > 0) ||
-                item.pnl >= 0;
 
               return (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between p-4 hover:bg-white/5 transition"
-                >
+                <div key={item.id} className="flex items-center justify-between p-4 hover:bg-white/5 transition">
                   <div className="flex items-center gap-4">
-                    {/* Icon */}
-                    <div
-                      className={`w-10 h-10 rounded-xl flex items-center justify-center ${colors.bg}`}
-                    >
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${colors.bg}`}>
                       <Icon className={`w-5 h-5 ${colors.text}`} />
                     </div>
 
-                    {/* Info */}
                     <div>
                       <p className="font-medium text-white">{item.label}</p>
                       <p className="text-xs text-white/50">{item.sublabel}</p>
@@ -586,13 +581,10 @@ export default function FullActivityHistoryPage() {
                     </div>
                   </div>
 
-                  {/* Amount & Status */}
                   <div className="text-right">
                     <p className={`font-semibold ${colors.text}`}>
                       {item.kind === 'trade' ? (
-                        <>
-                          {item.pnl >= 0 ? '+' : ''}${fmt(item.pnl)}
-                        </>
+                        <>{item.pnl >= 0 ? '+' : ''}${fmt(item.pnl)}</>
                       ) : item.kind === 'withdrawal' ? (
                         <>-${fmt(item.amount)}</>
                       ) : (
@@ -600,9 +592,7 @@ export default function FullActivityHistoryPage() {
                       )}
                     </p>
 
-                    {item.kind === 'trade' && (
-                      <p className="text-xs text-white/40">${fmt(item.amount)} invested</p>
-                    )}
+                    {item.kind === 'trade' && <p className="text-xs text-white/40">${fmt(item.amount)} invested</p>}
 
                     <span
                       className={`inline-block mt-1 px-2 py-0.5 rounded-lg text-[10px] font-medium ${getStatusColor(
@@ -618,7 +608,6 @@ export default function FullActivityHistoryPage() {
           </div>
         )}
 
-        {/* Pagination */}
         {!loading && filtered.length > pageSize && (
           <div className="px-4 py-3 flex items-center justify-between border-t border-white/5 text-xs text-white/60">
             <div>
@@ -647,9 +636,7 @@ export default function FullActivityHistoryPage() {
       </div>
 
       {!canUseSupabase && (
-        <div className="text-xs text-yellow-200/80">
-          Supabase client not configured — cannot fetch activity history.
-        </div>
+        <div className="text-xs text-yellow-200/80">Supabase client not configured — cannot fetch activity history.</div>
       )}
     </div>
   );
