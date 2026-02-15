@@ -31,8 +31,6 @@ import { useStore } from '@/lib/supabase/store-supabase';
 import { useUIStore } from '@/lib/ui-store';
 import { useTradingAccountStore } from '@/lib/trading-store';
 
-import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
-
 import SupportWidget from '@/components/SupportWidget';
 import NotificationPanel from '@/components/NotificationPanel';
 import StockPriceSync from '@/components/StockPriceSync';
@@ -63,28 +61,18 @@ const bottomNav = [
   { name: 'Help', href: '/dashboard/help', icon: HelpCircle },
 ];
 
-// ----- helpers
 const n = (v: unknown) => {
   const x = Number(v);
   return Number.isFinite(x) ? x : 0;
-};
-
-type CashRow = {
-  balance_available?: string | number | null;
-  balanceAvailable?: string | number | null;
-  balance?: string | number | null;
-  balance_bonus?: string | number | null;
-  balance_locked?: string | number | null;
 };
 
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
-  const { user, logout, isAuthenticated, isLoading } = useStore();
+  const { user, logout, isAuthenticated, isLoading, refreshUser } = useStore();
   const { sidebarOpen, toggleSidebar, mobileMenuOpen, toggleMobileMenu } = useUIStore();
 
-  // Trading store hooks (spot/stocks logic)
   const initializeAccounts = useTradingAccountStore((s) => s.initializeAccounts);
   const syncBalanceFromUser = useTradingAccountStore((s) => s.syncBalanceFromUser);
   const loadStocksFromSupabase = useTradingAccountStore((s) => s.loadStocksFromSupabase);
@@ -93,111 +81,16 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // ✅ REAL CASH from DB (preferred)
-  const [dbCash, setDbCash] = useState<number | null>(null);
-
-  // Redirect if not authenticated
   useEffect(() => {
     if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
 
-  // Pull cash balance from DB (tries common tables) so header is correct even if store lacks fields
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadCash = async () => {
-      if (!user?.id) return;
-      if (!isSupabaseConfigured()) return;
-
-      const tryTables: Array<{ table: string; columns: string }> = [
-        { table: 'wallets', columns: 'balance_available,balance' },
-        { table: 'users', columns: 'balance_available,balance' },
-      ];
-
-      for (const t of tryTables) {
-        try {
-          const { data, error } = await supabase
-            .from(t.table)
-            .select(t.columns)
-            .eq('id', user.id)
-            .maybeSingle<CashRow>();
-
-          if (!error && data) {
-            const cash =
-              n(data.balance_available) ||
-              n((data as any).balanceAvailable) ||
-              n(data.balance);
-
-            if (!cancelled) setDbCash(cash);
-            return;
-          }
-        } catch {
-          // try next table
-        }
-      }
-
-      // If both tables fail, don’t crash. Just keep null.
-      if (!cancelled) setDbCash(null);
-    };
-
-    loadCash();
-    return () => {
-      cancelled = true;
-    };
-  }, [user?.id]);
-
-  // ✅ CASH (fallbacks from user object if DB fetch isn't available yet)
-  const userCash =
-    n((user as any)?.balance_available) ||
-    n((user as any)?.balanceAvailable) ||
-    // LAST resort: old field names if you used them
-    n((user as any)?.balance);
-
-  const cash = dbCash ?? userCash;
-
-  // We only consider it "ready" if:
-  // - DB cash loaded, OR
-  // - user has a real cash field (even if 0)
-  const hasUserCashField =
-    (user as any)?.balance_available !== undefined ||
-    (user as any)?.balanceAvailable !== undefined ||
-    (user as any)?.balance !== undefined;
-
-  const cashReady = dbCash !== null || hasUserCashField;
-
-  // ✅ Initialize + sync trading store with CASH ONLY (never total, never bonus)
+  // keep user fresh (optional but helps after server updates)
   useEffect(() => {
     if (!user?.id) return;
-    if (!cashReady) return;
-
-    const baseBalance = cash; // cash-only source of truth
-
-    // Only re-init when user changes
-    if (!spotUserId || spotUserId !== user.id) {
-      initializeAccounts(user.id, baseBalance);
-      loadStocksFromSupabase(user.id, baseBalance).catch(() => {});
-      return;
-    }
-
-    // Always sync cash (won’t wipe positions)
-    syncBalanceFromUser(baseBalance);
-  }, [
-    user?.id,
-    cashReady,
-    cash,
-    spotUserId,
-    initializeAccounts,
-    loadStocksFromSupabase,
-    syncBalanceFromUser,
-  ]);
-
-  const handleLogout = async () => {
-    await logout();
-    router.push('/');
-  };
-
-  const isActive = (href: string) => pathname === href;
-  const isChildActive = (children: any[]) => children?.some((child) => pathname === child.href);
+    refreshUser?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   if (isLoading || !user) {
     return (
@@ -207,15 +100,39 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     );
   }
 
+  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY (matches dashboard)
+  const cash =
+    n((user as any)?.balance_available) ||
+    n((user as any)?.balanceAvailable) ||
+    n((user as any)?.balance) ||
+    0;
+
+  // ✅ Sync trading store from DB cash (but UI never displays store values)
+  useEffect(() => {
+    if (!user?.id) return;
+
+    if (!spotUserId || spotUserId !== user.id) {
+      initializeAccounts(user.id, cash);
+      loadStocksFromSupabase(user.id, cash).catch(() => {});
+      return;
+    }
+
+    syncBalanceFromUser(cash);
+  }, [user?.id, cash, spotUserId, initializeAccounts, loadStocksFromSupabase, syncBalanceFromUser]);
+
+  const handleLogout = async () => {
+    await logout();
+    router.push('/');
+  };
+
+  const isActive = (href: string) => pathname === href;
+  const isChildActive = (children: any[]) => children?.some((child) => pathname === child.href);
+
   const formatCash = (val: number) =>
-    `$${val.toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
+    `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div className="min-h-screen bg-void flex">
-      {/* Stock live price sync */}
       <StockPriceSync />
 
       {/* Desktop Sidebar */}
@@ -224,7 +141,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           sidebarOpen ? 'w-64' : 'w-20'
         }`}
       >
-        {/* Logo */}
         <div className="h-16 flex items-center justify-between px-4 border-b border-white/5">
           <Link href="/dashboard" className="flex items-center gap-2">
             <div className="w-10 h-10 bg-gradient-to-br from-gold to-gold/60 rounded-xl flex items-center justify-center flex-shrink-0">
@@ -238,7 +154,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </Link>
         </div>
 
-        {/* Navigation */}
         <nav className="flex-1 overflow-y-auto py-4 px-3">
           <ul className="space-y-1">
             {navigation.map((item) => (
@@ -257,9 +172,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                       {sidebarOpen && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                          <ChevronDown
-                            className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
-                          />
+                          <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
                         </>
                       )}
                     </button>
@@ -307,7 +220,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
           </ul>
         </nav>
 
-        {/* Bottom Navigation */}
         <div className="border-t border-white/5 py-4 px-3">
           <ul className="space-y-1">
             {bottomNav.map((item) => (
@@ -325,7 +237,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             ))}
           </ul>
 
-          {/* Collapse Button */}
           <button
             onClick={toggleSidebar}
             className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
@@ -383,9 +294,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                           >
                             <item.icon className="w-5 h-5" />
                             <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                            <ChevronDown
-                              className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`}
-                            />
+                            <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
                           </button>
 
                           <AnimatePresence>
@@ -421,9 +330,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                           href={item.href}
                           onClick={toggleMobileMenu}
                           className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                            isActive(item.href)
-                              ? 'bg-gold/10 text-gold'
-                              : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                            isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
                           }`}
                         >
                           <item.icon className="w-5 h-5" />
@@ -439,11 +346,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         )}
       </AnimatePresence>
 
-      {/* Main Content */}
       <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'}`}>
-        {/* Top Header */}
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
-          {/* Left */}
           <div className="flex items-center gap-4">
             <button onClick={toggleMobileMenu} className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors">
               <Menu className="w-6 h-6" />
@@ -460,17 +364,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          {/* Right */}
           <div className="flex items-center gap-3">
-            {/* ✅ Balance (REAL CASH ONLY) — bonus hint removed */}
+            {/* ✅ Balance (DB CASH ONLY) + bonus hint removed */}
             <div className="hidden sm:block px-4 py-2 bg-white/5 rounded-xl border border-white/5">
               <p className="text-xs text-slate-500">Balance</p>
-              <p className="text-sm font-semibold text-cream">
-                {cashReady ? formatCash(cash) : '—'}
-              </p>
+              <p className="text-sm font-semibold text-cream">{formatCash(cash)}</p>
             </div>
 
-            {/* Wallet Status */}
             {user.walletAddress ? (
               <div className="hidden md:flex items-center gap-2 px-3 py-2 bg-profit/10 rounded-xl border border-profit/20">
                 <div className="w-2 h-2 rounded-full bg-profit animate-pulse" />
@@ -488,7 +388,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               </Link>
             )}
 
-            {/* Deposit Button */}
             <Link
               href="/dashboard/deposit"
               className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
@@ -499,7 +398,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
             <NotificationPanel />
 
-            {/* User Menu */}
             <div className="relative">
               <button
                 onClick={() => setShowUserMenu(!showUserMenu)}

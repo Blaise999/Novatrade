@@ -12,8 +12,6 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Bot,
-  Clock,
-  Grid3X3,
   Shield,
   CheckCircle,
   ChevronRight,
@@ -29,9 +27,6 @@ import { useBotEngine } from '@/lib/services/bot-trading-engine';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { useAccount } from 'wagmi';
 
-import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
-import { useTradingAccountStore } from '@/lib/trading-store';
-
 // ----- helpers
 const n = (v: any) => {
   const x = Number(v);
@@ -44,31 +39,13 @@ export default function DashboardOverview() {
   const [hideBalance, setHideBalance] = useState(false);
   const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
-  // ✅ live wallet state (wagmi)
   const { address: liveAddress, isConnected: liveConnected } = useAccount();
 
-  // keep unified balance as a fallback only
-  const { balance: unifiedBalance } = useUnifiedBalance();
-
-  // ✅ LIVE cash from trading store (updates instantly on stock buy)
-  const liveSpotCash = useTradingAccountStore((s) => {
-    const a: any = s.spotAccount;
-    return (
-      a?.available ??
-      a?.cash ??
-      a?.balance_available ??
-      a?.balanceAvailable ??
-      a?.balance ??
-      null
-    );
-  });
-
   useEffect(() => {
-    if (user?.id) {
-      fetchBots(user.id);
-      refreshUser();
-      loadRecentActivity();
-    }
+    if (!user?.id) return;
+    fetchBots(user.id);
+    refreshUser();
+    loadRecentActivity();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
@@ -216,18 +193,13 @@ export default function DashboardOverview() {
     } catch {}
   };
 
-  // ✅ SAME CASH RULE AS LAYOUT HEADER:
-  const dbCash =
+  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY:
+  // MUST match layout header: users.balance_available
+  const cashBalance =
     n((user as any)?.balance_available) ||
     n((user as any)?.balanceAvailable) ||
-    n((user as any)?.balance);
-
-  const unifiedCashFallback = n((unifiedBalance as any)?.available ?? (unifiedBalance as any)?.total);
-
-  const cashBalance =
-    Number.isFinite(Number(liveSpotCash)) && n(liveSpotCash) > 0
-      ? n(liveSpotCash)
-      : dbCash || unifiedCashFallback;
+    n((user as any)?.balance) ||
+    0;
 
   const activeBots = bots.filter((b) => b.status === 'running').length;
   const totalBotPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
@@ -267,14 +239,18 @@ export default function DashboardOverview() {
               onClick={() => setHideBalance(!hideBalance)}
               className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
             >
-              {hideBalance ? <EyeOff className="w-4 h-4 text-cream/40" /> : <Eye className="w-4 h-4 text-cream/40" />}
+              {hideBalance ? (
+                <EyeOff className="w-4 h-4 text-cream/40" />
+              ) : (
+                <Eye className="w-4 h-4 text-cream/40" />
+              )}
             </button>
           </div>
 
-          {/* ✅ MATCHES LAYOUT HEADER NOW */}
+          {/* ✅ EXACT SAME BALANCE AS LAYOUT HEADER */}
           <p className="text-4xl font-bold text-cream mb-1">{formatBal(cashBalance)}</p>
 
-          {/* ✅ removed bonus text line under it */}
+          {/* ✅ Bonus line removed */}
 
           <div className="flex flex-wrap gap-3 mt-5">
             <Link
@@ -301,7 +277,6 @@ export default function DashboardOverview() {
 
       {/* Quick Stats Grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Active Bots */}
         <Link
           href="/dashboard/bots"
           className="p-4 bg-white/5 rounded-xl border border-white/10 hover:border-electric/30 transition-all group"
@@ -316,11 +291,14 @@ export default function DashboardOverview() {
           <p className="text-xs text-cream/40">Active Bots</p>
         </Link>
 
-        {/* Bot P&L */}
         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
           <div className="flex items-center gap-2 mb-2">
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${totalBotPnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'}`}>
-              {totalBotPnl >= 0 ? <TrendingUp className="w-4 h-4 text-profit" /> : <TrendingDown className="w-4 h-4 text-loss" />}
+              {totalBotPnl >= 0 ? (
+                <TrendingUp className="w-4 h-4 text-profit" />
+              ) : (
+                <TrendingDown className="w-4 h-4 text-loss" />
+              )}
             </div>
           </div>
           <p className={`text-2xl font-bold ${totalBotPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
@@ -330,7 +308,6 @@ export default function DashboardOverview() {
           <p className="text-xs text-cream/40">Bot P&L</p>
         </div>
 
-        {/* Wallet */}
         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
           <div className="flex items-center gap-2 mb-2">
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${walletConnected ? 'bg-profit/20' : 'bg-white/10'}`}>
@@ -360,7 +337,6 @@ export default function DashboardOverview() {
           )}
         </div>
 
-        {/* KYC */}
         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
           <div className="flex items-center gap-2 mb-2">
             <div
@@ -404,7 +380,9 @@ export default function DashboardOverview() {
         </div>
       </div>
 
-      {/* Recent Activity (unchanged) */}
+      {/* Recent Activity + Quick Links unchanged (your existing code can stay) */}
+      {/* ... keep the rest exactly as you already have it ... */}
+
       <div className="bg-white/5 rounded-xl border border-white/10 p-5">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-cream flex items-center gap-2">
@@ -472,6 +450,7 @@ export default function DashboardOverview() {
                         <>+${Number(item.amount).toFixed(2)}</>
                       )}
                     </p>
+
                     {item.kind === 'trade' && <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>}
                     {item.kind !== 'trade' && item.status && (
                       <p
@@ -494,7 +473,6 @@ export default function DashboardOverview() {
         )}
       </div>
 
-      {/* Quick Links */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
           { label: 'Trading Bots', href: '/dashboard/bots', icon: Bot, color: 'text-purple-400' },
