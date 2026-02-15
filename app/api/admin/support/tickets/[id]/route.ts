@@ -1,45 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdmin } from '@/lib/requireAdmin';
+import { requireAdmin, supabaseAdmin } from '@/lib/requireAdmin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-export async function POST(request: NextRequest, ctx: { params: { id: string } }) {
+export async function GET(request: NextRequest, ctx: { params: { id: string } }) {
   const admin = await requireAdmin(request);
-  if (!admin.ok) return NextResponse.json({ error: admin.error }, { status: admin.status });
+  if (!admin) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const ticketId = ctx.params.id;
 
   try {
-    const body = await request.json().catch(() => ({}));
-    const text = String(body?.message ?? '').trim();
-    const attachments = Array.isArray(body?.attachments) ? body.attachments : null;
-
-    if (!text) return NextResponse.json({ error: 'Message is required' }, { status: 400 });
-
-    // ✅ sender_id ALWAYS from server session (never from client)
-    const { data, error } = await admin.supabaseAdmin
-      .from('support_messages')
-      .insert({
-        ticket_id: ticketId,
-        sender_type: 'admin',
-        sender_id: admin.adminId, // ✅ never null now
-        message: text,
-        attachments,
-      })
-      .select('id,ticket_id,sender_id,sender_type,message,attachments,read_at,created_at')
+    const { data: ticket, error: tErr } = await supabaseAdmin
+      .from('support_tickets')
+      .select('id,user_id,assigned_to,subject,category,priority,status,created_at,updated_at,resolved_at')
+      .eq('id', ticketId)
       .single();
 
-    if (error) throw error;
+    if (tErr || !ticket) return NextResponse.json({ error: 'Ticket not found' }, { status: 404 });
 
-    await admin.supabaseAdmin
-      .from('support_tickets')
-      .update({ updated_at: new Date().toISOString(), status: 'waiting_user' })
-      .eq('id', ticketId);
+    const { data: userRow } = await supabaseAdmin
+      .from('users')
+      .select('id,email,first_name,last_name')
+      .eq('id', (ticket as any).user_id)
+      .maybeSingle();
 
-    return NextResponse.json({ message: data }, { status: 201 });
+    const { data: messages, error: mErr } = await supabaseAdmin
+      .from('support_messages')
+      .select('id,ticket_id,sender_id,sender_type,message,attachments,read_at,created_at')
+      .eq('ticket_id', ticketId)
+      .order('created_at', { ascending: true })
+      .limit(500);
+
+    if (mErr) throw mErr;
+
+    return NextResponse.json({
+      ticket: { ...ticket, users: userRow ?? null },
+      messages: messages ?? [],
+    });
   } catch (e: any) {
-    console.error('[AdminSupport] send message error:', e);
-    return NextResponse.json({ error: e?.message || 'Failed to send message' }, { status: 500 });
+    console.error('[AdminSupport] openTicket error:', e);
+    return NextResponse.json({ error: e?.message || 'Failed to open ticket' }, { status: 500 });
   }
 }

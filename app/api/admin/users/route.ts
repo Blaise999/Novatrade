@@ -18,9 +18,10 @@ function hashToken(token: string): string {
 type GuardOk = { ok: true; adminId: string; role: string };
 type GuardFail = { ok: false; status: number; error: string };
 
-async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail> {
+async function requireAdmin(req: NextRequest, opts?: { allowSupportRead?: boolean }): Promise<GuardOk | GuardFail> {
   const auth = req.headers.get("authorization") || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+
   if (!token) return { ok: false, status: 401, error: "Missing admin token" };
 
   const tokenHash = hashToken(token);
@@ -49,11 +50,13 @@ async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail>
   if (adminUser.is_active === false) return { ok: false, status: 403, error: "Admin account disabled" };
 
   const role = String(adminUser.role || "").toLowerCase();
-  if (role !== "admin" && role !== "super_admin") {
-    return { ok: false, status: 403, error: "Admin privileges required" };
-  }
+  const allowed = opts?.allowSupportRead
+    ? role === "admin" || role === "super_admin" || role === "support"
+    : role === "admin" || role === "super_admin";
 
-  // keep alive
+  if (!allowed) return { ok: false, status: 403, error: "Admin privileges required" };
+
+  // keep alive (non-blocking)
   void Promise.resolve(
     supabaseAdmin
       .from("admin_sessions")
@@ -64,69 +67,61 @@ async function requireAdminWrite(req: NextRequest): Promise<GuardOk | GuardFail>
   return { ok: true, adminId: String(session.admin_id), role };
 }
 
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const guard = await requireAdminWrite(req);
+function safeOrLike(input: string) {
+  // PostgREST `or()` is comma-delimited; remove commas to avoid breaking query
+  // also trim very long strings
+  return input.replace(/,/g, " ").slice(0, 80);
+}
+
+export async function GET(req: NextRequest) {
+  // allow support to READ users list (optional)
+  const guard = await requireAdmin(req, { allowSupportRead: true });
   if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
 
-  const { id: userId } = await ctx.params;
+  const url = new URL(req.url);
 
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch {}
+  const limitRaw = Number(url.searchParams.get("limit") ?? "200");
+  const offsetRaw = Number(url.searchParams.get("offset") ?? "0");
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
+  const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
 
-  const type = String(body?.type || "spot"); // "spot" | "bonus"
-  const action = String(body?.action || "add"); // "add" | "subtract" | "set"
-  const note = String(body?.note || "").trim();
-  const amount = Number(body?.amount);
+  const search = (url.searchParams.get("search") ?? "").trim().toLowerCase();
+  const role = (url.searchParams.get("role") ?? "").trim();
+  const kyc = (url.searchParams.get("kyc_status") ?? "").trim();
+  const active = (url.searchParams.get("is_active") ?? "").trim(); // "true" | "false"
 
-  if (!userId) return NextResponse.json({ error: "Missing user id" }, { status: 400 });
-  if (!note) return NextResponse.json({ error: "Missing note" }, { status: 400 });
-  if (!Number.isFinite(amount) || amount <= 0) return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
-
-  const field = type === "bonus" ? "balance_bonus" : "balance_available";
-
-  // Load current balances
-  const { data: user, error: uErr } = await supabaseAdmin
+  let q = supabaseAdmin
     .from("users")
-    .select(`id,email,first_name,last_name,${field}`)
-    .eq("id", userId)
-    .maybeSingle();
+    .select("*", { count: "exact" })
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
 
-  if (uErr) return NextResponse.json({ error: uErr.message }, { status: 400 });
-  if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+  if (role) q = q.eq("role", role);
+  if (kyc) q = q.eq("kyc_status", kyc);
+  if (active === "true") q = q.eq("is_active", true);
+  if (active === "false") q = q.eq("is_active", false);
 
-  const current = Number((user as any)[field] ?? 0);
-  let next = current;
+  if (search) {
+    const s = safeOrLike(search);
+    q = q.or(`email.ilike.%${s}%,first_name.ilike.%${s}%,last_name.ilike.%${s}%`);
+  }
 
-  if (action === "add") next = current + amount;
-  else if (action === "subtract") next = Math.max(0, current - amount);
-  else if (action === "set") next = amount;
-  else return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  const { data, error, count } = await q;
 
-  const { data: updated, error: upErr } = await supabaseAdmin
-    .from("users")
-    .update({ [field]: next })
-    .eq("id", userId)
-    .select("*")
-    .maybeSingle();
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
 
-  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 400 });
-
-  // Optional audit insert (won’t crash if table not present)
-  void Promise.resolve(
-    supabaseAdmin.from("admin_audit_log").insert({
-      admin_id: guard.adminId,
-      target_user_id: userId,
-      action: "balance_adjustment",
-      meta: { type, action, amount, field, from: current, to: next, note },
-      created_at: new Date().toISOString(),
-    })
-  ).catch(() => {});
+  const users = (data ?? []).map((u: any) => ({
+    ...u,
+    balance_available: Number(u.balance_available ?? 0),
+    balance_bonus: Number(u.balance_bonus ?? 0),
+    total_deposited: Number(u.total_deposited ?? 0),
+    total_withdrawn: Number(u.total_withdrawn ?? 0),
+  }));
 
   return NextResponse.json({
-    ok: true,
-    user: updated,
-    adjustment: { type, action, amount, field, from: current, to: next, note },
+    users,
+    total: count ?? users.length,
+    limit,
+    offset,
   });
 }

@@ -1,107 +1,79 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import crypto from "crypto";
+import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
-
-function hashToken(token: string): string {
-  return crypto.createHash("sha256").update(token).digest("hex");
+function supabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
-async function requireAdmin(req: NextRequest): Promise<
-  | { ok: true; adminId: string }
-  | { ok: false; status: number; error: string }
-> {
-  const auth = req.headers.get("authorization") || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+async function requireAdmin(req: NextRequest) {
+  const auth = req.headers.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token) return { ok: false, status: 401, error: 'Missing admin token' };
 
-  if (!token) return { ok: false, status: 401, error: "Missing admin token" };
+  // hash token like your db usually stores it
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-  const tokenHash = hashToken(token);
+  const sb = supabaseAdmin();
 
-  const { data: session, error } = await supabaseAdmin
-    .from("admin_sessions")
-    .select("admin_id, revoked_at, expires_at")
-    .eq("token_hash", tokenHash)
+  // admin_sessions table assumed from your migration
+  const { data: session, error } = await sb
+    .from('admin_sessions')
+    .select('id, admin_id, expires_at, revoked_at')
+    .eq('token_hash', tokenHash)
     .maybeSingle();
 
-  if (error) return { ok: false, status: 500, error: error.message };
-  if (!session || session.revoked_at)
-    return { ok: false, status: 401, error: "Invalid admin session" };
-
+  if (error || !session) return { ok: false, status: 401, error: 'Invalid admin session' };
+  if (session.revoked_at) return { ok: false, status: 401, error: 'Session revoked' };
   if (session.expires_at && new Date(session.expires_at).getTime() < Date.now()) {
-    return { ok: false, status: 401, error: "Session expired" };
+    return { ok: false, status: 401, error: 'Session expired' };
   }
 
-  // keep alive (non-blocking)
- void Promise.resolve(
-  supabaseAdmin
-    .from("admin_sessions")
-    .update({ last_activity_at: new Date().toISOString() })
-    .eq("token_hash", tokenHash)
-).catch(() => {});
-
-  return { ok: true, adminId: String(session.admin_id) };
+  return { ok: true, adminId: session.admin_id as string };
 }
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export async function GET(req: NextRequest) {
   const guard = await requireAdmin(req);
-  if (!guard.ok) {
-    return NextResponse.json({ error: guard.error }, { status: guard.status });
-  }
+  if (!guard.ok) return NextResponse.json({ error: guard.error }, { status: guard.status });
 
-  const userId = String(params.userId || "").trim();
-  if (!userId) return NextResponse.json({ error: "Missing userId" }, { status: 400 });
+  const sb = supabaseAdmin();
+  const { searchParams } = new URL(req.url);
+  const status = (searchParams.get('status') || 'all').toLowerCase();
 
-  const body = await req.json().catch(() => ({}));
-  const reason = String(body?.reason ?? "").trim();
+  let q = sb
+    .from('users')
+    .select('id,email,first_name,last_name,kyc_status,created_at,kyc_submitted_at,kyc_data');
 
-  const now = new Date().toISOString();
+  if (status !== 'all') q = q.eq('kyc_status', status);
 
-  const { data, error } = await supabaseAdmin
-    .from("users")
-    .update({
-      kyc_status: "rejected",
-      kyc_rejection_reason: reason || null,
-      kyc_reviewed_at: now,
-      kyc_reviewed_by: guard.adminId,
-      updated_at: now,
+  const { data: rows, error } = await q.order('created_at', { ascending: false });
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  const makeSigned = async (path?: string | null) => {
+    if (!path) return null;
+    const { data, error: e } = await sb.storage
+      .from('kyc-documents')
+      .createSignedUrl(path, 60 * 20); // 20 mins
+    if (e) return null;
+    return data.signedUrl;
+  };
+
+  const kycs = await Promise.all(
+    (rows || []).map(async (u: any) => {
+      const meta = u.kyc_data || {};
+      return {
+        ...u,
+        kyc_docs: {
+          id_front: await makeSigned(meta.id_front_doc),
+          id_back: await makeSigned(meta.id_back_doc),
+          selfie: await makeSigned(meta.selfie_doc),
+          proof: await makeSigned(meta.proof_of_address_doc),
+        },
+      };
     })
-    .eq("id", userId)
-    .select("id, kyc_status")
-    .maybeSingle();
+  );
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
-  }
-  if (!data) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
-
-  // audit log (non-blocking)
- void Promise.resolve(
-  supabaseAdmin
-    .from("admin_logs")
-    .insert({
-      admin_id: guard.adminId,
-      action: "kyc_rejected",
-      details: { user_id: userId, reason: reason || null },
-    })
-).catch(() => {});
-
-
-  return NextResponse.json({
-    ok: true,
-    user: data,
-  });
+  return NextResponse.json({ kycs });
 }
