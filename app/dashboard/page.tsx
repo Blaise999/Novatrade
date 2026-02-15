@@ -4,15 +4,39 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
-  Wallet, Eye, EyeOff, TrendingUp, TrendingDown, ArrowUpRight,
-  ArrowDownRight, Bot, Clock, Grid3X3, Shield, CheckCircle,
-  ChevronRight, BarChart3, History,
-  Settings, CreditCard, Send,
+  Wallet,
+  Eye,
+  EyeOff,
+  TrendingUp,
+  TrendingDown,
+  ArrowUpRight,
+  ArrowDownRight,
+  Bot,
+  Clock,
+  Grid3X3,
+  Shield,
+  CheckCircle,
+  ChevronRight,
+  BarChart3,
+  History,
+  Settings,
+  CreditCard,
+  Send,
 } from 'lucide-react';
+
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useBotEngine } from '@/lib/services/bot-trading-engine';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { useAccount } from 'wagmi';
+
+import { useUnifiedBalance } from '@/hooks/useUnifiedBalance';
+import { useTradingAccountStore } from '@/lib/trading-store';
+
+// ----- helpers
+const n = (v: any) => {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+};
 
 export default function DashboardOverview() {
   const { user, refreshUser } = useStore();
@@ -22,6 +46,22 @@ export default function DashboardOverview() {
 
   // ✅ live wallet state (wagmi)
   const { address: liveAddress, isConnected: liveConnected } = useAccount();
+
+  // keep unified balance as a fallback only
+  const { balance: unifiedBalance } = useUnifiedBalance();
+
+  // ✅ LIVE cash from trading store (updates instantly on stock buy)
+  const liveSpotCash = useTradingAccountStore((s) => {
+    const a: any = s.spotAccount;
+    return (
+      a?.available ??
+      a?.cash ??
+      a?.balance_available ??
+      a?.balanceAvailable ??
+      a?.balance ??
+      null
+    );
+  });
 
   useEffect(() => {
     if (user?.id) {
@@ -35,7 +75,6 @@ export default function DashboardOverview() {
   const loadRecentActivity = async () => {
     if (!user?.id || !isSupabaseConfigured()) return;
     try {
-      // Fetch trades
       const { data: trades } = await supabase
         .from('trades')
         .select('*')
@@ -43,7 +82,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(5);
 
-      // Fetch deposits
       const { data: deposits } = await supabase
         .from('deposits')
         .select('*')
@@ -51,7 +89,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
-      // Fetch tier purchases
       const { data: tierPurchases } = await supabase
         .from('tier_purchases')
         .select('*')
@@ -59,7 +96,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
-      // Fetch bonus transactions
       const { data: bonuses } = await supabase
         .from('transactions')
         .select('*')
@@ -68,7 +104,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
-      // Fetch withdrawals
       const { data: withdrawals } = await supabase
         .from('withdrawals')
         .select('*')
@@ -76,7 +111,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
-      // Fetch referrals (where user is referrer)
       const { data: referrals } = await supabase
         .from('referrals')
         .select('*')
@@ -84,7 +118,6 @@ export default function DashboardOverview() {
         .order('created_at', { ascending: false })
         .limit(3);
 
-      // Normalize into unified activity items
       const items: any[] = [];
 
       (trades || []).forEach((t: any) => {
@@ -114,7 +147,12 @@ export default function DashboardOverview() {
       });
 
       (tierPurchases || []).forEach((tp: any) => {
-        const tierNames: Record<number, string> = { 1: 'Starter', 2: 'Trader', 3: 'Professional', 4: 'Elite' };
+        const tierNames: Record<number, string> = {
+          1: 'Starter',
+          2: 'Trader',
+          3: 'Professional',
+          4: 'Elite',
+        };
         items.push({
           id: `tier-${tp.id}`,
           kind: 'tier',
@@ -131,7 +169,12 @@ export default function DashboardOverview() {
         items.push({
           id: `tx-${b.id}`,
           kind: 'bonus',
-          label: b.type === 'tier_bonus' ? 'Tier Bonus' : b.type === 'deposit' ? 'Deposit Credit' : 'Bonus',
+          label:
+            b.type === 'tier_bonus'
+              ? 'Tier Bonus'
+              : b.type === 'deposit'
+              ? 'Deposit Credit'
+              : 'Bonus',
           sublabel: b.description || b.reference_type || 'Credit',
           amount: Math.abs(Number(b.amount ?? 0)),
           pnl: Number(b.amount ?? 0),
@@ -158,7 +201,9 @@ export default function DashboardOverview() {
           id: `ref-${r.id}`,
           kind: 'referral',
           label: 'Referral',
-          sublabel: r.reward_paid ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}` : 'New signup',
+          sublabel: r.reward_paid
+            ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}`
+            : 'New signup',
           amount: Number(r.reward_amount ?? 0),
           pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
           status: r.reward_paid ? 'completed' : 'pending',
@@ -166,39 +211,37 @@ export default function DashboardOverview() {
         });
       });
 
-      // Sort by date descending, take top 8
       items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
       setRecentActivity(items.slice(0, 8));
     } catch {}
   };
 
-  const balance = user?.balance ?? 0;
-  const bonus = user?.bonusBalance ?? 0;
-  // balance_available already includes bonus credit, don't add bonus again
-  const totalBalance = balance;
+  // ✅ SAME CASH RULE AS LAYOUT HEADER:
+  const dbCash =
+    n((user as any)?.balance_available) ||
+    n((user as any)?.balanceAvailable) ||
+    n((user as any)?.balance);
+
+  const unifiedCashFallback = n((unifiedBalance as any)?.available ?? (unifiedBalance as any)?.total);
+
+  const cashBalance =
+    Number.isFinite(Number(liveSpotCash)) && n(liveSpotCash) > 0
+      ? n(liveSpotCash)
+      : dbCash || unifiedCashFallback;
 
   const activeBots = bots.filter((b) => b.status === 'running').length;
   const totalBotPnl = bots.reduce((s, b) => s + (b.total_pnl ?? 0), 0);
 
-const kycRaw = String((user as any)?.kycStatus ?? (user as any)?.kyc_status ?? 'none').toLowerCase();
-const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
+  const kycRaw = String((user as any)?.kycStatus ?? (user as any)?.kyc_status ?? 'none').toLowerCase();
+  const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
 
-
-  // ✅ show connected if either:
-  // - wallet is live connected (wagmi)
-  // - wallet is saved in profile (supabase)
   const walletConnected = liveConnected || !!user?.walletAddress;
-
-  // ✅ show address from live wallet first, fallback to saved
   const walletAddress = liveAddress || user?.walletAddress;
 
-  const formatBal = (n: number) =>
+  const formatBal = (val: number) =>
     hideBalance
       ? '••••••'
-      : `$${n.toLocaleString('en-US', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`;
+      : `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div className="space-y-6">
@@ -219,28 +262,19 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
         <div className="absolute top-0 right-0 w-64 h-64 bg-electric/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
         <div className="relative z-10">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-sm text-cream/60">Total Balance</span>
+            <span className="text-sm text-cream/60">Balance</span>
             <button
               onClick={() => setHideBalance(!hideBalance)}
               className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
             >
-              {hideBalance ? (
-                <EyeOff className="w-4 h-4 text-cream/40" />
-              ) : (
-                <Eye className="w-4 h-4 text-cream/40" />
-              )}
+              {hideBalance ? <EyeOff className="w-4 h-4 text-cream/40" /> : <Eye className="w-4 h-4 text-cream/40" />}
             </button>
           </div>
 
-          <p className="text-4xl font-bold text-cream mb-1">{formatBal(totalBalance)}</p>
+          {/* ✅ MATCHES LAYOUT HEADER NOW */}
+          <p className="text-4xl font-bold text-cream mb-1">{formatBal(cashBalance)}</p>
 
-          <div className="flex items-center gap-4 text-sm">
-            {bonus > 0 && (
-              <span className="text-cream/50">
-                Includes <span className="text-gold font-medium">{formatBal(bonus)}</span> bonus
-              </span>
-            )}
-          </div>
+          {/* ✅ removed bonus text line under it */}
 
           <div className="flex flex-wrap gap-3 mt-5">
             <Link
@@ -285,16 +319,8 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
         {/* Bot P&L */}
         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
           <div className="flex items-center gap-2 mb-2">
-            <div
-              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                totalBotPnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'
-              }`}
-            >
-              {totalBotPnl >= 0 ? (
-                <TrendingUp className="w-4 h-4 text-profit" />
-              ) : (
-                <TrendingDown className="w-4 h-4 text-loss" />
-              )}
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${totalBotPnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'}`}>
+              {totalBotPnl >= 0 ? <TrendingUp className="w-4 h-4 text-profit" /> : <TrendingDown className="w-4 h-4 text-loss" />}
             </div>
           </div>
           <p className={`text-2xl font-bold ${totalBotPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
@@ -307,11 +333,7 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
         {/* Wallet */}
         <div className="p-4 bg-white/5 rounded-xl border border-white/10">
           <div className="flex items-center gap-2 mb-2">
-            <div
-              className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                walletConnected ? 'bg-profit/20' : 'bg-white/10'
-              }`}
-            >
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${walletConnected ? 'bg-profit/20' : 'bg-white/10'}`}>
               <Wallet className={`w-4 h-4 ${walletConnected ? 'text-profit' : 'text-cream/40'}`} />
             </div>
           </div>
@@ -321,24 +343,16 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
               <p className="text-sm font-bold text-profit flex items-center gap-1">
                 <CheckCircle className="w-3.5 h-3.5" /> Connected
               </p>
-
               <p className="text-xs text-cream/40 font-mono truncate mt-0.5">
-                {walletAddress
-                  ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
-                  : '—'}
+                {walletAddress ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}` : '—'}
               </p>
-
-              {/* optional tiny hint */}
               <p className="text-[10px] text-cream/30 mt-1">
                 {liveConnected ? 'Live wallet' : user?.walletAddress ? 'Saved wallet' : ''}
               </p>
             </>
           ) : (
             <>
-              <Link
-                href="/dashboard/connect-wallet"
-                className="text-sm font-bold text-cream/60 hover:text-electric transition-colors"
-              >
+              <Link href="/dashboard/connect-wallet" className="text-sm font-bold text-cream/60 hover:text-electric transition-colors">
                 Not Connected
               </Link>
               <p className="text-xs text-cream/40">Tap to connect</p>
@@ -351,20 +365,12 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
           <div className="flex items-center gap-2 mb-2">
             <div
               className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                kycStatus === 'verified'
-                  ? 'bg-profit/20'
-                  : kycStatus === 'pending'
-                  ? 'bg-gold/20'
-                  : 'bg-white/10'
+                kycStatus === 'verified' ? 'bg-profit/20' : kycStatus === 'pending' ? 'bg-gold/20' : 'bg-white/10'
               }`}
             >
               <Shield
                 className={`w-4 h-4 ${
-                  kycStatus === 'verified'
-                    ? 'text-profit'
-                    : kycStatus === 'pending'
-                    ? 'text-gold'
-                    : 'text-cream/40'
+                  kycStatus === 'verified' ? 'text-profit' : kycStatus === 'pending' ? 'text-gold' : 'text-cream/40'
                 }`}
               />
             </div>
@@ -372,11 +378,7 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
 
           <p
             className={`text-sm font-bold ${
-              kycStatus === 'verified'
-                ? 'text-profit'
-                : kycStatus === 'pending'
-                ? 'text-gold'
-                : 'text-cream/60'
+              kycStatus === 'verified' ? 'text-profit' : kycStatus === 'pending' ? 'text-gold' : 'text-cream/60'
             }`}
           >
             {kycStatus === 'verified'
@@ -402,60 +404,7 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
         </div>
       </div>
 
-      {/* Running Bots Summary */}
-      {bots.filter((b) => b.status === 'running').length > 0 && (
-        <div className="bg-white/5 rounded-xl border border-white/10 p-5">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="font-semibold text-cream flex items-center gap-2">
-              <Bot className="w-5 h-5 text-electric" /> Active Bots
-            </h2>
-            <Link href="/dashboard/bots" className="text-xs text-electric hover:underline">
-              View All →
-            </Link>
-          </div>
-
-          <div className="space-y-2">
-            {bots
-              .filter((b) => b.status === 'running')
-              .slice(0, 3)
-              .map((bot) => (
-                <div key={bot.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                        bot.bot_type === 'dca' ? 'bg-purple-500/20' : 'bg-orange-500/20'
-                      }`}
-                    >
-                      {bot.bot_type === 'dca' ? (
-                        <Clock className="w-4 h-4 text-purple-400" />
-                      ) : (
-                        <Grid3X3 className="w-4 h-4 text-orange-400" />
-                      )}
-                    </div>
-
-                    <div>
-                      <p className="text-sm font-medium text-cream">{bot.name}</p>
-                      <p className="text-xs text-cream/40">
-                        {bot.pair} • {bot.total_trades} trades
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="text-right">
-                    <p className={`text-sm font-bold ${(bot.total_pnl ?? 0) >= 0 ? 'text-profit' : 'text-loss'}`}>
-                      {(bot.total_pnl ?? 0) >= 0 ? '+' : ''}${(bot.total_pnl ?? 0).toFixed(2)}
-                    </p>
-                    <span className="flex items-center gap-1 text-[10px] text-profit">
-                      <span className="w-1.5 h-1.5 bg-profit rounded-full animate-pulse" /> Running
-                    </span>
-                  </div>
-                </div>
-              ))}
-          </div>
-        </div>
-      )}
-
-      {/* Recent Trades */}
+      {/* Recent Activity (unchanged) */}
       <div className="bg-white/5 rounded-xl border border-white/10 p-5">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-cream flex items-center gap-2">
@@ -472,24 +421,33 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
           <div className="space-y-2">
             {recentActivity.map((item: any) => {
               const isPositive = item.kind === 'deposit' || item.kind === 'bonus' || item.kind === 'tier' || item.pnl >= 0;
-              const iconColor = item.kind === 'deposit' ? 'bg-electric/20' :
-                item.kind === 'tier' ? 'bg-gold/20' :
-                item.kind === 'bonus' ? 'bg-purple-500/20' :
-                isPositive ? 'bg-profit/20' : 'bg-loss/20';
-              const textColor = item.kind === 'deposit' ? 'text-electric' :
-                item.kind === 'tier' ? 'text-gold' :
-                item.kind === 'bonus' ? 'text-purple-400' :
-                isPositive ? 'text-profit' : 'text-loss';
+              const iconColor =
+                item.kind === 'deposit'
+                  ? 'bg-electric/20'
+                  : item.kind === 'tier'
+                  ? 'bg-gold/20'
+                  : item.kind === 'bonus'
+                  ? 'bg-purple-500/20'
+                  : isPositive
+                  ? 'bg-profit/20'
+                  : 'bg-loss/20';
+
+              const textColor =
+                item.kind === 'deposit'
+                  ? 'text-electric'
+                  : item.kind === 'tier'
+                  ? 'text-gold'
+                  : item.kind === 'bonus'
+                  ? 'text-purple-400'
+                  : isPositive
+                  ? 'text-profit'
+                  : 'text-loss';
 
               return (
                 <div key={item.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
                   <div className="flex items-center gap-3">
                     <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${iconColor}`}>
-                      {item.kind === 'deposit' ? (
-                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
-                      ) : item.kind === 'tier' ? (
-                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
-                      ) : item.kind === 'bonus' ? (
+                      {item.kind === 'deposit' || item.kind === 'tier' || item.kind === 'bonus' ? (
                         <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
                       ) : item.pnl >= 0 ? (
                         <ArrowUpRight className="w-4 h-4 text-profit" />
@@ -514,11 +472,17 @@ const kycStatus = kycRaw === 'approved' ? 'verified' : kycRaw;
                         <>+${Number(item.amount).toFixed(2)}</>
                       )}
                     </p>
-                    {item.kind === 'trade' && (
-                      <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>
-                    )}
+                    {item.kind === 'trade' && <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>}
                     {item.kind !== 'trade' && item.status && (
-                      <p className={`text-xs ${item.status === 'approved' || item.status === 'completed' ? 'text-emerald-400/60' : item.status === 'pending' ? 'text-yellow-400/60' : 'text-cream/40'}`}>
+                      <p
+                        className={`text-xs ${
+                          item.status === 'approved' || item.status === 'completed'
+                            ? 'text-emerald-400/60'
+                            : item.status === 'pending'
+                            ? 'text-yellow-400/60'
+                            : 'text-cream/40'
+                        }`}
+                      >
                         {item.status}
                       </p>
                     )}
