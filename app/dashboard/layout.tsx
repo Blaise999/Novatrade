@@ -1,6 +1,7 @@
+// app/dashboard/layout.tsx (or your DashboardLayout file)
 'use client';
 
-import { useState, useEffect, type ReactNode, useMemo } from 'react';
+import { useState, useEffect, type ReactNode, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -81,15 +82,13 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [expandedMenu, setExpandedMenu] = useState<string | null>('Trade');
   const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY (safe even when user is null)
+  // for outside click
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+
+  // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY
   const cash = useMemo(() => {
     if (!user) return 0;
-    return (
-      n((user as any)?.balance_available) ||
-      n((user as any)?.balanceAvailable) ||
-      n((user as any)?.balance) ||
-      0
-    );
+    return n((user as any)?.balance_available) || n((user as any)?.balanceAvailable) || n((user as any)?.balance) || 0;
   }, [user]);
 
   // Redirect unauthenticated users
@@ -97,25 +96,23 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     if (!isLoading && !isAuthenticated) router.push('/auth/login');
   }, [isLoading, isAuthenticated, router]);
 
-  // Keep user fresh (optional)
+  // Keep user fresh
   useEffect(() => {
     if (!user?.id) return;
     refreshUser?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
-  // ✅ IMPORTANT: hook is ABOVE any conditional return
+  // ✅ keep trading store synced
   useEffect(() => {
     if (!user?.id) return;
 
-    // If spot store is not set for this user yet, initialize
     if (!spotUserId || spotUserId !== user.id) {
       initializeAccounts(user.id, cash);
       loadStocksFromSupabase(user.id, cash).catch(() => {});
       return;
     }
 
-    // Otherwise just sync balance
     syncBalanceFromUser(cash);
   }, [
     user?.id,
@@ -126,6 +123,61 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
     loadStocksFromSupabase,
     syncBalanceFromUser,
   ]);
+
+  // ✅ CRITICAL: never let overlays block clicks across routes
+  useEffect(() => {
+    // close any dropdown/menu on navigation
+    setShowUserMenu(false);
+
+    // close mobile overlay on route change if open
+    if (mobileMenuOpen) toggleMobileMenu();
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  // ✅ Close mobile overlay if viewport becomes desktop (lg+)
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    if (typeof window === 'undefined') return;
+
+    const mq = window.matchMedia('(min-width: 1024px)');
+    if (mq.matches) toggleMobileMenu();
+
+    const onChange = (e: MediaQueryListEvent) => {
+      if (e.matches) toggleMobileMenu();
+    };
+
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mobileMenuOpen]);
+
+  // ✅ Outside click to close user menu (prevents invisible overlays)
+  useEffect(() => {
+    if (!showUserMenu) return;
+
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      const el = userMenuRef.current;
+      if (!el) return;
+      const t = e.target as Node | null;
+      if (t && el.contains(t)) return;
+      setShowUserMenu(false);
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowUserMenu(false);
+    };
+
+    document.addEventListener('mousedown', onDown, { passive: true });
+    document.addEventListener('touchstart', onDown, { passive: true });
+    document.addEventListener('keydown', onKey);
+
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('touchstart', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showUserMenu]);
 
   if (isLoading || !user) {
     return (
@@ -143,8 +195,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   const isActive = (href: string) => pathname === href;
   const isChildActive = (children: any[]) => children?.some((child) => pathname === child.href);
 
-  const formatCash = (val: number) =>
-    `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const formatCash = (val: number) => `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div className="min-h-screen bg-void flex">
@@ -162,11 +213,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <TrendingUp className="w-6 h-6 text-void" />
             </div>
             {sidebarOpen && (
-              <motion.span
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-xl font-display font-bold text-cream"
-              >
+              <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-xl font-display font-bold text-cream">
                 NOVA<span className="text-gold">TRADE</span>
               </motion.span>
             )}
@@ -191,11 +238,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                       {sidebarOpen && (
                         <>
                           <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
-                          <ChevronDown
-                            className={`w-4 h-4 transition-transform ${
-                              expandedMenu === item.name ? 'rotate-180' : ''
-                            }`}
-                          />
+                          <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
                         </>
                       )}
                     </button>
@@ -212,7 +255,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                             <li key={child.name}>
                               <Link
                                 href={child.href}
-                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all ${
+                                className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all active:scale-[0.99] ${
                                   isActive(child.href)
                                     ? 'bg-gold/10 text-gold'
                                     : 'text-slate-400 hover:text-cream hover:bg-white/5'
@@ -230,10 +273,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 ) : (
                   <Link
                     href={item.href}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                      isActive(item.href)
-                        ? 'bg-gold/10 text-gold'
-                        : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                    className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all active:scale-[0.99] ${
+                      isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
                     }`}
                   >
                     <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -251,10 +292,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
               <li key={item.name}>
                 <Link
                   href={item.href}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
-                    isActive(item.href)
-                      ? 'bg-gold/10 text-gold'
-                      : 'text-slate-400 hover:text-cream hover:bg-white/5'
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all active:scale-[0.99] ${
+                    isActive(item.href) ? 'bg-gold/10 text-gold' : 'text-slate-400 hover:text-cream hover:bg-white/5'
                   }`}
                 >
                   <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -266,11 +305,9 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
           <button
             onClick={toggleSidebar}
-            className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors"
+            className="w-full mt-4 flex items-center justify-center gap-2 px-3 py-2 text-slate-500 hover:text-cream transition-colors active:scale-[0.99]"
           >
-            <ChevronDown
-              className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`}
-            />
+            <ChevronDown className={`w-5 h-5 transition-transform ${sidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
             {sidebarOpen && <span className="text-sm">Collapse</span>}
           </button>
         </div>
@@ -302,7 +339,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                     NOVA<span className="text-gold">TRADE</span>
                   </span>
                 </Link>
-                <button onClick={toggleMobileMenu} className="p-2 text-slate-400">
+                <button onClick={toggleMobileMenu} className="p-2 text-slate-400 active:scale-[0.99]">
                   <X className="w-6 h-6" />
                 </button>
               </div>
@@ -314,9 +351,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                       {item.children ? (
                         <div>
                           <button
-                            onClick={() =>
-                              setExpandedMenu(expandedMenu === item.name ? null : item.name)
-                            }
+                            onClick={() => setExpandedMenu(expandedMenu === item.name ? null : item.name)}
                             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
                               isChildActive(item.children)
                                 ? 'bg-gold/10 text-gold'
@@ -324,14 +359,8 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                             }`}
                           >
                             <item.icon className="w-5 h-5" />
-                            <span className="flex-1 text-left text-sm font-medium">
-                              {item.name}
-                            </span>
-                            <ChevronDown
-                              className={`w-4 h-4 transition-transform ${
-                                expandedMenu === item.name ? 'rotate-180' : ''
-                              }`}
-                            />
+                            <span className="flex-1 text-left text-sm font-medium">{item.name}</span>
+                            <ChevronDown className={`w-4 h-4 transition-transform ${expandedMenu === item.name ? 'rotate-180' : ''}`} />
                           </button>
 
                           <AnimatePresence>
@@ -347,7 +376,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                                     <Link
                                       href={child.href}
                                       onClick={toggleMobileMenu}
-                                      className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all ${
+                                      className={`flex items-center gap-3 px-3 py-2 rounded-lg transition-all active:scale-[0.99] ${
                                         isActive(child.href)
                                           ? 'bg-gold/10 text-gold'
                                           : 'text-slate-400 hover:text-cream hover:bg-white/5'
@@ -366,7 +395,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                         <Link
                           href={item.href}
                           onClick={toggleMobileMenu}
-                          className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all ${
+                          className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all active:scale-[0.99] ${
                             isActive(item.href)
                               ? 'bg-gold/10 text-gold'
                               : 'text-slate-400 hover:text-cream hover:bg-white/5'
@@ -385,17 +414,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         )}
       </AnimatePresence>
 
-      <div
-        className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${
-          sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'
-        }`}
-      >
+      <div className={`flex-1 flex flex-col min-h-screen transition-all duration-300 ${sidebarOpen ? 'lg:ml-64' : 'lg:ml-20'}`}>
         <header className="h-16 bg-obsidian/50 backdrop-blur-xl border-b border-white/5 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
           <div className="flex items-center gap-4">
-            <button
-              onClick={toggleMobileMenu}
-              className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors"
-            >
+            <button onClick={toggleMobileMenu} className="lg:hidden p-2 text-slate-400 hover:text-cream transition-colors active:scale-[0.99]">
               <Menu className="w-6 h-6" />
             </button>
 
@@ -406,9 +428,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                 placeholder="Search assets, traders..."
                 className="bg-transparent text-sm text-cream placeholder:text-slate-500 focus:outline-none w-48 lg:w-64"
               />
-              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">
-                ⌘K
-              </kbd>
+              <kbd className="hidden lg:inline text-xs text-slate-500 px-1.5 py-0.5 bg-white/5 rounded">⌘K</kbd>
             </div>
           </div>
 
@@ -428,18 +448,16 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
             ) : (
               <Link
                 href="/dashboard/connect-wallet"
-                className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group"
+                className="hidden md:flex items-center gap-2 px-3 py-2 bg-white/5 rounded-xl border border-white/5 hover:border-gold/30 transition-colors group active:scale-[0.99]"
               >
                 <Wallet className="w-3.5 h-3.5 text-slate-500 group-hover:text-gold transition-colors" />
-                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">
-                  Connect Wallet
-                </span>
+                <span className="text-xs text-slate-500 group-hover:text-cream transition-colors">Connect Wallet</span>
               </Link>
             )}
 
             <Link
               href="/dashboard/deposit"
-              className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all"
+              className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-gold to-gold/80 text-void text-sm font-semibold rounded-xl hover:shadow-lg hover:shadow-gold/20 transition-all active:scale-[0.99]"
             >
               <CreditCard className="w-4 h-4" />
               Deposit
@@ -447,10 +465,10 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
 
             <NotificationPanel />
 
-            <div className="relative">
+            <div className="relative" ref={userMenuRef}>
               <button
-                onClick={() => setShowUserMenu(!showUserMenu)}
-                className="flex items-center gap-2 p-1.5 rounded-xl hover:bg-white/5 transition-colors"
+                onClick={() => setShowUserMenu((v) => !v)}
+                className="flex items-center gap-2 p-1.5 rounded-xl hover:bg-white/5 transition-colors active:scale-[0.99]"
               >
                 <div className="w-8 h-8 bg-gradient-to-br from-gold/20 to-electric/20 rounded-lg flex items-center justify-center">
                   <User className="w-4 h-4 text-gold" />
@@ -467,9 +485,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
                     className="absolute right-0 mt-2 w-56 bg-charcoal border border-white/10 rounded-xl shadow-2xl overflow-hidden"
                   >
                     <div className="p-3 border-b border-white/5">
-                      <p className="text-sm font-medium text-cream">
-                        {user.firstName || user.email.split('@')[0]}
-                      </p>
+                      <p className="text-sm font-medium text-cream">{user.firstName || user.email.split('@')[0]}</p>
                       <p className="text-xs text-slate-500">{user.email}</p>
                       {user.walletAddress && (
                         <div className="flex items-center gap-1.5 mt-1.5">

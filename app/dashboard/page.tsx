@@ -1,6 +1,7 @@
+// app/dashboard/page.tsx  (or wherever your DashboardOverview lives)
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
@@ -33,67 +34,50 @@ const n = (v: any) => {
   return Number.isFinite(x) ? x : 0;
 };
 
+function CardLink({
+  href,
+  children,
+  className = '',
+}: {
+  href: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className={`block select-none rounded-xl border border-white/10 bg-white/5 transition-all
+        hover:border-white/20 hover:bg-white/[0.07]
+        active:scale-[0.99] active:bg-white/[0.09]
+        focus:outline-none focus:ring-2 focus:ring-gold/30 ${className}`}
+    >
+      {children}
+    </Link>
+  );
+}
+
 export default function DashboardOverview() {
   const { user, refreshUser } = useStore();
   const { bots, fetchBots } = useBotEngine();
+
   const [hideBalance, setHideBalance] = useState(false);
   const [recentActivity, setRecentActivity] = useState<any[]>([]);
 
   const { address: liveAddress, isConnected: liveConnected } = useAccount();
 
-  useEffect(() => {
-    if (!user?.id) return;
-    fetchBots(user.id);
-    refreshUser();
-    loadRecentActivity();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
-
-  const loadRecentActivity = async () => {
+  const loadRecentActivity = useCallback(async () => {
     if (!user?.id || !isSupabaseConfigured()) return;
+
     try {
-      const { data: trades } = await supabase
-        .from('trades')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(5);
-
-      const { data: deposits } = await supabase
-        .from('deposits')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(3);
-
-      const { data: tierPurchases } = await supabase
-        .from('tier_purchases')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(3);
-
-      const { data: bonuses } = await supabase
-        .from('transactions')
-        .select('*')
-        .eq('user_id', user.id)
-        .in('type', ['tier_bonus', 'bonus', 'deposit'])
-        .order('created_at', { ascending: false })
-        .limit(3);
-
-      const { data: withdrawals } = await supabase
-        .from('withdrawals')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(3);
-
-      const { data: referrals } = await supabase
-        .from('referrals')
-        .select('*')
-        .eq('referrer_id', user.id)
-        .order('created_at', { ascending: false })
-        .limit(3);
+      const [{ data: trades }, { data: deposits }, { data: tierPurchases }, { data: bonuses }, { data: withdrawals }, { data: referrals }] =
+        await Promise.all([
+          supabase.from('trades').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(5),
+          supabase.from('deposits').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+          supabase.from('tier_purchases').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+          supabase.from('transactions').select('*').eq('user_id', user.id).in('type', ['tier_bonus', 'bonus', 'deposit']).order('created_at', { ascending: false }).limit(3),
+          supabase.from('withdrawals').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+          supabase.from('referrals').select('*').eq('referrer_id', user.id).order('created_at', { ascending: false }).limit(3),
+        ]);
 
       const items: any[] = [];
 
@@ -146,12 +130,7 @@ export default function DashboardOverview() {
         items.push({
           id: `tx-${b.id}`,
           kind: 'bonus',
-          label:
-            b.type === 'tier_bonus'
-              ? 'Tier Bonus'
-              : b.type === 'deposit'
-              ? 'Deposit Credit'
-              : 'Bonus',
+          label: b.type === 'tier_bonus' ? 'Tier Bonus' : b.type === 'deposit' ? 'Deposit Credit' : 'Bonus',
           sublabel: b.description || b.reference_type || 'Credit',
           amount: Math.abs(Number(b.amount ?? 0)),
           pnl: Number(b.amount ?? 0),
@@ -178,9 +157,7 @@ export default function DashboardOverview() {
           id: `ref-${r.id}`,
           kind: 'referral',
           label: 'Referral',
-          sublabel: r.reward_paid
-            ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}`
-            : 'New signup',
+          sublabel: r.reward_paid ? `Earned $${Number(r.reward_amount || 0).toFixed(2)}` : 'New signup',
           amount: Number(r.reward_amount ?? 0),
           pnl: r.reward_paid ? Number(r.reward_amount ?? 0) : 0,
           status: r.reward_paid ? 'completed' : 'pending',
@@ -190,11 +167,20 @@ export default function DashboardOverview() {
 
       items.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
       setRecentActivity(items.slice(0, 8));
-    } catch {}
-  };
+    } catch {
+      // console-only
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    fetchBots(user.id);
+    refreshUser();
+    loadRecentActivity();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   // ✅ SINGLE SOURCE OF TRUTH FOR DISPLAY:
-  // MUST match layout header: users.balance_available
   const cashBalance =
     n((user as any)?.balance_available) ||
     n((user as any)?.balanceAvailable) ||
@@ -214,6 +200,9 @@ export default function DashboardOverview() {
     hideBalance
       ? '••••••'
       : `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const formatCash = (val: number) =>
+    `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <div className="space-y-6">
@@ -239,35 +228,28 @@ export default function DashboardOverview() {
               onClick={() => setHideBalance(!hideBalance)}
               className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
             >
-              {hideBalance ? (
-                <EyeOff className="w-4 h-4 text-cream/40" />
-              ) : (
-                <Eye className="w-4 h-4 text-cream/40" />
-              )}
+              {hideBalance ? <EyeOff className="w-4 h-4 text-cream/40" /> : <Eye className="w-4 h-4 text-cream/40" />}
             </button>
           </div>
 
-          {/* ✅ EXACT SAME BALANCE AS LAYOUT HEADER */}
           <p className="text-4xl font-bold text-cream mb-1">{formatBal(cashBalance)}</p>
-
-          {/* ✅ Bonus line removed */}
 
           <div className="flex flex-wrap gap-3 mt-5">
             <Link
               href="/dashboard/deposit"
-              className="flex items-center gap-2 px-4 py-2.5 bg-gold text-void font-semibold text-sm rounded-xl hover:bg-gold/90 transition-all"
+              className="flex items-center gap-2 px-4 py-2.5 bg-gold text-void font-semibold text-sm rounded-xl hover:bg-gold/90 transition-all active:scale-[0.99]"
             >
               <CreditCard className="w-4 h-4" /> Deposit
             </Link>
             <Link
               href="/dashboard/wallet?tab=withdraw"
-              className="flex items-center gap-2 px-4 py-2.5 bg-white/10 text-cream font-semibold text-sm rounded-xl hover:bg-white/15 transition-all"
+              className="flex items-center gap-2 px-4 py-2.5 bg-white/10 text-cream font-semibold text-sm rounded-xl hover:bg-white/15 transition-all active:scale-[0.99]"
             >
               <Send className="w-4 h-4" /> Withdraw
             </Link>
             <Link
               href="/dashboard/trade/crypto"
-              className="flex items-center gap-2 px-4 py-2.5 bg-electric/20 text-electric font-semibold text-sm rounded-xl hover:bg-electric/30 transition-all"
+              className="flex items-center gap-2 px-4 py-2.5 bg-electric/20 text-electric font-semibold text-sm rounded-xl hover:bg-electric/30 transition-all active:scale-[0.99]"
             >
               <TrendingUp className="w-4 h-4" /> Trade
             </Link>
@@ -275,12 +257,9 @@ export default function DashboardOverview() {
         </div>
       </motion.div>
 
-      {/* Quick Stats Grid */}
+      {/* Quick Stats Grid (FULL CARD CLICKABLE) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Link
-          href="/dashboard/bots"
-          className="p-4 bg-white/5 rounded-xl border border-white/10 hover:border-electric/30 transition-all group"
-        >
+        <CardLink href="/dashboard/bots" className="p-4 group">
           <div className="flex items-center gap-2 mb-2">
             <div className="w-8 h-8 bg-purple-500/20 rounded-lg flex items-center justify-center">
               <Bot className="w-4 h-4 text-purple-400" />
@@ -289,26 +268,22 @@ export default function DashboardOverview() {
           </div>
           <p className="text-2xl font-bold text-cream">{activeBots}</p>
           <p className="text-xs text-cream/40">Active Bots</p>
-        </Link>
+        </CardLink>
 
-        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+        <CardLink href="/dashboard/bots" className="p-4">
           <div className="flex items-center gap-2 mb-2">
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${totalBotPnl >= 0 ? 'bg-profit/20' : 'bg-loss/20'}`}>
-              {totalBotPnl >= 0 ? (
-                <TrendingUp className="w-4 h-4 text-profit" />
-              ) : (
-                <TrendingDown className="w-4 h-4 text-loss" />
-              )}
+              {totalBotPnl >= 0 ? <TrendingUp className="w-4 h-4 text-profit" /> : <TrendingDown className="w-4 h-4 text-loss" />}
             </div>
           </div>
           <p className={`text-2xl font-bold ${totalBotPnl >= 0 ? 'text-profit' : 'text-loss'}`}>
             {totalBotPnl >= 0 ? '+' : ''}
-            {formatBal(totalBotPnl)}
+            {formatCash(totalBotPnl)}
           </p>
           <p className="text-xs text-cream/40">Bot P&L</p>
-        </div>
+        </CardLink>
 
-        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+        <CardLink href="/dashboard/connect-wallet" className="p-4">
           <div className="flex items-center gap-2 mb-2">
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${walletConnected ? 'bg-profit/20' : 'bg-white/10'}`}>
               <Wallet className={`w-4 h-4 ${walletConnected ? 'text-profit' : 'text-cream/40'}`} />
@@ -329,15 +304,15 @@ export default function DashboardOverview() {
             </>
           ) : (
             <>
-              <Link href="/dashboard/connect-wallet" className="text-sm font-bold text-cream/60 hover:text-electric transition-colors">
+              <p className="text-sm font-bold text-cream/60 hover:text-electric transition-colors">
                 Not Connected
-              </Link>
+              </p>
               <p className="text-xs text-cream/40">Tap to connect</p>
             </>
           )}
-        </div>
+        </CardLink>
 
-        <div className="p-4 bg-white/5 rounded-xl border border-white/10">
+        <CardLink href="/kyc" className="p-4">
           <div className="flex items-center gap-2 mb-2">
             <div
               className={`w-8 h-8 rounded-lg flex items-center justify-center ${
@@ -367,22 +342,12 @@ export default function DashboardOverview() {
           </p>
 
           <p className="text-xs text-cream/40">
-            {kycStatus === 'verified' ? (
-              'Full access enabled'
-            ) : kycStatus === 'pending' ? (
-              'Under review'
-            ) : (
-              <Link href="/kyc" className="text-electric hover:underline">
-                Complete KYC →
-              </Link>
-            )}
+            {kycStatus === 'verified' ? 'Full access enabled' : kycStatus === 'pending' ? 'Under review' : 'Complete KYC →'}
           </p>
-        </div>
+        </CardLink>
       </div>
 
-      {/* Recent Activity + Quick Links unchanged (your existing code can stay) */}
-      {/* ... keep the rest exactly as you already have it ... */}
-
+      {/* Recent Activity */}
       <div className="bg-white/5 rounded-xl border border-white/10 p-5">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-cream flex items-center gap-2">
@@ -422,57 +387,64 @@ export default function DashboardOverview() {
                   : 'text-loss';
 
               return (
-                <div key={item.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${iconColor}`}>
-                      {item.kind === 'deposit' || item.kind === 'tier' || item.kind === 'bonus' ? (
-                        <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
-                      ) : item.pnl >= 0 ? (
-                        <ArrowUpRight className="w-4 h-4 text-profit" />
-                      ) : (
-                        <ArrowDownRight className="w-4 h-4 text-loss" />
-                      )}
+                <Link
+                  key={item.id}
+                  href="/dashboard/history"
+                  className="block p-3 bg-white/5 rounded-lg hover:bg-white/[0.07] active:scale-[0.995] transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${iconColor}`}>
+                        {item.kind === 'deposit' || item.kind === 'tier' || item.kind === 'bonus' ? (
+                          <ArrowUpRight className={`w-4 h-4 ${textColor}`} />
+                        ) : item.pnl >= 0 ? (
+                          <ArrowUpRight className="w-4 h-4 text-profit" />
+                        ) : (
+                          <ArrowDownRight className="w-4 h-4 text-loss" />
+                        )}
+                      </div>
+
+                      <div>
+                        <p className="text-sm font-medium text-cream">{item.label}</p>
+                        <p className="text-xs text-cream/40">
+                          {item.sublabel} • {new Date(item.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
                     </div>
 
-                    <div>
-                      <p className="text-sm font-medium text-cream">{item.label}</p>
-                      <p className="text-xs text-cream/40">
-                        {item.sublabel} • {new Date(item.created_at).toLocaleDateString()}
+                    <div className="text-right">
+                      <p className={`text-sm font-bold ${textColor}`}>
+                        {item.kind === 'trade' ? (
+                          <>{item.pnl >= 0 ? '+' : ''}${Number(item.pnl).toFixed(2)}</>
+                        ) : (
+                          <>+${Number(item.amount).toFixed(2)}</>
+                        )}
                       </p>
+
+                      {item.kind === 'trade' && <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>}
+                      {item.kind !== 'trade' && item.status && (
+                        <p
+                          className={`text-xs ${
+                            item.status === 'approved' || item.status === 'completed'
+                              ? 'text-emerald-400/60'
+                              : item.status === 'pending'
+                              ? 'text-yellow-400/60'
+                              : 'text-cream/40'
+                          }`}
+                        >
+                          {item.status}
+                        </p>
+                      )}
                     </div>
                   </div>
-
-                  <div className="text-right">
-                    <p className={`text-sm font-bold ${textColor}`}>
-                      {item.kind === 'trade' ? (
-                        <>{item.pnl >= 0 ? '+' : ''}${Number(item.pnl).toFixed(2)}</>
-                      ) : (
-                        <>+${Number(item.amount).toFixed(2)}</>
-                      )}
-                    </p>
-
-                    {item.kind === 'trade' && <p className="text-xs text-cream/40">${Number(item.amount).toFixed(2)}</p>}
-                    {item.kind !== 'trade' && item.status && (
-                      <p
-                        className={`text-xs ${
-                          item.status === 'approved' || item.status === 'completed'
-                            ? 'text-emerald-400/60'
-                            : item.status === 'pending'
-                            ? 'text-yellow-400/60'
-                            : 'text-cream/40'
-                        }`}
-                      >
-                        {item.status}
-                      </p>
-                    )}
-                  </div>
-                </div>
+                </Link>
               );
             })}
           </div>
         )}
       </div>
 
+      {/* Quick Links (FULL TILE CLICKABLE ALREADY) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
           { label: 'Trading Bots', href: '/dashboard/bots', icon: Bot, color: 'text-purple-400' },
@@ -483,7 +455,7 @@ export default function DashboardOverview() {
           <Link
             key={link.href}
             href={link.href}
-            className="flex items-center gap-3 p-4 bg-white/5 rounded-xl border border-white/10 hover:border-white/20 transition-all group"
+            className="flex items-center gap-3 p-4 bg-white/5 rounded-xl border border-white/10 hover:border-white/20 hover:bg-white/[0.07] active:scale-[0.99] transition-all group"
           >
             <link.icon className={`w-5 h-5 ${link.color}`} />
             <span className="text-sm text-cream/70 group-hover:text-cream transition-colors">{link.label}</span>

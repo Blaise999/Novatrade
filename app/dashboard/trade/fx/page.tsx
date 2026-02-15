@@ -11,7 +11,6 @@ import {
   History,
   CandlestickChart,
   AlertTriangle,
-  XCircle,
 } from 'lucide-react';
 
 type Mode = 'active' | 'history';
@@ -191,7 +190,9 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
   }
 
   const notional = isFxMargin
-    ? (notionalFromDb > 0 ? notionalFromDb : stake * leverage)
+    ? notionalFromDb > 0
+      ? notionalFromDb
+      : stake * leverage
     : clampNum(row.investment, 0) * clampNum(row.multiplier, 1);
 
   const status = normStatus(row.status);
@@ -658,7 +659,7 @@ export default function FXTradePage() {
 
   // chart
   const [tf, setTf] = useState<TF>('5m');
-  const [chartNote, setChartNote] = useState<string | null>(null);
+  const [chartNote, setChartNote] = useState<string | null>(null); // ✅ kept, but NOT rendered in UI
   const [lastClose, setLastClose] = useState<number | null>(null);
 
   // chart refs
@@ -683,6 +684,13 @@ export default function FXTradePage() {
 
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
+
+  // ✅ Note removed from UI, but keep visibility in devtools
+  useEffect(() => {
+    if (!chartNote) return;
+    // eslint-disable-next-line no-console
+    console.debug('[fx-chart]', chartNote);
+  }, [chartNote]);
 
   const headerAuthToken = async (): Promise<string | null> => {
     if (!canUseSupabase) return null;
@@ -1257,6 +1265,9 @@ export default function FXTradePage() {
   const invNum = clampNum(investment, 0);
   const notionalPreview = invNum > 0 && multiplier > 0 ? invNum * multiplier : 0;
 
+  // ✅ “something cool” replacing the old balance card (still shows wallet, but as a live “pulse” pill)
+  const tfLabel = TIMEFRAMES.find((x) => x.value === tf)?.label ?? tf;
+
   return (
     <div className="min-h-screen bg-[#07070b] text-white">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-7 space-y-6">
@@ -1272,10 +1283,31 @@ export default function FXTradePage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="rounded-xl bg-white/5 border border-white/10 px-4 py-2">
-              <div className="text-[11px] text-white/60">Available</div>
-              <div className="text-sm font-semibold">${fmt(balance, 2)}</div>
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Live pulse pill (replaces the old balance card UI) */}
+            <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 flex items-center gap-3">
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/70" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-400" />
+              </span>
+
+              <div className="flex items-baseline gap-2">
+                <div className="text-[11px] tracking-wide uppercase text-white/60">Live</div>
+                <div className="text-sm font-semibold tabular-nums">
+                  {asset}
+                  {lastClose != null ? ` · ${lastClose.toFixed(5)}` : ''}
+                </div>
+              </div>
+
+              <div className="hidden sm:flex items-center gap-2 text-xs text-white/60">
+                <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10">{tfLabel}</span>
+                <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10">
+                  Notional ${fmt(notionalPreview, 0)}
+                </span>
+                <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10 tabular-nums">
+                  Wallet ${fmt(balance, 2)}
+                </span>
+              </div>
             </div>
 
             <button
@@ -1343,12 +1375,7 @@ export default function FXTradePage() {
               </div>
             </div>
 
-            {chartNote ? (
-              <div className="px-4 pt-3 text-xs text-yellow-200/80 flex items-center gap-2">
-                <XCircle className="h-4 w-4" />
-                {chartNote}
-              </div>
-            ) : null}
+            {/* ✅ Removed chartNote from UI completely (still logged in devtools via useEffect above) */}
 
             <div className="p-4">
               <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
