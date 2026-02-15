@@ -44,10 +44,49 @@ const getPositionAvgPrice = (position: SpotPosition, fallback: number) => {
   );
 };
 
-const insertTradeRow = async (row: Record<string, any>) => {
-  const { error } = await supabase.from('trades').insert(row);
-  if (error) throw error;
+const cleanUndefined = (obj: Record<string, any>) =>
+  Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+
+const normalizeDirection = (row: Record<string, any>) => {
+  // Your DB says trades.direction is NOT NULL.
+  // For spot crypto: always a LONG position (buy opens/extends long, sell reduces/closes long).
+  const dir = row.direction ?? row.side ?? 'long';
+  const direction = String(dir).toLowerCase() === 'short' ? 'short' : 'long';
+
+  // Optional: only helpful if the column exists
+  const direction_int = direction === 'short' ? -1 : 1;
+
+  return { direction, direction_int };
 };
+
+const insertTradeRow = async (row: Record<string, any>) => {
+  // ✅ guarantee direction is present
+  const { direction, direction_int } = normalizeDirection(row);
+
+  // attempt with direction_int (if your table supports it)
+  const payloadA = cleanUndefined({ ...row, direction, direction_int });
+
+  const { error: errA } = await supabase.from('trades').insert(payloadA);
+  if (!errA) return;
+
+  // If DB doesn't have direction_int column, retry without it.
+  const msg = String((errA as any)?.message ?? '');
+  const code = String((errA as any)?.code ?? '');
+
+  const directionIntMissing =
+    code === '42703' || /direction_int/i.test(msg) || /column .*direction_int/i.test(msg);
+
+  if (directionIntMissing) {
+    const payloadB = cleanUndefined({ ...row, direction });
+    const { error: errB } = await supabase.from('trades').insert(payloadB);
+    if (errB) throw errB;
+    return;
+  }
+
+  // otherwise throw original
+  throw errA;
+};
+
 
 // ============================================
 // TYPES
@@ -621,41 +660,46 @@ useEffect(() => {
     setFavorites((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
   }, []);
 
-  // Execute buy - Spot Model
   const handleBuy = async () => {
-    if (amount > balance) {
-      setNotification({ type: 'error', message: 'Insufficient balance' });
-      return;
-    }
-    if (amount < 1) {
-      setNotification({ type: 'error', message: 'Minimum order is $1' });
-      return;
-    }
-    if (!user) {
-      setNotification({ type: 'error', message: 'Please log in to trade' });
-      return;
-    }
+  if (amount > balance) {
+    setNotification({ type: 'error', message: 'Insufficient balance' });
+    return;
+  }
+  if (amount < 1) {
+    setNotification({ type: 'error', message: 'Minimum order is $1' });
+    return;
+  }
+  if (!user) {
+    setNotification({ type: 'error', message: 'Please log in to trade' });
+    return;
+  }
 
-    setIsExecuting(true);
-    const qty = amount / currentPrice;
-    const asset = cryptoAssets.find((a) => a.symbol.toUpperCase() === selectedSymbol);
+  setIsExecuting(true);
+  const qty = amount / currentPrice;
+  const asset = cryptoAssets.find((a) => a.symbol.toUpperCase() === selectedSymbol);
 
-    try {
-      const result = executeBuy(selectedSymbol, selectedAsset.name, qty, currentPrice, 0, asset?.icon);
+  try {
+    const result = executeBuy(selectedSymbol, selectedAsset.name, qty, currentPrice, 0, asset?.icon);
+    if (!result.success) throw new Error(result.error || 'Trade failed');
 
-      if (!result.success) throw new Error(result.error || 'Trade failed');
+    // ✅ DB ledger should NEVER stop the buy from showing
+    if (isSupabaseConfigured()) {
+      const now = new Date().toISOString();
 
-      if (isSupabaseConfigured()) {
-        const now = new Date().toISOString();
-
-        // ✅ Ledger row: one row per executed transaction
+      try {
         await insertTradeRow({
           user_id: user.id,
           pair: `${selectedSymbol}/USD`,
           symbol: selectedSymbol,
           market_type: 'crypto',
+
+          // these match what you already had
           type: 'buy',
           side: 'long',
+
+          // ✅ REQUIRED BY YOUR DB (NOT NULL)
+          direction: 'long',
+
           amount,
           quantity: qty,
           entry_price: currentPrice,
@@ -671,65 +715,73 @@ useEffect(() => {
           opened_at: now,
           closed_at: now,
         });
-
-        await refreshUser();
-        await loadTrades();
+      } catch (e) {
+        console.error('[Crypto Ledger] insert buy failed (non-blocking):', e);
       }
 
-      setNotification({
-        type: 'success',
-        message: `Bought ${qty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}`,
-      });
-    } catch (error: any) {
-      console.error('Trade error:', error);
-      setNotification({ type: 'error', message: error?.message || 'Trade failed' });
+      await refreshUser();
+      await loadTrades();
     }
 
-    setIsExecuting(false);
-    setTimeout(() => setNotification(null), 3000);
-  };
+    setNotification({
+      type: 'success',
+      message: `Bought ${qty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}`,
+    });
+  } catch (error: any) {
+    console.error('Trade error:', error);
+    setNotification({ type: 'error', message: error?.message || 'Trade failed' });
+  }
+
+  setIsExecuting(false);
+  setTimeout(() => setNotification(null), 3000);
+};
 
   // Execute sell - Spot Model
-  const handleSell = async () => {
-    const position = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
-    if (!position) {
-      setNotification({ type: 'error', message: `You don't own any ${selectedSymbol}` });
-      return;
-    }
-    if (!user) {
-      setNotification({ type: 'error', message: 'Please log in to trade' });
-      return;
-    }
+ const handleSell = async () => {
+  const position = positions.find((p) => p.symbol.toUpperCase() === selectedSymbol);
+  if (!position) {
+    setNotification({ type: 'error', message: `You don't own any ${selectedSymbol}` });
+    return;
+  }
+  if (!user) {
+    setNotification({ type: 'error', message: 'Please log in to trade' });
+    return;
+  }
 
-    const sellQty = Math.min(quantity, position.quantity);
-    if (sellQty <= 0) {
-      setNotification({ type: 'error', message: 'Invalid quantity' });
-      return;
-    }
+  const sellQty = Math.min(quantity, position.quantity);
+  if (sellQty <= 0) {
+    setNotification({ type: 'error', message: 'Invalid quantity' });
+    return;
+  }
 
-    setIsExecuting(true);
+  setIsExecuting(true);
 
-    try {
-      const result = executeSell(position.id, sellQty, currentPrice, 0);
-      if (!result.success) throw new Error(result.error || 'Sell failed');
+  try {
+    const result = executeSell(position.id, sellQty, currentPrice, 0);
+    if (!result.success) throw new Error(result.error || 'Sell failed');
 
-      if (isSupabaseConfigured()) {
-        const now = new Date().toISOString();
-        const entryGuess = getPositionAvgPrice(position, currentPrice);
-        const pnl = Number(result.realizedPnL ?? 0);
+    if (isSupabaseConfigured()) {
+      const now = new Date().toISOString();
+      const entryGuess = getPositionAvgPrice(position, currentPrice);
+      const pnl = Number(result.realizedPnL ?? 0);
 
-        const soldNotional = sellQty * currentPrice;
-        const soldCostBasis = sellQty * entryGuess;
-        const pnlPct = soldCostBasis > 0 ? (pnl / soldCostBasis) * 100 : 0;
+      const soldNotional = sellQty * currentPrice;
+      const soldCostBasis = sellQty * entryGuess;
+      const pnlPct = soldCostBasis > 0 ? (pnl / soldCostBasis) * 100 : 0;
 
-        // ✅ Ledger row: one row per executed transaction
+      try {
         await insertTradeRow({
           user_id: user.id,
           pair: `${selectedSymbol}/USD`,
           symbol: selectedSymbol,
           market_type: 'crypto',
+
           type: 'sell',
           side: 'long',
+
+          // ✅ REQUIRED BY YOUR DB (NOT NULL)
+          direction: 'long',
+
           amount: soldNotional,
           quantity: sellQty,
           entry_price: entryGuess,
@@ -745,25 +797,30 @@ useEffect(() => {
           opened_at: now,
           closed_at: now,
         });
-
-        await refreshUser();
-        await loadTrades();
+      } catch (e) {
+        console.error('[Crypto Ledger] insert sell failed (non-blocking):', e);
       }
 
-      setNotification({
-        type: 'success',
-        message:
-          `Sold ${sellQty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}` +
-          (result.realizedPnL !== undefined ? ` (P&L: ${result.realizedPnL >= 0 ? '+' : ''}$${result.realizedPnL.toFixed(2)})` : ''),
-      });
-    } catch (error: any) {
-      console.error('Sell error:', error);
-      setNotification({ type: 'error', message: error?.message || 'Sell failed' });
+      await refreshUser();
+      await loadTrades();
     }
 
-    setIsExecuting(false);
-    setTimeout(() => setNotification(null), 3000);
-  };
+    setNotification({
+      type: 'success',
+      message:
+        `Sold ${sellQty.toFixed(6)} ${selectedSymbol} @ $${currentPrice.toLocaleString()}` +
+        (result.realizedPnL !== undefined
+          ? ` (P&L: ${result.realizedPnL >= 0 ? '+' : ''}$${result.realizedPnL.toFixed(2)})`
+          : ''),
+    });
+  } catch (error: any) {
+    console.error('Sell error:', error);
+    setNotification({ type: 'error', message: error?.message || 'Sell failed' });
+  }
+
+  setIsExecuting(false);
+  setTimeout(() => setNotification(null), 3000);
+};
 
   // Calculate totals
   const totalPortfolioValue = positions.reduce((sum, p) => sum + p.displayValue, 0);
