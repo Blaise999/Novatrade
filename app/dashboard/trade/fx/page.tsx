@@ -206,7 +206,8 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
             : 0;
 
   const exposure = isFxMargin ? notional : stake * clampNum(row.multiplier, 1);
-  const calc = entryPrice > 0 ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice) : 0;
+  const calc =
+    entryPrice > 0 ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice) : 0;
 
   const pnl = pnlFromDb !== 0 ? pnlFromDb : calc;
   const pnlPercent = stake > 0 ? (pnl / stake) * 100 : 0;
@@ -455,7 +456,12 @@ function buildCandlesFromTicksFx(ticks: Tick[], intervalMs: number, count: numbe
   return out.filter((x) => x.open > 0 && x.high > 0 && x.low > 0 && x.close > 0);
 }
 
-function generateSyntheticCandlesFx(seedPrice: number, intervalMs: number, count: number, seedKey: string): Candle[] {
+function generateSyntheticCandlesFx(
+  seedPrice: number,
+  intervalMs: number,
+  count: number,
+  seedKey: string
+): Candle[] {
   const p0 = Number.isFinite(seedPrice) && seedPrice > 0 ? seedPrice : 1;
   const rng = mulberry32(hashStr(seedKey));
 
@@ -615,18 +621,16 @@ function normalizeWsUrl(raw: string) {
   return s;
 }
 
+// ✅ HARD default (your Render gateway). Env vars can override it.
+const DEFAULT_GATEWAY_WS = 'wss://web-socket-lc3r.onrender.com';
+
 function getGatewayUrl(): string {
-  const envWs = process.env.NEXT_PUBLIC_MARKET_WS_URL;
-  if (envWs) return normalizeWsUrl(envWs);
+  const raw =
+    process.env.NEXT_PUBLIC_MARKET_WS_URL ||
+    process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL ||
+    DEFAULT_GATEWAY_WS;
 
-  const envOld = process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL;
-  if (envOld) return normalizeWsUrl(envOld);
-
-  if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
-    return 'ws://localhost:8787';
-  }
-
-  return '';
+  return normalizeWsUrl(raw);
 }
 
 type GatewayMsg =
@@ -670,7 +674,10 @@ export default function FXTradePage() {
   const [chartNote, setChartNote] = useState<string | null>(null);
   const [lastClose, setLastClose] = useState<number | null>(null);
   const [candlesCacheLabel, setCandlesCacheLabel] = useState<string>('—');
+
+  // WS
   const [wsOn, setWsOn] = useState(false);
+  const [wsNote, setWsNote] = useState<string | null>(null);
 
   // HOT refs
   const assetRef = useRef(asset);
@@ -826,7 +833,7 @@ export default function FXTradePage() {
   };
 
   // ===============================
-  // Chart init (✅ FIXED for lightweight-charts v5 + Next import)
+  // Chart init
   // ===============================
   const initChartIfNeeded = async () => {
     const el = chartWrapRef.current;
@@ -835,12 +842,9 @@ export default function FXTradePage() {
 
     const w = el.clientWidth;
     const h = el.clientHeight;
-    if (!w || !h) {
-      throw new Error(`Chart container has no size (w=${w}, h=${h}).`);
-    }
+    if (!w || !h) throw new Error(`Chart container has no size (w=${w}, h=${h}).`);
 
     const mod: any = await import('lightweight-charts');
-
     const createChart = mod?.createChart ?? mod?.default?.createChart;
     const CandlestickSeries = mod?.CandlestickSeries ?? mod?.default?.CandlestickSeries;
     const CrosshairMode = mod?.CrosshairMode ?? mod?.default?.CrosshairMode;
@@ -866,7 +870,6 @@ export default function FXTradePage() {
 
     let series: any = null;
 
-    // v4 API
     if (typeof chart.addCandlestickSeries === 'function') {
       series = chart.addCandlestickSeries({
         upColor: '#22c55e',
@@ -876,9 +879,7 @@ export default function FXTradePage() {
         wickUpColor: '#22c55e',
         wickDownColor: '#f43f5e',
       });
-    }
-    // v5 API (✅ this is what you have)
-    else if (typeof chart.addSeries === 'function' && CandlestickSeries) {
+    } else if (typeof chart.addSeries === 'function' && CandlestickSeries) {
       series = chart.addSeries(CandlestickSeries, {
         upColor: '#22c55e',
         downColor: '#f43f5e',
@@ -888,7 +889,9 @@ export default function FXTradePage() {
         wickDownColor: '#f43f5e',
       });
     } else {
-      throw new Error('lightweight-charts: candlestick series API not found (v5 expects addSeries + CandlestickSeries).');
+      throw new Error(
+        'lightweight-charts: candlestick series API not found (v5 expects addSeries + CandlestickSeries).'
+      );
     }
 
     chartApiRef.current = chart;
@@ -1032,7 +1035,6 @@ export default function FXTradePage() {
     const cacheKey = `${SS_PREFIX}:candles:${curAsset}:${curTf}`;
     const ticksKey = `${SS_PREFIX}:ticks:${curAsset}`;
 
-    // 1) init chart (DO NOT swallow errors)
     try {
       await initChartIfNeeded();
     } catch (e: any) {
@@ -1043,7 +1045,7 @@ export default function FXTradePage() {
       return;
     }
 
-    // 2) instant fallback: cache / ticks / synth
+    // instant fallback
     try {
       const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const now = Date.now();
@@ -1084,7 +1086,6 @@ export default function FXTradePage() {
         }
       }
 
-      // 3) skip network if cache is still “fresh”
       const cached2 = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const baseMs = TIMEFRAMES.find((x) => x.value === curTf)?.pollMs ?? 15000;
       const freshMs = Math.max(20_000, Math.min(5 * 60_000, baseMs * 2));
@@ -1096,7 +1097,6 @@ export default function FXTradePage() {
       }
     } catch {}
 
-    // 4) best-effort fetch (never clear chart on fail)
     try {
       const result = await fetchFxCandles(curAsset, curTf, 260, ac.signal, !!opts?.fresh);
       if (ac.signal.aborted || unmountedRef.current) return;
@@ -1138,7 +1138,7 @@ export default function FXTradePage() {
   const wsWantedInstrumentRef = useRef<string>('');
   const wsConnectedRef = useRef(false);
   const wsRetryTimerRef = useRef<number | null>(null);
-  const wsBackoffRef = useRef<number>(350);
+  const wsBackoffRef = useRef<number>(450);
 
   const liveUiRafRef = useRef<number | null>(null);
   const liveLastUiMsRef = useRef<number>(0);
@@ -1154,7 +1154,7 @@ export default function FXTradePage() {
   const closeWs = () => {
     clearWsRetry();
     try {
-      wsRef.current?.close();
+      wsRef.current?.close(1000, 'client_close');
     } catch {}
     wsRef.current = null;
     wsConnectedRef.current = false;
@@ -1169,11 +1169,15 @@ export default function FXTradePage() {
     } catch {}
   };
 
-  const scheduleWsReconnect = () => {
+  const scheduleWsReconnect = (why?: string) => {
     if (unmountedRef.current) return;
     clearWsRetry();
-    const delay = Math.min(5000, wsBackoffRef.current + Math.floor(Math.random() * 250));
-    wsBackoffRef.current = Math.min(5000, Math.floor(wsBackoffRef.current * 1.35));
+
+    const delay = Math.min(8000, wsBackoffRef.current + Math.floor(Math.random() * 350));
+    wsBackoffRef.current = Math.min(8000, Math.floor(wsBackoffRef.current * 1.35));
+
+    if (why) setWsNote(why);
+
     wsRetryTimerRef.current = window.setTimeout(() => {
       void connectWs();
     }, delay);
@@ -1195,19 +1199,30 @@ export default function FXTradePage() {
     if (unmountedRef.current) return;
 
     const url = getGatewayUrl();
-    if (!url) return;
+    if (!url) {
+      setWsOn(false);
+      setWsNote('Missing gateway WS URL.');
+      return;
+    }
 
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
 
     try {
+      setWsNote(`Connecting…`);
+      // eslint-disable-next-line no-console
+      console.log('[market-gw] connecting →', url);
+
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
         wsConnectedRef.current = true;
-        wsBackoffRef.current = 350;
+        wsBackoffRef.current = 450;
         setWsOn(true);
+        setWsNote(null);
+        // eslint-disable-next-line no-console
+        console.log('[market-gw] OPEN ✅');
 
         const inst = wsWantedInstrumentRef.current;
         if (inst) wsSend({ action: 'subscribe', fx: [inst] });
@@ -1221,6 +1236,11 @@ export default function FXTradePage() {
           msg = null;
         }
         if (!msg) return;
+
+        if ((msg as any)?.type === 'hello') {
+          // eslint-disable-next-line no-console
+          console.log('[market-gw] HELLO', msg);
+        }
 
         if ((msg as any)?.type === 'fx_tick') {
           const m = msg as any;
@@ -1259,25 +1279,36 @@ export default function FXTradePage() {
         }
       };
 
-      ws.onclose = () => {
+      ws.onerror = (e) => {
+        // eslint-disable-next-line no-console
+        console.log('[market-gw] ERROR ❌', e);
+        setWsOn(false);
+        setWsNote('WS error (likely cold start / network). Retrying…');
+        scheduleWsReconnect('WS error. Retrying…');
+      };
+
+      ws.onclose = (e) => {
+        // eslint-disable-next-line no-console
+        console.log('[market-gw] CLOSE', e.code, e.reason);
         wsConnectedRef.current = false;
         wsRef.current = null;
         setWsOn(false);
-        scheduleWsReconnect();
-      };
 
-      ws.onerror = () => {
-        // onclose handles retry
+        const msg = `WS closed (${e.code}${e.reason ? `: ${e.reason}` : ''}). Retrying…`;
+        setWsNote(msg);
+        scheduleWsReconnect(msg);
       };
-    } catch {
-      scheduleWsReconnect();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.log('[market-gw] CONNECT FAIL', err);
+      setWsOn(false);
+      setWsNote('WS connect failed. Retrying…');
+      scheduleWsReconnect('WS connect failed. Retrying…');
     }
   };
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const gw = getGatewayUrl();
-    if (!gw) return;
 
     const inst = displayToOandaInstrument(asset);
     subscribeInstrument(inst);
@@ -1394,6 +1425,7 @@ export default function FXTradePage() {
     try {
       await refreshUser();
     } catch {}
+    void connectWs();
   };
 
   const openTrade = async () => {
@@ -1563,9 +1595,7 @@ export default function FXTradePage() {
               </div>
 
               <div className="hidden sm:flex items-center gap-2 text-xs text-white/60">
-                <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10">
-                  {tfLabel}
-                </span>
+                <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10">{tfLabel}</span>
                 <span className="px-2 py-1 rounded-full bg-black/30 border border-white/10">
                   Notional ${fmt(notionalPreview, 0)}
                 </span>
@@ -1615,6 +1645,12 @@ export default function FXTradePage() {
                 <div className="text-xs text-white/60 px-2 py-1 rounded-full bg-black/30 border border-white/10">
                   Candles: {candlesCacheLabel}
                 </div>
+
+                {wsNote ? (
+                  <div className="text-xs text-amber-200 px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/25 max-w-[360px] truncate">
+                    {wsNote}
+                  </div>
+                ) : null}
 
                 <select
                   value={asset}

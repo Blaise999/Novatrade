@@ -1,5 +1,6 @@
-type CandleLike = { time: string; open: number; high: number; low: number; close: number; volume?: number };
-type QuoteLike = {
+// lib/market/alpaca.ts
+export type CandleLike = { time: string; open: number; high: number; low: number; close: number; volume?: number };
+export type QuoteLike = {
   symbol: string;
   price: number;
   bid: number;
@@ -9,11 +10,14 @@ type QuoteLike = {
   ts?: number;
 };
 
-function pickErrorMessage(text: string) {
-  const t = String(text || '').trim();
-  if (!t) return 'Network error.';
-  // keep it generic (same style you already use)
+function pickErrorMessage(_text: string) {
   return 'Network error.';
+}
+
+async function readJson(res: Response) {
+  const text = await res.text();
+  if (!res.ok) throw new Error(pickErrorMessage(text));
+  return text ? JSON.parse(text) : {};
 }
 
 export async function fetchQuotesBatch(symbols: string[]) {
@@ -28,11 +32,13 @@ export async function fetchQuotesBatch(symbols: string[]) {
     cache: 'no-store',
   });
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(pickErrorMessage(text));
-  return text ? JSON.parse(text) : {};
+  return readJson(res);
 }
 
+/**
+ * interval must be your Twelve-like strings: 1min|5min|15min|1h|4h|1day
+ * (your /api route converts to Alpaca timeframe)
+ */
 export async function fetchCandles(symbol: string, interval: string, limit: number) {
   const sym = String(symbol || '').trim().toUpperCase();
   if (!sym) return { candles: [] as CandleLike[] };
@@ -44,7 +50,5 @@ export async function fetchCandles(symbol: string, interval: string, limit: numb
     { cache: 'no-store' }
   );
 
-  const text = await res.text();
-  if (!res.ok) throw new Error(pickErrorMessage(text));
-  return text ? JSON.parse(text) : { candles: [] };
+  return readJson(res);
 }

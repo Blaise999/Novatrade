@@ -1,3 +1,4 @@
+// app/api/market/stocks/candles/route.ts
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
@@ -27,8 +28,7 @@ async function fetchJson(url: string, timeoutMs = 10000) {
     const res = await fetch(url, { headers: headers(), signal: ac.signal, cache: 'no-store' });
     const text = await res.text();
     if (!res.ok) {
-      const msg = text || `HTTP ${res.status}`;
-      const err: any = new Error(msg);
+      const err: any = new Error(text || `HTTP ${res.status}`);
       err.status = res.status;
       throw err;
     }
@@ -39,41 +39,38 @@ async function fetchJson(url: string, timeoutMs = 10000) {
 }
 
 function toTf(interval: string) {
-  const x = String(interval || '').trim();
-  const t = x.toLowerCase();
-
-  // accept your UI, Twelve-ish, and Alpaca-ish
-  if (t === '1m' || t === '1min' || t === '1min') return '1Min';
-  if (t === '5m' || t === '5min') return '5Min';
-  if (t === '15m' || t === '15min') return '15Min';
-  if (t === '1h' || t === '1hour') return '1Hour';
-  if (t === '4h' || t === '4hour') return '4Hour';
-  if (t === '1d' || t === '1day') return '1Day';
-
-  // already alpaca style?
-  if (x === '1Min' || x === '5Min' || x === '15Min' || x === '1Hour' || x === '4Hour' || x === '1Day') return x;
-
-  return '15Min';
+  switch ((interval || '').toLowerCase()) {
+    case '1min':
+      return '1Min';
+    case '5min':
+      return '5Min';
+    case '15min':
+      return '15Min';
+    case '1h':
+      return '1Hour';
+    case '4h':
+      return '4Hour';
+    case '1day':
+      return '1Day';
+    default:
+      return '15Min';
+  }
 }
 
-function normalizeBarTime(raw: any) {
-  let s = String(raw || '').trim();
-  if (!s) return '';
+function buildUpstream(symbol: string, interval: string, limit: number, feed?: string) {
+  const qs = new URLSearchParams({
+    symbols: symbol,
+    timeframe: toTf(interval),
+    limit: String(limit),
+  });
 
-  // "YYYY-MM-DD HH:mm:ss" -> ISO-like
-  s = s.includes(' ') ? s.replace(' ', 'T') : s;
+  const f = (feed || '').trim();
+  if (f) qs.set('feed', f);
 
-  // Trim fractional seconds to 3 digits (JS safe): .123456Z -> .123Z
-  s = s.replace(/\.(\d{3})\d+(Z|[+-]\d\d:\d\d)?$/, '.$1$2');
-
-  // Ensure timezone
-  if (!s.endsWith('Z') && !/[+-]\d\d:\d\d$/.test(s)) s += 'Z';
-
-  const ms = Date.parse(s);
-  if (!Number.isFinite(ms)) return '';
-
-  // Return clean ISO always ending with Z
-  return new Date(ms).toISOString();
+  return {
+    upstream: `https://data.alpaca.markets/v2/stocks/bars?${qs.toString()}`,
+    cacheKey: `bars:${qs.toString()}`,
+  };
 }
 
 export async function GET(req: Request) {
@@ -86,32 +83,17 @@ export async function GET(req: Request) {
 
   if (!symbol) return NextResponse.json({ candles: [] }, { status: 200 });
 
-  // ✅ IMPORTANT: default to IEX unless you explicitly set SIP
-  const feed =
-    (url.searchParams.get('feed') ||
-      process.env.ALPACA_DATA_FEED ||
-      'iex').trim();
+  const reqFeed = (url.searchParams.get('feed') || '').trim();
+  const envFeed = (process.env.ALPACA_DATA_FEED || '').trim();
+  const feed = (reqFeed || envFeed || 'iex').trim();
 
-  const qs = new URLSearchParams({
-    symbols: symbol,
-    timeframe: toTf(interval),
-    limit: String(limit),
-  });
-  if (feed) qs.set('feed', feed);
-
-  const upstream = `https://data.alpaca.markets/v2/stocks/bars?${qs.toString()}`;
-  const cacheKey = `bars:${qs.toString()}`;
+  const { upstream, cacheKey } = buildUpstream(symbol, interval, limit, feed);
 
   const cached = CACHE.get(cacheKey);
   const now = Date.now();
-  if (cached && now - cached.ts < TTL_MS) {
-    return NextResponse.json(cached.data, { status: 200 });
-  }
+  if (cached && now - cached.ts < TTL_MS) return NextResponse.json(cached.data, { status: 200 });
 
-  try {
-    const json = await fetchJson(upstream);
-
-    // Alpaca bars often returns { bars: { AAPL: [...] } }
+  const parseBars = (json: any) => {
     const arr: any[] =
       (json?.bars && Array.isArray(json.bars) && json.bars) ||
       (json?.bars && json?.bars?.[symbol] && Array.isArray(json.bars[symbol]) && json.bars[symbol]) ||
@@ -119,27 +101,44 @@ export async function GET(req: Request) {
       [];
 
     const candles = arr
-      .map((b: any) => {
-        const time = normalizeBarTime(b?.t ?? b?.time);
-        return {
-          time,
-          open: Number(b?.o ?? b?.open ?? 0),
-          high: Number(b?.h ?? b?.high ?? 0),
-          low: Number(b?.l ?? b?.low ?? 0),
-          close: Number(b?.c ?? b?.close ?? 0),
-          volume: b?.v ?? b?.volume,
-        };
-      })
-      .filter((c: any) => !!c.time && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0);
+      .map((b: any) => ({
+        time: String(b?.t || b?.time || ''),
+        open: Number(b?.o ?? b?.open ?? 0),
+        high: Number(b?.h ?? b?.high ?? 0),
+        low: Number(b?.l ?? b?.low ?? 0),
+        close: Number(b?.c ?? b?.close ?? 0),
+        volume: b?.v ?? b?.volume,
+      }))
+      .filter((c: any) => c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0);
 
-    const payload = { candles };
-    CACHE.set(cacheKey, { ts: now, data: payload });
-    return NextResponse.json(payload, { status: 200 });
+    return { candles };
+  };
+
+  try {
+    // try chosen feed
+    const json1 = await fetchJson(upstream);
+    const payload1 = parseBars(json1);
+
+    // cache + return (even if market closed, it should return latest bars; if empty, client fallback handles)
+    CACHE.set(cacheKey, { ts: now, data: payload1 });
+    return NextResponse.json(payload1, { status: 200 });
   } catch (e: any) {
-    if (cached?.data) {
-      return NextResponse.json(cached.data, { status: 200, headers: { 'x-stale': '1' } });
-    }
+    // if SIP not allowed, auto-fallback to IEX
     const status = Number(e?.status) || 500;
-    return NextResponse.json({ error: String(e?.message || 'Market data error') }, { status });
+    const msg = String(e?.message || '');
+
+    const sipWanted = feed.toLowerCase() === 'sip';
+    if (sipWanted && (status === 401 || status === 403)) {
+      try {
+        const { upstream: u2, cacheKey: ck2 } = buildUpstream(symbol, interval, limit, 'iex');
+        const json2 = await fetchJson(u2);
+        const payload2 = parseBars(json2);
+        CACHE.set(ck2, { ts: now, data: payload2 });
+        return NextResponse.json(payload2, { status: 200, headers: { 'x-feed-fallback': 'iex' } });
+      } catch {}
+    }
+
+    if (cached?.data) return NextResponse.json(cached.data, { status: 200, headers: { 'x-stale': '1' } });
+    return NextResponse.json({ error: msg || 'Market data error' }, { status });
   }
 }
