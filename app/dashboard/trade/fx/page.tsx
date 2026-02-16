@@ -610,20 +610,16 @@ function normalizeWsUrl(raw: string) {
 }
 
 function getGatewayUrl(): string {
-  // ✅ preferred
   const envWs = process.env.NEXT_PUBLIC_MARKET_WS_URL;
   if (envWs) return normalizeWsUrl(envWs);
 
-  // ✅ backward compatible (your older key)
   const envOld = process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL;
   if (envOld) return normalizeWsUrl(envOld);
 
-  // ✅ ONLY allow localhost fallback in dev
   if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
     return 'ws://localhost:8787';
   }
 
-  // ✅ production: if not configured, disable WS (no more wss://your-site:8787)
   return '';
 }
 
@@ -668,6 +664,7 @@ export default function FXTradePage() {
   const [tf, setTf] = useState<TF>('5m');
   const [chartNote, setChartNote] = useState<string | null>(null); // console only
   const [lastClose, setLastClose] = useState<number | null>(null);
+  const [chartBootError, setChartBootError] = useState<string | null>(null);
 
   // ---- HOT refs (avoid stale closures => smoother + correct)
   const assetRef = useRef(asset);
@@ -815,7 +812,6 @@ export default function FXTradePage() {
       const fxRows = rows.filter((r) => String(r.market_type ?? '').toLowerCase() === 'fx');
       const parsed = fxRows.map(dbRowToUi).filter((t) => !!t.asset);
 
-      // keep UI snappy (don’t block click interactions)
       startTransition(() => {
         setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
       });
@@ -831,78 +827,124 @@ export default function FXTradePage() {
   };
 
   // ===============================
-  // Chart init
+  // CHART FIX (v5-safe + never 0x0)
   // ===============================
+  const getChartSize = (el: HTMLDivElement) => {
+    const r = el.getBoundingClientRect();
+    const w = Math.max(320, Math.floor(r.width || el.clientWidth || 0));
+    const h = Math.max(260, Math.floor(r.height || el.clientHeight || 0));
+    return { w, h };
+  };
+
+  const forceResizeChart = () => {
+    const el = chartWrapRef.current;
+    const chart = chartApiRef.current;
+    if (!el || !chart) return;
+
+    const { w, h } = getChartSize(el);
+    try {
+      chart.applyOptions?.({ width: w, height: h });
+      chart.timeScale?.().fitContent?.();
+    } catch {}
+  };
+
   const initChartIfNeeded = async () => {
     const el = chartWrapRef.current;
     if (!el) return;
     if (chartApiRef.current && candleSeriesRef.current) return;
 
+    setChartBootError(null);
+
+    // hard cleanup (dev strict-mode / hot reload)
+    try {
+      resizeObsRef.current?.disconnect?.();
+    } catch {}
+    resizeObsRef.current = null;
+
+    try {
+      chartApiRef.current?.remove?.();
+    } catch {}
+    chartApiRef.current = null;
+    candleSeriesRef.current = null;
+
     try {
       el.innerHTML = '';
     } catch {}
 
-    const lwc: any = await import('lightweight-charts');
-
-    const chart = lwc.createChart(el, {
-      layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.88)' },
-      grid: {
-        vertLines: { color: 'rgba(255,255,255,0.06)' },
-        horzLines: { color: 'rgba(255,255,255,0.06)' },
-      },
-      rightPriceScale: { borderColor: 'rgba(255,255,255,0.14)' },
-      timeScale: { borderColor: 'rgba(255,255,255,0.14)', timeVisible: true, secondsVisible: false },
-      crosshair: { mode: lwc?.CrosshairMode?.Normal ?? 0 },
-    });
-
-    let candleSeries: any = null;
-    if (typeof chart.addCandlestickSeries === 'function') {
-      candleSeries = chart.addCandlestickSeries({
-        upColor: '#22c55e',
-        downColor: '#f43f5e',
-        borderUpColor: '#22c55e',
-        borderDownColor: '#f43f5e',
-        wickUpColor: '#22c55e',
-        wickDownColor: '#f43f5e',
-      });
-    } else if (typeof chart.addSeries === 'function' && (lwc as any).CandlestickSeries) {
-      candleSeries = chart.addSeries((lwc as any).CandlestickSeries, {
-        upColor: '#22c55e',
-        downColor: '#f43f5e',
-        borderUpColor: '#22c55e',
-        borderDownColor: '#f43f5e',
-        wickUpColor: '#22c55e',
-        wickDownColor: '#f43f5e',
-      });
-    } else {
-      throw new Error('lightweight-charts: candlestick series API not found');
-    }
-
-    chartApiRef.current = chart;
-    candleSeriesRef.current = candleSeries;
-
     try {
+      const mod: any = await import('lightweight-charts');
+      const createChartFn = mod?.createChart ?? mod?.default?.createChart;
+      const CrosshairMode = mod?.CrosshairMode ?? mod?.default?.CrosshairMode;
+      const CandlestickSeries = mod?.CandlestickSeries ?? mod?.default?.CandlestickSeries;
+
+      if (typeof createChartFn !== 'function') throw new Error('lightweight-charts: createChart not found');
+
+      const { w, h } = getChartSize(el);
+
+      const chart = createChartFn(el, {
+        width: w,
+        height: h,
+        layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.88)' },
+        grid: {
+          vertLines: { color: 'rgba(255,255,255,0.06)' },
+          horzLines: { color: 'rgba(255,255,255,0.06)' },
+        },
+        rightPriceScale: { borderColor: 'rgba(255,255,255,0.14)' },
+        timeScale: { borderColor: 'rgba(255,255,255,0.14)', timeVisible: true, secondsVisible: tfRef.current === '1m' },
+        crosshair: { mode: CrosshairMode?.Normal ?? 0 },
+      });
+
+      // series: v4-style OR v5-style
+      let series: any = null;
+      if (typeof chart.addCandlestickSeries === 'function') {
+        series = chart.addCandlestickSeries({
+          upColor: '#22c55e',
+          downColor: '#f43f5e',
+          borderUpColor: '#22c55e',
+          borderDownColor: '#f43f5e',
+          wickUpColor: '#22c55e',
+          wickDownColor: '#f43f5e',
+        });
+      } else if (typeof chart.addSeries === 'function' && CandlestickSeries) {
+        series = chart.addSeries(CandlestickSeries, {
+          upColor: '#22c55e',
+          downColor: '#f43f5e',
+          borderUpColor: '#22c55e',
+          borderDownColor: '#f43f5e',
+          wickUpColor: '#22c55e',
+          wickDownColor: '#f43f5e',
+        });
+      } else {
+        throw new Error('lightweight-charts: no candlestick series API found');
+      }
+
+      chartApiRef.current = chart;
+      candleSeriesRef.current = series;
+
+      // ResizeObserver (clamped)
       const ro = new ResizeObserver(() => {
-        const w = el.clientWidth;
-        const h = el.clientHeight;
-        try {
-          chart.applyOptions({ width: w, height: h });
-          chart.timeScale().fitContent();
-        } catch {}
+        if (!chartApiRef.current) return;
+        forceResizeChart();
       });
       ro.observe(el);
       resizeObsRef.current = ro;
 
-      try {
-        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
-        chart.timeScale().fitContent();
-      } catch {}
-    } catch {}
+      // ✅ crucial: resize again next frame (Next layout settles here)
+      requestAnimationFrame(() => {
+        forceResizeChart();
+      });
+    } catch (e: any) {
+      setChartBootError(e?.message || 'Chart failed to initialize');
+    }
   };
 
   const setChartData = (candles: Candle[]) => {
+    const series = candleSeriesRef.current;
+    const chart = chartApiRef.current;
+    if (!series || !chart) return;
+
     const data = candles.map((c) => ({
-      time: c.time as any,
+      time: c.time as any, // unix seconds (UTCTimestamp)
       open: c.open,
       high: c.high,
       low: c.low,
@@ -910,8 +952,8 @@ export default function FXTradePage() {
     }));
 
     try {
-      candleSeriesRef.current?.setData?.(data);
-      chartApiRef.current?.timeScale?.()?.fitContent?.();
+      series.setData?.(data);
+      chart.timeScale?.().fitContent?.();
     } catch {}
 
     lastCandleRef.current = candles.length ? candles[candles.length - 1] : null;
@@ -960,12 +1002,10 @@ export default function FXTradePage() {
   };
 
   const setLivePriceFast = (pair: string, px: number) => {
-    // keep header + chart snappy; avoid killing typing in input
     startTransition(() => {
       setLastClose(px);
       if (!marketEditingRef.current) setMarketPrice(px.toFixed(5));
 
-      // Only update trades if we actually have an active trade on this pair
       const hasActive = tradesRef.current.some((t) => t.status === 'active' && t.asset === pair);
       if (!hasActive) return;
 
@@ -1001,10 +1041,12 @@ export default function FXTradePage() {
     const cacheKey = `${SS_PREFIX}:candles:${curAsset}:${curTf}`;
     const ticksKey = `${SS_PREFIX}:ticks:${curAsset}`;
 
+    // 0) ensure chart exists first (fix “nothing”)
+    await initChartIfNeeded();
+    forceResizeChart();
+
     // 1) instant fallback: cache / ticks / synth
     try {
-      await initChartIfNeeded();
-
       const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const now = Date.now();
 
@@ -1150,7 +1192,7 @@ export default function FXTradePage() {
     if (unmountedRef.current) return;
 
     const url = getGatewayUrl();
-    if (!url) return; // ✅ prevents wss://www.novaatrade.com:8787 in prod
+    if (!url) return;
 
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
@@ -1190,10 +1232,8 @@ export default function FXTradePage() {
 
           pushFxTick(pair, px);
 
-          // chart update is direct (no react render)
           applyLiveTickToChart(px, nowMs);
 
-          // throttle React state updates (fast + smooth)
           liveLastPxRef.current = px;
 
           const doUi = () => {
@@ -1223,23 +1263,19 @@ export default function FXTradePage() {
         scheduleWsReconnect();
       };
 
-      ws.onerror = () => {
-        // onclose retries
-      };
+      ws.onerror = () => {};
     } catch {
       scheduleWsReconnect();
     }
   };
 
-  // keep WS subscribed to selected pair
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    // ✅ if gateway not configured in prod, don't attempt WS at all
     const gw = getGatewayUrl();
     if (!gw) return;
 
-    const inst = displayToOandaInstrument(asset); // EUR/USD -> EUR_USD
+    const inst = displayToOandaInstrument(asset);
     subscribeInstrument(inst);
     void connectWs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1252,8 +1288,12 @@ export default function FXTradePage() {
     void loadTrades('active');
     void refreshUser().catch(() => {});
     void initChartIfNeeded();
-    // NOTE: polling effect below will call loadChart immediately (avoid duplicate on mount)
     void connectWs();
+
+    // Ensure chart sizes once page paints
+    requestAnimationFrame(() => {
+      forceResizeChart();
+    });
 
     return () => {
       unmountedRef.current = true;
@@ -1332,7 +1372,7 @@ export default function FXTradePage() {
       }
     };
 
-    void loadChart(); // immediate
+    void loadChart();
     clear();
     pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
 
@@ -1603,8 +1643,25 @@ export default function FXTradePage() {
             </div>
 
             <div className="p-4">
-              <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
+              <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden relative">
                 <div ref={chartWrapRef} className="w-full h-[420px] sm:h-[520px] lg:h-[640px]" />
+
+                {chartBootError ? (
+                  <div className="absolute inset-0 flex items-center justify-center p-4">
+                    <div className="max-w-[520px] w-full rounded-2xl border border-rose-500/30 bg-black/60 p-4">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-5 w-5 text-rose-300 mt-0.5" />
+                        <div>
+                          <div className="font-semibold text-rose-200">Chart failed to boot</div>
+                          <div className="text-xs text-white/70 mt-1">{chartBootError}</div>
+                          <div className="text-xs text-white/50 mt-2">
+                            Fix: this is almost always width/height=0 or series API mismatch — this file clamps size + supports v5/v4.
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
