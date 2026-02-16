@@ -24,7 +24,7 @@ export async function fetchQuotesBatch(symbols: string[]) {
 
   if (!list.length) return {};
 
-  const res = await fetch(`/api/market/stock/quotes?symbols=${encodeURIComponent(list.join(','))}`, {
+  const res = await fetch(`/api/market/stocks/quotes?symbols=${encodeURIComponent(list.join(','))}`, {
     cache: 'no-store',
   });
 
@@ -38,7 +38,7 @@ export async function fetchCandles(symbol: string, interval: string, limit: numb
   if (!sym) return { candles: [] as CandleLike[] };
 
   const res = await fetch(
-    `/api/market/stock/candles?symbol=${encodeURIComponent(sym)}&tf=${encodeURIComponent(interval)}&limit=${encodeURIComponent(
+    `/api/market/stocks/candles?symbol=${encodeURIComponent(sym)}&tf=${encodeURIComponent(interval)}&limit=${encodeURIComponent(
       String(limit || 220)
     )}`,
     { cache: 'no-store' }
