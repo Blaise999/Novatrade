@@ -20,14 +20,15 @@ function clampSymbols(raw: string) {
     .slice(0, 25);
 }
 
-function headers() {
+function alpacaHeaders() {
   const key = process.env.ALPACA_API_KEY_ID;
   const secret = process.env.ALPACA_API_SECRET_KEY;
   if (!key || !secret) throw new Error('Missing Alpaca env keys');
+
   return {
     accept: 'application/json',
-    'Apca-Api-Key-Id': key,
-    'Apca-Api-Secret-Key': secret,
+    'APCA-API-KEY-ID': key,
+    'APCA-API-SECRET-KEY': secret,
   } as Record<string, string>;
 }
 
@@ -35,7 +36,7 @@ async function fetchJson(url: string, timeoutMs = 8000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers: headers(), signal: ac.signal, cache: 'no-store' });
+    const res = await fetch(url, { headers: alpacaHeaders(), signal: ac.signal, cache: 'no-store' });
     const text = await res.text();
     if (!res.ok) {
       const msg = text || `HTTP ${res.status}`;
@@ -64,10 +65,10 @@ export async function GET(req: Request) {
 
   if (!symbols.length) return NextResponse.json({}, { status: 200 });
 
-  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || '').trim();
-  const qs = new URLSearchParams({ symbols: symbols.join(',') });
-  if (feed) qs.set('feed', feed);
+  // ✅ default feed to iex
+  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || 'iex').trim();
 
+  const qs = new URLSearchParams({ symbols: symbols.join(','), feed });
   const upstream = `https://data.alpaca.markets/v2/stocks/snapshots?${qs.toString()}`;
   const cacheKey = `snapshots:${qs.toString()}`;
 
@@ -82,7 +83,15 @@ export async function GET(req: Request) {
 
     const out: Record<
       string,
-      { symbol: string; price: number; bid: number; ask: number; prevClose?: number; ts: number; changePercent24h?: number }
+      {
+        symbol: string;
+        price: number;
+        bid: number;
+        ask: number;
+        prevClose?: number;
+        ts: number;
+        changePercent24h?: number;
+      }
     > = {};
 
     for (const sym of symbols) {

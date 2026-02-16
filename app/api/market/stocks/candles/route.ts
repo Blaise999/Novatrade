@@ -12,14 +12,16 @@ const CACHE: Map<string, CacheEntry> = g.__ALPACA_BARS_CACHE;
 
 const TTL_MS = 12_000;
 
-function headers() {
+function alpacaHeaders() {
   const key = process.env.ALPACA_API_KEY_ID;
   const secret = process.env.ALPACA_API_SECRET_KEY;
   if (!key || !secret) throw new Error('Missing Alpaca env keys');
+
+  // Alpaca docs use APCA-API-KEY-ID + APCA-API-SECRET-KEY
   return {
     accept: 'application/json',
-    'Apca-Api-Key-Id': key,
-    'Apca-Api-Secret-Key': secret,
+    'APCA-API-KEY-ID': key,
+    'APCA-API-SECRET-KEY': secret,
   } as Record<string, string>;
 }
 
@@ -27,7 +29,7 @@ async function fetchJson(url: string, timeoutMs = 10_000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { headers: headers(), signal: ac.signal, cache: 'no-store' });
+    const res = await fetch(url, { headers: alpacaHeaders(), signal: ac.signal, cache: 'no-store' });
     const text = await res.text();
     if (!res.ok) {
       const msg = text || `HTTP ${res.status}`;
@@ -65,14 +67,15 @@ export async function GET(req: Request) {
 
   if (!symbol) return NextResponse.json({ candles: [] }, { status: 200 });
 
-  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || '').trim();
+  // ✅ default feed to iex so it always works on free plans
+  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || 'iex').trim();
 
   const qs = new URLSearchParams({
     symbols: symbol,
     timeframe: toTf(interval),
     limit: String(limit),
+    feed,
   });
-  if (feed) qs.set('feed', feed);
 
   const upstream = `https://data.alpaca.markets/v2/stocks/bars?${qs.toString()}`;
   const cacheKey = `bars:${qs.toString()}`;

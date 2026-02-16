@@ -27,9 +27,6 @@ import { StockPosition } from '@/lib/trading-types';
 import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 
-// ✅ Alpaca helpers (server-proxied)
-import { fetchCandles, fetchQuotesBatch } from '@/lib/market/alpaca';
-
 type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
 const timeframes: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1D'];
 
@@ -102,7 +99,7 @@ function deriveChangePercent(price: number, prevClose?: number) {
 }
 
 function tfToInterval(tf: Timeframe) {
-  // we use Twelve-like strings because your API route accepts them and converts to Alpaca timeframe
+  // API accepts these (it converts to Alpaca timeframe)
   switch (tf) {
     case '1m':
       return '1min';
@@ -164,12 +161,9 @@ function parseMarketTimeToMs(dt: string) {
   const s = String(dt || '').trim();
   if (!s) return Date.now();
 
-  const hasTZ =
-    s.endsWith('Z') ||
-    /[+-]\d{2}:\d{2}$/.test(s) ||
-    /[+-]\d{4}$/.test(s);
-
+  const hasTZ = s.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(s) || /[+-]\d{4}$/.test(s);
   const isoLike = s.includes(' ') ? s.replace(' ', 'T') : s;
+
   const try1 = Date.parse(isoLike);
   if (Number.isFinite(try1)) return try1;
 
@@ -177,7 +171,6 @@ function parseMarketTimeToMs(dt: string) {
     const try2 = Date.parse(`${isoLike}Z`);
     if (Number.isFinite(try2)) return try2;
   }
-
   return Date.now();
 }
 
@@ -307,6 +300,36 @@ function generateSyntheticCandles(seedPrice: number, intervalMs: number, count: 
   return out;
 }
 
+// Apply a single tick to the last candle so the chart “moves” even between fetches
+function applyTickToCandles(prev: Candle[], tick: Tick, intervalMs: number, maxKeep: number): Candle[] {
+  if (!prev?.length) return prev;
+  if (!tick?.p || tick.p <= 0) return prev;
+
+  const bucketT = Math.floor(tick.t / intervalMs) * intervalMs;
+  const last = prev[prev.length - 1];
+  const prevClose = last?.c ?? tick.p;
+
+  // older tick
+  if (bucketT < last.t) return prev;
+
+  // same bucket: update OHLC
+  if (bucketT === last.t) {
+    const nextLast: Candle = {
+      ...last,
+      h: Math.max(last.h, tick.p),
+      l: Math.min(last.l, tick.p),
+      c: tick.p,
+    };
+    const next = prev.slice(0, -1).concat(nextLast);
+    return next;
+  }
+
+  // new bucket(s): add candle (simple)
+  const newCandle: Candle = { t: bucketT, o: prevClose, h: Math.max(prevClose, tick.p), l: Math.min(prevClose, tick.p), c: tick.p };
+  const next = prev.concat(newCandle);
+  return next.length > maxKeep ? next.slice(-maxKeep) : next;
+}
+
 // ===============================
 // ✅ Seed + Tail strategy
 // ===============================
@@ -338,6 +361,38 @@ function looksLikeQuota(msg: string) {
 }
 function userFacingMarketMessage(_msg: string) {
   return 'Network error.';
+}
+
+// ===============================
+// ✅ Client -> Server (API) fetch helpers
+// ===============================
+async function apiFetchJson(url: string, timeoutMs = 10_000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ac.signal, cache: 'no-store' });
+    const text = await res.text();
+    if (!res.ok) {
+      const err: any = new Error(text || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function apiFetchCandles(symbol: string, tf: string, limit: number) {
+  const u = `/api/market/stocks/candles?symbol=${encodeURIComponent(symbol)}&tf=${encodeURIComponent(tf)}&limit=${encodeURIComponent(
+    String(limit)
+  )}`;
+  return apiFetchJson(u, 12_000);
+}
+
+async function apiFetchQuotesBatch(symbols: string[]) {
+  const u = `/api/market/stocks/quotes?symbols=${encodeURIComponent(symbols.join(','))}`;
+  return apiFetchJson(u, 8_000);
 }
 
 export default function StockTradingPage() {
@@ -400,11 +455,12 @@ export default function StockTradingPage() {
   const [positionToSell, setPositionToSell] = useState<StockPosition | null>(null);
   const [sellQty, setSellQty] = useState(0);
 
-  // ---- Live quotes (SSE relay from Alpaca WS)
-  const [sseState, setSseState] = useState<'connecting' | 'live' | 'down'>('connecting');
+  // ---- Live quotes (poll /api/market/stocks/quotes)
+  const [priceState, setPriceState] = useState<'connecting' | 'live' | 'down'>('connecting');
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const prevCloseRef = useRef<Record<string, number>>({});
   const pauseUntilRef = useRef<number>(0);
+  const lastQuoteAtRef = useRef<number>(0);
 
   const toggleFavorite = (symbol: string) => {
     setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
@@ -428,189 +484,149 @@ export default function StockTradingPage() {
 
   const pollingKey = useMemo(() => quoteSymbols.join(','), [quoteSymbols]);
 
-  // ---- Live quotes via Alpaca WS (server SSE relay)
-  const esRef = useRef<EventSource | null>(null);
-  const lastSseMsgAtRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (!quoteSymbols.length) return;
-
-    // close any existing stream
-    try {
-      esRef.current?.close();
-    } catch {}
-    esRef.current = null;
-
-    let alive = true;
-    setSseState('connecting');
-
-    // watchdog: if no message for 12s -> down
-    const watchdog = window.setInterval(() => {
-      if (!alive) return;
-      const last = lastSseMsgAtRef.current || 0;
-      if (last && Date.now() - last > 12_000) setSseState('down');
-    }, 3000);
-
-    const es = new EventSource(`/api/market/stocks/stream?symbols=${encodeURIComponent(quoteSymbols.join(','))}`);
-    esRef.current = es;
-
-    // seed once via snapshots (gives prevClose reliably)
-    (async () => {
-      try {
-        const resp: any = await fetchQuotesBatch(quoteSymbols);
-        if (!alive) return;
-
-        const dataMap: Record<string, any> =
-          resp?.data && typeof resp.data === 'object' ? (resp.data as Record<string, any>) : (resp as Record<string, any>);
-
-        setQuotes((prev) => {
-          const next = { ...prev };
-          for (const sym of quoteSymbols) {
-            const key = String(sym || '').toUpperCase();
-            const q: any = dataMap?.[key] || dataMap?.[sym] || null;
-            if (!q) continue;
-
-            const price = n(q?.price ?? q?.close ?? q?.last ?? q?.c, 0);
-            if (!price) continue;
-
-            const prevClose =
-              n(q?.previous_close, 0) ||
-              n(q?.prev_close, 0) ||
-              n(q?.prevClose, 0) ||
-              prevCloseRef.current[key] ||
-              next[key]?.prevClose ||
-              undefined;
-
-            if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
-
-            const pctRaw =
-              q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? q?.changePercent24h ?? undefined;
-            const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
-
-            next[key] = {
-              symbol: key,
-              price,
-              bid: n(q?.bid, 0) || price * 0.9999,
-              ask: n(q?.ask, 0) || price * 1.0001,
-              changePercent24h: pct,
-              prevClose,
-              ts: Date.now(),
-            };
-
-            try {
-              updateStockPositionPrice(key, price);
-            } catch {}
-
-            // ticks cache for candle fallback
-            try {
-              const tickKey = `${SS_PREFIX}:ticks:${key}`;
-              const prevTicks = ssGet<Tick[]>(tickKey) || [];
-              ssSet(tickKey, [...prevTicks, { t: Date.now(), p: price }].slice(-900));
-            } catch {}
-          }
-          return next;
-        });
-      } catch {
-        // ignore
-      }
-    })();
-
-    es.onopen = () => {
-      if (!alive) return;
-      setSseState('connecting');
-    };
-
-    es.onmessage = (ev) => {
-      if (!alive) return;
-      lastSseMsgAtRef.current = Date.now();
-
-      const m = JSON.parse(ev.data || '{}');
-
-      if (m?.type === 'status') {
-        setSseState(m?.state === 'live' ? 'live' : m?.state === 'connecting' ? 'connecting' : 'down');
-        return;
-      }
-
-      if (m?.type === 'ping') {
-        // keepalive
-        return;
-      }
-
-      const sym = String(m?.symbol || '').toUpperCase();
-      if (!sym) return;
-
-      setQuotes((prev) => {
-        const cur = prev[sym] || { symbol: sym, price: 0, bid: 0, ask: 0, ts: 0, changePercent24h: 0 };
-
-        let price = cur.price;
-        let bid = cur.bid;
-        let ask = cur.ask;
-
-        if (m?.type === 'trade') price = n(m?.price, cur.price);
-        if (m?.type === 'quote') {
-          bid = n(m?.bid, cur.bid);
-          ask = n(m?.ask, cur.ask);
-        }
-
-        if (!bid && price) bid = price * 0.9999;
-        if (!ask && price) ask = price * 1.0001;
-
-        const prevClose = cur.prevClose ?? prevCloseRef.current[sym] ?? undefined;
-        const pct = deriveChangePercent(price, prevClose);
-
-        const next = {
-          ...cur,
-          symbol: sym,
-          price,
-          bid,
-          ask,
-          changePercent24h: Number.isFinite(pct) ? pct : cur.changePercent24h,
-          prevClose,
-          ts: Date.now(),
-        };
-
-        try {
-          updateStockPositionPrice(sym, next.price);
-        } catch {}
-
-        // ticks cache for candle fallback
-        try {
-          if (next.price > 0) {
-            const tickKey = `${SS_PREFIX}:ticks:${sym}`;
-            const prevTicks = ssGet<Tick[]>(tickKey) || [];
-            ssSet(tickKey, [...prevTicks, { t: Date.now(), p: next.price }].slice(-900));
-          }
-        } catch {}
-
-        return { ...prev, [sym]: next };
-      });
-    };
-
-    es.onerror = () => {
-      if (!alive) return;
-      setSseState('down');
-      try {
-        es.close();
-      } catch {}
-    };
-
-    return () => {
-      alive = false;
-      window.clearInterval(watchdog);
-      try {
-        es.close();
-      } catch {}
-    };
-  }, [pollingKey, quoteSymbols, updateStockPositionPrice]);
-
-  // ---- Candles with seed + tail + ALWAYS-CHART fallback
+  // ---- Candles state + refs (fix stale closure)
   const [candles, setCandles] = useState<Candle[]>([]);
+  const candlesRef = useRef<Candle[]>([]);
+  useEffect(() => {
+    candlesRef.current = candles;
+  }, [candles]);
+
   const [loadingChart, setLoadingChart] = useState(false);
   const [candlesUpdatedAt, setCandlesUpdatedAt] = useState<number>(0);
   const [candlesStale, setCandlesStale] = useState<boolean>(false);
 
   const live = quotes[selectedSymbol];
 
+  // ---- Poll quotes (works even if SSE route doesn't exist)
+  useEffect(() => {
+    if (!quoteSymbols.length) return;
+
+    let alive = true;
+    setPriceState('connecting');
+
+    const intervalMs = tfToMs(chartTimeframe);
+
+    const upsertTicks = (sym: string, price: number) => {
+      try {
+        if (price <= 0) return;
+        const tickKey = `${SS_PREFIX}:ticks:${sym}`;
+        const prevTicks = ssGet<Tick[]>(tickKey) || [];
+        ssSet(tickKey, [...prevTicks, { t: Date.now(), p: price }].slice(-900));
+      } catch {}
+    };
+
+    const pollOnce = async () => {
+      if (!alive) return;
+      if (!quoteSymbols.length) return;
+      if (Date.now() < pauseUntilRef.current) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
+
+      try {
+        const dataMap = (await apiFetchQuotesBatch(quoteSymbols)) as Record<string, any>;
+        if (!alive) return;
+
+        const now = Date.now();
+        lastQuoteAtRef.current = now;
+
+        const nextQuotes: Record<string, LiveQuote> = {};
+
+        for (const symRaw of quoteSymbols) {
+          const sym = String(symRaw || '').toUpperCase();
+          const q = dataMap?.[sym];
+          if (!q) continue;
+
+          const price = n(q?.price, 0);
+          if (!price) continue;
+
+          const prevClose =
+            n(q?.prevClose, 0) ||
+            n(q?.prev_close, 0) ||
+            prevCloseRef.current[sym] ||
+            undefined;
+
+          if (prevClose && !prevCloseRef.current[sym]) prevCloseRef.current[sym] = prevClose;
+
+          const bid = n(q?.bid, 0) || price * 0.9999;
+          const ask = n(q?.ask, 0) || price * 1.0001;
+
+          const pct = Number.isFinite(n(q?.changePercent24h, NaN))
+            ? n(q?.changePercent24h, 0)
+            : deriveChangePercent(price, prevClose);
+
+          nextQuotes[sym] = {
+            symbol: sym,
+            price,
+            bid,
+            ask,
+            prevClose,
+            changePercent24h: pct,
+            ts: now,
+          };
+
+          // update holdings prices
+          try {
+            updateStockPositionPrice(sym, price);
+          } catch {}
+
+          // tick cache
+          upsertTicks(sym, price);
+
+          // make chart “move” for selected symbol
+          if (sym === selectedSymbol) {
+            setCandles((prev) => {
+              const next = applyTickToCandles(prev, { t: now, p: price }, intervalMs, SEED_CANDLE_LIMIT);
+              candlesRef.current = next;
+              return next;
+            });
+          }
+        }
+
+        if (Object.keys(nextQuotes).length) {
+          setQuotes((prev) => ({ ...prev, ...nextQuotes }));
+          setPriceState('live');
+        } else {
+          setPriceState((s) => (s === 'connecting' ? 'connecting' : 'down'));
+        }
+      } catch (e: any) {
+        const msg = String(e?.message || e || '');
+        if (looksLikeQuota(msg) || Number(e?.status) === 429) {
+          pauseUntilRef.current = Date.now() + 60_000;
+          pushNotif({ type: 'error', message: userFacingMarketMessage(msg) }, 4500);
+        }
+        setPriceState('down');
+      }
+    };
+
+    // watchdog: if no successful poll for 12s => down
+    const watchdog = window.setInterval(() => {
+      if (!alive) return;
+      const last = lastQuoteAtRef.current || 0;
+      if (last && Date.now() - last > 12_000) setPriceState('down');
+    }, 3000);
+
+    // start
+    void pollOnce();
+    const iv = window.setInterval(pollOnce, 2500 + jitter(600));
+
+    const onVis = () => {
+      if (!alive) return;
+      if (!document.hidden) void pollOnce();
+    };
+    try {
+      document.addEventListener('visibilitychange', onVis);
+    } catch {}
+
+    return () => {
+      alive = false;
+      window.clearInterval(iv);
+      window.clearInterval(watchdog);
+      try {
+        document.removeEventListener('visibilitychange', onVis);
+      } catch {}
+    };
+  }, [pollingKey, quoteSymbols, selectedSymbol, chartTimeframe, updateStockPositionPrice]);
+
+  // ---- Candles with seed + tail + ALWAYS-CHART fallback
   const candleTimerRef = useRef<number | null>(null);
   const candleSeedKeyRef = useRef<string>('');
   const candleLastSeedAtRef = useRef<number>(0);
@@ -638,6 +654,7 @@ export default function StockTradingPage() {
     const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
     if (cached?.candles?.length) {
       setCandles(cached.candles);
+      candlesRef.current = cached.candles;
       setCandlesUpdatedAt(cached.ts || Date.now());
       setCandlesStale(true);
     } else {
@@ -645,12 +662,14 @@ export default function StockTradingPage() {
       const built = buildCandlesFromTicks(ticks, intervalMs, SEED_CANDLE_LIMIT);
       if (built.length) {
         setCandles(built);
+        candlesRef.current = built;
         setCandlesUpdatedAt(Date.now());
         setCandlesStale(true);
       } else {
-        const seedPrice = live?.price ?? selectedAsset?.price ?? 100;
+        const seedPrice = quotes[selectedSymbol]?.price ?? selectedAsset?.price ?? 100;
         const synth = generateSyntheticCandles(seedPrice, intervalMs, SEED_CANDLE_LIMIT, seedKey);
         setCandles(synth);
+        candlesRef.current = synth;
         setCandlesUpdatedAt(Date.now());
         setCandlesStale(true);
       }
@@ -674,10 +693,9 @@ export default function StockTradingPage() {
           now - candleLastSeedAtRef.current > RESEED_EVERY_MS;
 
         const limit = needsSeed ? SEED_CANDLE_LIMIT : TAIL_CANDLE_LIMIT;
-
         setLoadingChart(needsSeed);
 
-        const raw: any = await fetchCandles(selectedSymbol, intervalStr, limit);
+        const raw: any = await apiFetchCandles(selectedSymbol, intervalStr, limit);
 
         if (!alive) return;
         if (reqId !== candleReqIdRef.current) return;
@@ -693,15 +711,19 @@ export default function StockTradingPage() {
             c: n(c?.close ?? c?.c, 0),
             v: c?.volume != null ? n(c?.volume, undefined as any) : undefined,
           }))
-          .filter((x) => x.o > 0 && x.h > 0 && x.l > 0 && x.c > 0);
+          .filter((x) => x.o > 0 && x.h > 0 && x.l > 0 && x.c > 0)
+          .sort((a, b) => a.t - b.t);
 
         if (!out.length) {
           setCandlesStale(true);
           return;
         }
 
-        const merged = needsSeed ? out : mergeCandles(candles, out, SEED_CANDLE_LIMIT);
+        // ✅ FIX: use candlesRef to avoid stale closure
+        const merged = needsSeed ? out : mergeCandles(candlesRef.current, out, SEED_CANDLE_LIMIT);
+
         setCandles(merged);
+        candlesRef.current = merged;
 
         const ts = Date.now();
         ssSet(cacheKey, { ts, candles: merged });
@@ -719,7 +741,7 @@ export default function StockTradingPage() {
 
         setCandlesStale(true);
 
-        if (looksLikeQuota(msg)) {
+        if (looksLikeQuota(msg) || Number(e?.status) === 429) {
           pauseUntilRef.current = Date.now() + 90_000;
           pushNotif({ type: 'error', message: userFacingMarketMessage(msg) }, 4500);
         }
@@ -757,8 +779,8 @@ export default function StockTradingPage() {
         document.removeEventListener('visibilitychange', onVis);
       } catch {}
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSymbol, chartTimeframe, live?.price, selectedAsset?.price]);
+    // ✅ IMPORTANT: do NOT include live?.price here (it resets everything)
+  }, [selectedSymbol, chartTimeframe]); // ✅ FIXED deps
 
   // ---- Chart sizing
   const chartRef = useRef<HTMLDivElement>(null);
@@ -854,7 +876,6 @@ export default function StockTradingPage() {
     if ((result as any)?.success) {
       await refreshUser?.();
 
-      // ✅ trade history save (cast to any to avoid TS key mismatch)
       try {
         if ((user as any)?.id) {
           const state = useTradingAccountStore.getState();
@@ -904,7 +925,6 @@ export default function StockTradingPage() {
       const pnl = Number((result as any)?.realizedPnL ?? 0);
       await refreshUser?.();
 
-      // ✅ trade history upsert/close (cast to any)
       try {
         if ((user as any)?.id) {
           const after = useTradingAccountStore.getState().stockPositions as any[];
@@ -1046,21 +1066,21 @@ export default function StockTradingPage() {
             {/* Live status */}
             <div
               className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg ${
-                sseState === 'live' ? 'bg-profit/10' : 'bg-white/5'
+                priceState === 'live' ? 'bg-profit/10' : 'bg-white/5'
               }`}
               title={candlesStale ? 'Showing cached chart' : 'Live chart'}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
-                  sseState === 'live'
+                  priceState === 'live'
                     ? 'bg-profit animate-pulse'
-                    : sseState === 'connecting'
+                    : priceState === 'connecting'
                       ? 'bg-gold animate-pulse'
                       : 'bg-slate-500'
                 }`}
               />
-              <span className={`text-sm font-medium ${sseState === 'live' ? 'text-profit' : 'text-cream/70'}`}>
-                {sseState === 'live' ? 'Live' : sseState === 'connecting' ? 'Connecting' : 'Offline'}
+              <span className={`text-sm font-medium ${priceState === 'live' ? 'text-profit' : 'text-cream/70'}`}>
+                {priceState === 'live' ? 'Live' : priceState === 'connecting' ? 'Connecting' : 'Offline'}
               </span>
             </div>
           </div>
@@ -1104,7 +1124,8 @@ export default function StockTradingPage() {
               </div>
               <div className="flex items-center gap-2">
                 <div className="hidden sm:block text-xs text-cream/40">
-                  {candlesStale ? 'Cached' : 'Live'} {candlesUpdatedAt ? `· ${new Date(candlesUpdatedAt).toLocaleTimeString()}` : ''}
+                  {candlesStale ? 'Cached' : 'Live'}{' '}
+                  {candlesUpdatedAt ? `· ${new Date(candlesUpdatedAt).toLocaleTimeString()}` : ''}
                 </div>
                 <div className="flex items-center gap-1">
                   <button
@@ -1138,10 +1159,24 @@ export default function StockTradingPage() {
               <svg className="w-full h-full block" viewBox={`0 0 ${chart.w} ${chart.h}`} preserveAspectRatio="xMidYMid meet">
                 {/* grid */}
                 {[...Array(8)].map((_, i) => (
-                  <line key={`h-${i}`} x1="0" y1={i * (chart.h / 8)} x2={chart.w} y2={i * (chart.h / 8)} stroke="rgba(255,255,255,0.05)" />
+                  <line
+                    key={`h-${i}`}
+                    x1="0"
+                    y1={i * (chart.h / 8)}
+                    x2={chart.w}
+                    y2={i * (chart.h / 8)}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
                 ))}
                 {[...Array(16)].map((_, i) => (
-                  <line key={`v-${i}`} x1={i * (chart.w / 16)} y1="0" x2={i * (chart.w / 16)} y2={chart.h} stroke="rgba(255,255,255,0.05)" />
+                  <line
+                    key={`v-${i}`}
+                    x1={i * (chart.w / 16)}
+                    y1="0"
+                    x2={i * (chart.w / 16)}
+                    y2={chart.h}
+                    stroke="rgba(255,255,255,0.05)"
+                  />
                 ))}
 
                 {/* candles */}
