@@ -1028,8 +1028,7 @@ export default function StockTradingPage() {
               side: 'buy',
               quantity: still.qty,
               entryPrice: still.avgEntry ?? 0,
-              status: 'active',
-              updatedAt: new Date().toISOString(),
+      
               notes: JSON.stringify({ model: 'spot_hold', partial: true }),
             }).catch(() => {});
           } else {
