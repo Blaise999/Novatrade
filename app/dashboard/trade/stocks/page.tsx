@@ -972,7 +972,7 @@ export default function StockTradingPage() {
               amount: pos.qty * safeAsk,
               entryPrice: pos.avgEntry ?? safeAsk,
               leverage: 1,
-              status: 'active',
+          
               openedAt: new Date().toISOString(),
               notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
             }).catch(() => {});
