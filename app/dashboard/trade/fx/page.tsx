@@ -1,17 +1,10 @@
 // app/dashboard/trade/fx/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase/client';
 import { useStore } from '@/lib/supabase/store-supabase';
-import {
-  RefreshCw,
-  TrendingUp,
-  TrendingDown,
-  History,
-  CandlestickChart,
-  AlertTriangle,
-} from 'lucide-react';
+import { RefreshCw, TrendingUp, TrendingDown, History, CandlestickChart, AlertTriangle } from 'lucide-react';
 
 type Mode = 'active' | 'history';
 type TF = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
@@ -118,7 +111,7 @@ const FX_PAIRS = [
 
 const MULTIPLIERS = [10, 25, 50, 100, 200, 500, 1000] as const;
 
-// poll baselines (you can bump these higher to save more)
+// poll baselines (safe on budgets)
 const TIMEFRAMES: { label: string; value: TF; pollMs: number }[] = [
   { label: '1m', value: '1m', pollMs: 12000 },
   { label: '5m', value: '5m', pollMs: 15000 },
@@ -181,9 +174,7 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
   const notionalFromDb = clampNum(row.amount, 0);
 
   let stake =
-    clampNum(row.margin_used, 0) > 0
-      ? clampNum(row.margin_used, 0)
-      : clampNum(row.investment, 0);
+    clampNum(row.margin_used, 0) > 0 ? clampNum(row.margin_used, 0) : clampNum(row.investment, 0);
 
   if (!(stake > 0) && isFxMargin && notionalFromDb > 0 && leverage > 0) {
     stake = notionalFromDb / leverage;
@@ -211,9 +202,7 @@ function dbRowToUi(row: TradeRow): FxUiTrade {
   const exposure = isFxMargin ? notional : stake * clampNum(row.multiplier, 1);
 
   const calc =
-    entryPrice > 0
-      ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice)
-      : 0;
+    entryPrice > 0 ? directionInt * exposure * ((currentPrice - entryPrice) / entryPrice) : 0;
 
   const pnl = pnlFromDb !== 0 ? pnlFromDb : calc;
   const pnlPercent = stake > 0 ? (pnl / stake) * 100 : 0;
@@ -370,9 +359,7 @@ function ssSet(key: string, value: any) {
   try {
     if (typeof window === 'undefined') return;
     window.sessionStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 function tfToMs(tf: TF) {
@@ -445,13 +432,7 @@ function buildCandlesFromTicksFx(ticks: Tick[], intervalMs: number, count: numbe
 
     if (!bucket.length) {
       const p = lastClose;
-      out.push({
-        time: Math.floor(b0 / 1000),
-        open: p,
-        high: p,
-        low: p,
-        close: p,
-      });
+      out.push({ time: Math.floor(b0 / 1000), open: p, high: p, low: p, close: p });
       continue;
     }
 
@@ -465,13 +446,7 @@ function buildCandlesFromTicksFx(ticks: Tick[], intervalMs: number, count: numbe
     }
 
     lastClose = c;
-    out.push({
-      time: Math.floor(b0 / 1000),
-      open: o,
-      high: h,
-      low: l,
-      close: c,
-    });
+    out.push({ time: Math.floor(b0 / 1000), open: o, high: h, low: l, close: c });
   }
 
   return out.filter((x) => x.open > 0 && x.high > 0 && x.low > 0 && x.close > 0);
@@ -500,13 +475,7 @@ function generateSyntheticCandlesFx(seedPrice: number, intervalMs: number, count
     const h = Math.max(o, c) + wick * rng();
     const l = Math.max(0.00001, Math.min(o, c) - wick * rng());
 
-    out.push({
-      time: Math.floor(t / 1000),
-      open: o,
-      high: h,
-      low: l,
-      close: c,
-    });
+    out.push({ time: Math.floor(t / 1000), open: o, high: h, low: l, close: c });
     last = c;
   }
 
@@ -520,13 +489,11 @@ function pushFxTick(pair: string, price: number) {
     const prev = ssGet<Tick[]>(key) || [];
     const next = [...prev, { t: Date.now(), p: price }].slice(-2400);
     ssSet(key, next);
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 // ===============================
-// candles fetch (429 + cache aware)
+// OANDA candles endpoint (cache/budget aware)
 // ===============================
 class CandlesError extends Error {
   status: number;
@@ -541,20 +508,21 @@ class CandlesError extends Error {
 
 type CandlesFetchResult = {
   candles: Candle[];
-  cache: string | null; // HIT|MISS|STALE|DEDUPED (from server)
+  cache: string | null; // HIT|MISS|STALE|DEDUPED etc
   stale?: boolean;
-  warning?: string;
 };
 
 async function fetchFxCandles(
   display: string,
   tf: TF,
   limit = 260,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  fresh?: boolean
 ): Promise<CandlesFetchResult> {
   const url =
     `/api/market/fx/candles?display=${encodeURIComponent(display)}` +
-    `&tf=${encodeURIComponent(tf)}&limit=${limit}`;
+    `&tf=${encodeURIComponent(tf)}&limit=${limit}` +
+    (fresh ? `&fresh=1` : ``);
 
   const res = await fetch(url, { method: 'GET', cache: 'no-store', signal });
 
@@ -569,11 +537,7 @@ async function fetchFxCandles(
   }
 
   if (res.ok && json && json.ok === false) {
-    throw new CandlesError(json?.error || 'Candles failed (ok:false)', 502);
-  }
-
-  if (res.status === 403) {
-    throw new CandlesError(json?.error || json?.message || 'FX candles access denied', 403);
+    throw new CandlesError(json?.code || json?.error || 'Candles failed (ok:false)', 502);
   }
 
   if (res.status === 429) {
@@ -581,15 +545,14 @@ async function fetchFxCandles(
     const raSecFromHeader = raHeader ? clampNum(raHeader, 0) : 0;
     const raSecFromBody = json?.retryAfterSec != null ? clampNum(json.retryAfterSec, 0) : 0;
     const raSec = Math.max(raSecFromHeader, raSecFromBody, 5);
-    throw new CandlesError(
-      json?.error || 'Rate limited (candles).',
-      429,
-      Math.max(1000, raSec * 1000)
-    );
+    throw new CandlesError(json?.code || 'Rate limited (candles).', 429, Math.max(1000, raSec * 1000));
   }
 
   if (!res.ok) {
-    throw new CandlesError(json?.error || json?.message || `Candles failed (${res.status})`, res.status);
+    throw new CandlesError(
+      json?.code || json?.error || json?.message || `Candles failed (${res.status})`,
+      res.status
+    );
   }
 
   const rows: any[] = Array.isArray(json?.candles) ? json.candles : [];
@@ -610,7 +573,6 @@ async function fetchFxCandles(
     const high = clampNum((r.high ?? r.h) as any, NaN);
     const low = clampNum((r.low ?? r.l) as any, NaN);
     const close = clampNum((r.close ?? r.c) as any, NaN);
-
     const volRaw = r.volume ?? r.v;
     const vol = volRaw != null ? clampNum(volRaw, 0) : undefined;
 
@@ -622,15 +584,45 @@ async function fetchFxCandles(
   });
 
   return {
-    candles: mapped
-      .filter((x): x is Candle => x !== null)
-      .sort((a, b) => a.time - b.time),
+    candles: mapped.filter((x): x is Candle => x !== null).sort((a, b) => a.time - b.time),
     cache: cacheHeader,
     stale: !!json?.stale,
-    warning: typeof json?.warning === 'string' ? json.warning : undefined,
   };
 }
 
+// ===============================
+// market-gateway WS (OANDA ticks)
+// ===============================
+function displayToOandaInstrument(display: string): string {
+  const d = String(display || '').trim().toUpperCase();
+  if (!d) return '';
+  const clean = d.startsWith('OANDA:') ? d.slice(6) : d;
+  return clean.replace(/\s+/g, '').split('/').join('_').split('-').join('_');
+}
+
+function getGatewayUrl(): string {
+  const envUrl = process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL;
+  if (envUrl) return envUrl;
+
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname || 'localhost';
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${host}:8787`;
+  }
+
+  return 'ws://localhost:8787';
+}
+
+type GatewayMsg =
+  | { type: 'hello' }
+  | { type: 'fx_tick'; instrument: string; bid?: number; ask?: number; mid?: number; ts?: number }
+  | { type: 'stock_tick' }
+  | { type: 'subscribed'; stocks?: string[]; fx?: string[] }
+  | Record<string, any>;
+
+// ===============================
+// Component
+// ===============================
 export default function FXTradePage() {
   const { refreshUser } = useStore();
 
@@ -640,6 +632,7 @@ export default function FXTradePage() {
   const [error, setError] = useState<string | null>(null);
 
   const [balance, setBalance] = useState<number>(0);
+
   const [trades, setTrades] = useState<FxUiTrade[]>([]);
   const tradesRef = useRef<FxUiTrade[]>([]);
   useEffect(() => {
@@ -659,8 +652,20 @@ export default function FXTradePage() {
 
   // chart
   const [tf, setTf] = useState<TF>('5m');
-  const [chartNote, setChartNote] = useState<string | null>(null); // ✅ kept, but NOT rendered in UI
+  const [chartNote, setChartNote] = useState<string | null>(null); // console only
   const [lastClose, setLastClose] = useState<number | null>(null);
+
+  // ---- HOT refs (avoid stale closures => smoother + correct)
+  const assetRef = useRef(asset);
+  const tfRef = useRef(tf);
+  const marketEditingRef = useRef(false);
+
+  useEffect(() => {
+    assetRef.current = asset;
+  }, [asset]);
+  useEffect(() => {
+    tfRef.current = tf;
+  }, [tf]);
 
   // chart refs
   const chartWrapRef = useRef<HTMLDivElement | null>(null);
@@ -669,6 +674,9 @@ export default function FXTradePage() {
   const resizeObsRef = useRef<ResizeObserver | null>(null);
   const chartAbortRef = useRef<AbortController | null>(null);
   const chartInFlightRef = useRef(false);
+
+  // keep last candle for live updates from WS
+  const lastCandleRef = useRef<Candle | null>(null);
 
   // polling refs
   const pollTimeoutRef = useRef<number | null>(null);
@@ -679,13 +687,13 @@ export default function FXTradePage() {
   const lastPushAtRef = useRef<number>(0);
   const lastPushedPriceRef = useRef<number | null>(null);
 
-  // token cache (stops wasting supabase calls)
+  // token cache
   const tokenCacheRef = useRef<{ token: string | null; expMs: number }>({ token: null, expMs: 0 });
 
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
 
-  // ✅ Note removed from UI, but keep visibility in devtools
+  // debug chart note (console only)
   useEffect(() => {
     if (!chartNote) return;
     // eslint-disable-next-line no-console
@@ -696,9 +704,7 @@ export default function FXTradePage() {
     if (!canUseSupabase) return null;
 
     const cached = tokenCacheRef.current;
-    if (cached.token && Date.now() < cached.expMs - 60_000) {
-      return cached.token;
-    }
+    if (cached.token && Date.now() < cached.expMs - 60_000) return cached.token;
 
     const setCache = (tok: string) => {
       const payload = decodeJwtPayload(tok);
@@ -738,13 +744,11 @@ export default function FXTradePage() {
 
   const pushPriceToServer = async (pair: string, px: number) => {
     try {
-      // ✅ only push if there is an ACTIVE trade for this pair
       const hasActive = tradesRef.current.some((t) => t.status === 'active' && t.asset === pair);
       if (!hasActive) return;
 
       const now = Date.now();
       const minPushMs = 8000;
-
       if (now - lastPushAtRef.current < minPushMs) return;
 
       const last = lastPushedPriceRef.current;
@@ -762,9 +766,7 @@ export default function FXTradePage() {
         body: JSON.stringify({ action: 'mark_price', asset: pair, price: px }),
         cache: 'no-store',
       });
-    } catch {
-      // silent
-    }
+    } catch {}
   };
 
   const loadTrades = async (nextMode: Mode = mode) => {
@@ -797,10 +799,12 @@ export default function FXTradePage() {
 
       const rows: TradeRow[] = Array.isArray(json?.trades) ? (json.trades as TradeRow[]) : [];
       const fxRows = rows.filter((r) => String(r.market_type ?? '').toLowerCase() === 'fx');
-
       const parsed = fxRows.map(dbRowToUi).filter((t) => !!t.asset);
 
-      setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
+      // keep UI snappy (don’t block click interactions)
+      startTransition(() => {
+        setTrades(nextMode === 'active' ? parsed.filter((t) => t.status === 'active') : parsed);
+      });
 
       try {
         await refreshUser();
@@ -895,9 +899,69 @@ export default function FXTradePage() {
       candleSeriesRef.current?.setData?.(data);
       chartApiRef.current?.timeScale?.()?.fitContent?.();
     } catch {}
+
+    lastCandleRef.current = candles.length ? candles[candles.length - 1] : null;
   };
 
-  const loadChart = async () => {
+  // live tick -> update chart last candle (no rerender)
+  const applyLiveTickToChart = (price: number, nowMs: number) => {
+    const series = candleSeriesRef.current;
+    if (!series || !Number.isFinite(price) || price <= 0) return;
+
+    const intervalMs = tfToMs(tfRef.current);
+    const bucketStartMs = Math.floor(nowMs / intervalMs) * intervalMs;
+    const bucketTimeSec = Math.floor(bucketStartMs / 1000);
+
+    const prev = lastCandleRef.current;
+    if (!prev || prev.time <= 0) return;
+
+    if (prev.time === bucketTimeSec) {
+      const next: Candle = {
+        time: prev.time,
+        open: prev.open,
+        high: Math.max(prev.high, price),
+        low: Math.min(prev.low, price),
+        close: price,
+      };
+      lastCandleRef.current = next;
+      try {
+        series.update?.({ time: next.time as any, open: next.open, high: next.high, low: next.low, close: next.close });
+      } catch {}
+      return;
+    }
+
+    if (bucketTimeSec > prev.time) {
+      const next: Candle = {
+        time: bucketTimeSec,
+        open: prev.close,
+        high: Math.max(prev.close, price),
+        low: Math.min(prev.close, price),
+        close: price,
+      };
+      lastCandleRef.current = next;
+      try {
+        series.update?.({ time: next.time as any, open: next.open, high: next.high, low: next.low, close: next.close });
+      } catch {}
+    }
+  };
+
+  const setLivePriceFast = (pair: string, px: number) => {
+    // keep header + chart snappy; avoid killing typing in input
+    startTransition(() => {
+      setLastClose(px);
+      if (!marketEditingRef.current) setMarketPrice(px.toFixed(5));
+
+      // Only update trades if we actually have an active trade on this pair
+      const hasActive = tradesRef.current.some((t) => t.status === 'active' && t.asset === pair);
+      if (!hasActive) return;
+
+      setTrades((prev) =>
+        prev.map((t) => (t.status === 'active' && t.asset === pair ? { ...t, currentPrice: px } : t))
+      );
+    });
+  };
+
+  const loadChart = async (opts?: { fresh?: boolean }) => {
     if (unmountedRef.current) return;
 
     setChartNote(null);
@@ -914,12 +978,16 @@ export default function FXTradePage() {
     const ac = new AbortController();
     chartAbortRef.current = ac;
 
-    const intervalMs = tfToMs(tf);
+    const intervalMs = tfToMs(tfRef.current);
     const count = 260;
-    const cacheKey = `${SS_PREFIX}:candles:${asset}:${tf}`;
-    const ticksKey = `${SS_PREFIX}:ticks:${asset}`;
 
-    // ✅ 1) INSTANT fallback: cache / ticks / synthetic
+    const curAsset = assetRef.current;
+    const curTf = tfRef.current;
+
+    const cacheKey = `${SS_PREFIX}:candles:${curAsset}:${curTf}`;
+    const ticksKey = `${SS_PREFIX}:ticks:${curAsset}`;
+
+    // 1) instant fallback: cache / ticks / synth
     try {
       await initChartIfNeeded();
 
@@ -929,15 +997,12 @@ export default function FXTradePage() {
       if (cached?.candles?.length) {
         setChartData(cached.candles);
         setChartNote('Using cached candles.');
+
         const lc = cached.candles[cached.candles.length - 1]?.close ?? null;
-        setLastClose(lc);
         if (lc && lc > 0) {
-          setMarketPrice(lc.toFixed(5));
-          setTrades((prev) =>
-            prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
-          );
-          pushFxTick(asset, lc);
-          void pushPriceToServer(asset, lc);
+          setLivePriceFast(curAsset, lc);
+          pushFxTick(curAsset, lc);
+          void pushPriceToServer(curAsset, lc);
         }
       } else {
         const ticks = ssGet<Tick[]>(ticksKey) || [];
@@ -945,74 +1010,56 @@ export default function FXTradePage() {
         if (built.length) {
           setChartData(built);
           setChartNote('Using locally built candles.');
+
           const lc = built[built.length - 1]?.close ?? null;
-          setLastClose(lc);
           if (lc && lc > 0) {
-            setMarketPrice(lc.toFixed(5));
-            setTrades((prev) =>
-              prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
-            );
-            void pushPriceToServer(asset, lc);
+            setLivePriceFast(curAsset, lc);
+            void pushPriceToServer(curAsset, lc);
           }
         } else {
           const seed = clampNum(lastClose ?? marketPrice, 1.0);
-          const synth = generateSyntheticCandlesFx(seed, intervalMs, Math.min(220, count), `${asset}:${tf}`);
+          const synth = generateSyntheticCandlesFx(seed, intervalMs, Math.min(220, count), `${curAsset}:${curTf}`);
           setChartData(synth);
           setChartNote('Market data unavailable — showing simulated chart.');
+
           const lc = synth[synth.length - 1]?.close ?? null;
-          setLastClose(lc);
-          if (lc && lc > 0) setMarketPrice(lc.toFixed(5));
+          if (lc && lc > 0 && !marketEditingRef.current) setMarketPrice(lc.toFixed(5));
         }
       }
 
-      // ✅ 2) Skip network if cache is fresh enough
+      // 2) skip network if cache is still “fresh”
       const cached2 = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
-      const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
+      const baseMs = TIMEFRAMES.find((x) => x.value === curTf)?.pollMs ?? 15000;
       const freshMs = Math.max(20_000, Math.min(5 * 60_000, baseMs * 2));
       const isFresh = !!cached2?.ts && now - cached2.ts < freshMs;
 
-      if (isFresh) {
+      if (isFresh && !opts?.fresh) {
         chartInFlightRef.current = false;
         return;
       }
-    } catch {
-      // if init fails, fall through to fetch attempt (won't crash UI)
-    }
+    } catch {}
 
-    // ✅ 3) Network fetch (best effort), but never clear chart on fail
+    // 3) best-effort fetch (never clear chart on fail)
     try {
-      const result = await fetchFxCandles(asset, tf, 260, ac.signal);
+      const result = await fetchFxCandles(curAsset, curTf, 260, ac.signal, !!opts?.fresh);
       if (ac.signal.aborted || unmountedRef.current) return;
 
       retryAfterMsRef.current = 0;
 
-      if (result.cache === 'STALE' || result.stale) {
-        setChartNote(result.warning || 'Using cached candles (rate-limited protection).');
-      }
-
       const candles = result.candles;
       if (!candles.length) {
         setChartNote('No candles returned.');
-        setLastClose(null);
         return;
       }
 
-      // write cache
-      ssSet(`${SS_PREFIX}:candles:${asset}:${tf}`, { ts: Date.now(), candles });
-
+      ssSet(cacheKey, { ts: Date.now(), candles });
       setChartData(candles);
 
       const lc = candles[candles.length - 1]?.close ?? null;
-      setLastClose(lc);
-
       if (lc != null && lc > 0) {
-        setMarketPrice(lc.toFixed(5));
-        setTrades((prev) =>
-          prev.map((t) => (t.status === 'active' && t.asset === asset ? { ...t, currentPrice: lc } : t))
-        );
-
-        pushFxTick(asset, lc);
-        void pushPriceToServer(asset, lc);
+        setLivePriceFast(curAsset, lc);
+        pushFxTick(curAsset, lc);
+        void pushPriceToServer(curAsset, lc);
       }
     } catch (e: any) {
       if (e?.name === 'CandlesError' && typeof e?.retryAfterMs === 'number' && e.retryAfterMs > 0) {
@@ -1021,18 +1068,171 @@ export default function FXTradePage() {
       } else {
         setChartNote(e?.message || 'Failed to load chart');
       }
-      // ✅ do nothing else: chart stays on cached/built/synth
     } finally {
       chartInFlightRef.current = false;
     }
   };
 
-  // mount
+  // ===============================
+  // market-gateway live ticks (WS)
+  // ===============================
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsWantedInstrumentRef = useRef<string>('');
+  const wsConnectedRef = useRef(false);
+  const wsRetryTimerRef = useRef<number | null>(null);
+  const wsBackoffRef = useRef<number>(350);
+
+  const liveUiRafRef = useRef<number | null>(null);
+  const liveLastUiMsRef = useRef<number>(0);
+  const liveLastPxRef = useRef<number | null>(null);
+
+  const clearWsRetry = () => {
+    try {
+      if (wsRetryTimerRef.current) window.clearTimeout(wsRetryTimerRef.current);
+    } catch {}
+    wsRetryTimerRef.current = null;
+  };
+
+  const closeWs = () => {
+    clearWsRetry();
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+    wsConnectedRef.current = false;
+  };
+
+  const wsSend = (obj: any) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify(obj));
+    } catch {}
+  };
+
+  const scheduleWsReconnect = () => {
+    if (unmountedRef.current) return;
+    clearWsRetry();
+    const delay = Math.min(5000, wsBackoffRef.current + Math.floor(Math.random() * 250));
+    wsBackoffRef.current = Math.min(5000, Math.floor(wsBackoffRef.current * 1.35));
+    wsRetryTimerRef.current = window.setTimeout(() => {
+      void connectWs();
+    }, delay);
+  };
+
+  const subscribeInstrument = (instrument: string) => {
+    if (!instrument) return;
+
+    const prev = wsWantedInstrumentRef.current;
+    wsWantedInstrumentRef.current = instrument;
+
+    if (wsConnectedRef.current) {
+      if (prev && prev !== instrument) wsSend({ action: 'unsubscribe', fx: [prev] });
+      wsSend({ action: 'subscribe', fx: [instrument] });
+    }
+  };
+
+  const connectWs = async () => {
+    if (unmountedRef.current) return;
+
+    const existing = wsRef.current;
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
+
+    const url = getGatewayUrl();
+    try {
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        wsConnectedRef.current = true;
+        wsBackoffRef.current = 350;
+
+        const inst = wsWantedInstrumentRef.current;
+        if (inst) wsSend({ action: 'subscribe', fx: [inst] });
+      };
+
+      ws.onmessage = (ev) => {
+        let msg: GatewayMsg | null = null;
+        try {
+          msg = JSON.parse(String(ev.data || ''));
+        } catch {
+          msg = null;
+        }
+        if (!msg) return;
+
+        if ((msg as any)?.type === 'fx_tick') {
+          const m = msg as any;
+          const inst = String(m.instrument || '').toUpperCase();
+          const px = Number(m.mid);
+          if (!inst || !Number.isFinite(px) || px <= 0) return;
+
+          const wanted = wsWantedInstrumentRef.current;
+          if (wanted && inst !== wanted) return;
+
+          const pair = assetRef.current;
+          const nowMs = Date.now();
+
+          pushFxTick(pair, px);
+
+          // chart update is direct (no react render)
+          applyLiveTickToChart(px, nowMs);
+
+          // throttle React state updates (fast + smooth)
+          liveLastPxRef.current = px;
+
+          const doUi = () => {
+            liveUiRafRef.current = null;
+
+            const p = liveLastPxRef.current;
+            if (p == null) return;
+
+            const now = Date.now();
+            if (now - liveLastUiMsRef.current < 140) return;
+            liveLastUiMsRef.current = now;
+
+            setLivePriceFast(pair, p);
+            void pushPriceToServer(pair, p);
+          };
+
+          if (liveUiRafRef.current == null) {
+            liveUiRafRef.current = window.requestAnimationFrame(doUi);
+          }
+          return;
+        }
+      };
+
+      ws.onclose = () => {
+        wsConnectedRef.current = false;
+        wsRef.current = null;
+        scheduleWsReconnect();
+      };
+
+      ws.onerror = () => {
+        // onclose retries
+      };
+    } catch {
+      scheduleWsReconnect();
+    }
+  };
+
+  // keep WS subscribed to selected pair
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const inst = displayToOandaInstrument(asset); // EUR/USD -> EUR_USD
+    subscribeInstrument(inst);
+    void connectWs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset]);
+
+  // mount/unmount
   useEffect(() => {
     unmountedRef.current = false;
 
     void loadTrades('active');
     void refreshUser().catch(() => {});
+    void initChartIfNeeded();
+    // NOTE: polling effect below will call loadChart immediately (avoid duplicate on mount)
+    void connectWs();
 
     return () => {
       unmountedRef.current = true;
@@ -1040,6 +1240,7 @@ export default function FXTradePage() {
       try {
         if (pollTimeoutRef.current) window.clearTimeout(pollTimeoutRef.current);
       } catch {}
+      pollTimeoutRef.current = null;
 
       try {
         chartAbortRef.current?.abort();
@@ -1054,11 +1255,18 @@ export default function FXTradePage() {
       } catch {}
       chartApiRef.current = null;
       candleSeriesRef.current = null;
+
+      try {
+        if (liveUiRafRef.current != null) window.cancelAnimationFrame(liveUiRafRef.current);
+      } catch {}
+      liveUiRafRef.current = null;
+
+      closeWs();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // adaptive polling loop
+  // adaptive chart polling loop
   useEffect(() => {
     const baseMs = TIMEFRAMES.find((x) => x.value === tf)?.pollMs ?? 15000;
 
@@ -1070,7 +1278,6 @@ export default function FXTradePage() {
     };
 
     let cancelled = false;
-
     const jitter = () => Math.floor(Math.random() * 700);
 
     const tick = async () => {
@@ -1104,7 +1311,7 @@ export default function FXTradePage() {
       }
     };
 
-    void loadChart();
+    void loadChart(); // immediate
     clear();
     pollTimeoutRef.current = window.setTimeout(tick, baseMs + jitter());
 
@@ -1124,7 +1331,7 @@ export default function FXTradePage() {
 
   const onRefresh = async () => {
     await loadTrades(mode);
-    await loadChart();
+    await loadChart({ fresh: true });
     try {
       await refreshUser();
     } catch {}
@@ -1183,12 +1390,12 @@ export default function FXTradePage() {
       if (!res.ok || !json?.success) throw new Error(json?.error || `Trade open failed (${res.status})`);
 
       setBalance(clampNum(json?.balance ?? json?.balance_available ?? balance));
-
       await loadTrades(mode);
 
-      if (lastClose != null && lastClose > 0) {
-        pushFxTick(asset, lastClose);
-        void pushPriceToServer(asset, lastClose);
+      const lc = liveLastPxRef.current ?? lastClose;
+      if (lc != null && lc > 0) {
+        pushFxTick(asset, lc);
+        void pushPriceToServer(asset, lc);
       }
 
       try {
@@ -1265,7 +1472,6 @@ export default function FXTradePage() {
   const invNum = clampNum(investment, 0);
   const notionalPreview = invNum > 0 && multiplier > 0 ? invNum * multiplier : 0;
 
-  // ✅ “something cool” replacing the old balance card (still shows wallet, but as a live “pulse” pill)
   const tfLabel = TIMEFRAMES.find((x) => x.value === tf)?.label ?? tf;
 
   return (
@@ -1279,12 +1485,12 @@ export default function FXTradePage() {
             </div>
             <div>
               <div className="text-xl font-semibold">FX Trading</div>
-              <div className="text-xs text-white/60">Real-time chart + margin trading</div>
+              <div className="text-xs text-white/60">Live ticks (market-gateway) + OANDA candles</div>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {/* Live pulse pill (replaces the old balance card UI) */}
+            {/* Live pulse pill */}
             <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 flex items-center gap-3">
               <span className="relative flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/70" />
@@ -1375,8 +1581,6 @@ export default function FXTradePage() {
               </div>
             </div>
 
-            {/* ✅ Removed chartNote from UI completely (still logged in devtools via useEffect above) */}
-
             <div className="p-4">
               <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden">
                 <div ref={chartWrapRef} className="w-full h-[420px] sm:h-[520px] lg:h-[640px]" />
@@ -1453,6 +1657,12 @@ export default function FXTradePage() {
                 <input
                   value={marketPrice}
                   onChange={(e) => setMarketPrice(e.target.value)}
+                  onFocus={() => {
+                    marketEditingRef.current = true;
+                  }}
+                  onBlur={() => {
+                    marketEditingRef.current = false;
+                  }}
                   inputMode="decimal"
                   className="mt-1 w-full rounded-xl bg-black/30 border border-white/10 px-3 py-2 outline-none"
                   placeholder="1.00000"

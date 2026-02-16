@@ -28,7 +28,9 @@ import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 
 // ✅ Twelve Data helpers
-import { fetchCandles, fetchQuotesBatch } from '@/lib/market/twelve';
+// ✅ Alpaca helpers (server-proxied)
+import { fetchCandles, fetchQuotesBatch } from '@/lib/market/alpaca';
+
 
 type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
 const timeframes: Timeframe[] = ['1m', '5m', '15m', '1h', '4h', '1D'];
