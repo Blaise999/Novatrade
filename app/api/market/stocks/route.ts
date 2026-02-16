@@ -1,74 +1,117 @@
-// app/api/market/stocks/history/route.ts
-import { NextRequest } from "next/server";
+// server/ws.ts (Node server for Render)
+// npm i ws
+import http from 'http';
+import WebSocket, { WebSocketServer } from 'ws';
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+const PORT = Number(process.env.PORT || 8080);
 
-const FINNHUB_REST = "https://finnhub.io/api/v1";
+// Optional: basic origin allowlist (browser connects)
+const ALLOW_ORIGINS = (process.env.CORS_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// UI -> Finnhub resolution
-const RESOLUTION_MAP: Record<string, string> = {
-  "1m": "1",
-  "5m": "5",
-  "15m": "15",
-  "1h": "60",
-  "4h": "240",
-  "1D": "D",
+type ClientState = {
+  isAlive: boolean;
+  topics: Set<string>;
 };
 
-function defaultRangeSeconds(resolution: string) {
-  const now = Math.floor(Date.now() / 1000);
+const server = http.createServer((req, res) => {
+  // health endpoint
+  res.writeHead(200, { 'content-type': 'text/plain' });
+  res.end('ok');
+});
 
-  // intraday: last 7 days
-  if (["1", "5", "15", "30", "60", "240"].includes(resolution)) {
-    return { from: now - 60 * 60 * 24 * 7, to: now };
-  }
+const wss = new WebSocketServer({ server });
 
-  // daily/weekly/monthly: last 365 days
-  return { from: now - 60 * 60 * 24 * 365, to: now };
+function send(ws: WebSocket, obj: any) {
+  try {
+    ws.send(JSON.stringify(obj));
+  } catch {}
 }
 
-export async function GET(req: NextRequest) {
-  const token = process.env.FINNHUB_API_KEY;
-  if (!token) {
-    return new Response(JSON.stringify({ error: "Missing FINNHUB_API_KEY" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+wss.on('connection', (ws, req) => {
+  // If you want to restrict browser origins:
+  if (ALLOW_ORIGINS.length) {
+    const origin = String(req.headers.origin || '');
+    if (!ALLOW_ORIGINS.includes(origin)) {
+      try {
+        ws.close(1008, 'origin not allowed');
+      } catch {}
+      return;
+    }
   }
 
-  const { searchParams } = new URL(req.url);
-  const symbol = (searchParams.get("symbol") || "AAPL").toUpperCase();
+  (ws as any).__state = { isAlive: true, topics: new Set() } as ClientState;
 
-  // allow either tf=15m OR resolution=15m OR direct finnhub res like 15 / D
-  const tf = searchParams.get("tf") || searchParams.get("resolution") || "15m";
-  const resolution = RESOLUTION_MAP[tf] || tf;
+  // ✅ DO NOT CLOSE HERE
+  send(ws, { type: 'hello', ts: Date.now(), expects: ['subscribe'], pingEveryMs: 15000 });
 
-  const fromQ = Number(searchParams.get("from"));
-  const toQ = Number(searchParams.get("to"));
-
-  const { from, to } =
-    Number.isFinite(fromQ) && Number.isFinite(toQ) && fromQ > 0 && toQ > fromQ
-      ? { from: Math.floor(fromQ), to: Math.floor(toQ) }
-      : defaultRangeSeconds(resolution);
-
-  const url = new URL(`${FINNHUB_REST}/stock/candle`);
-  url.searchParams.set("symbol", symbol);
-  url.searchParams.set("resolution", resolution);
-  url.searchParams.set("from", String(from));
-  url.searchParams.set("to", String(to));
-
-  const headers = new Headers({ accept: "application/json" });
-  headers.set("X-Finnhub-Token", token);
-
-  const upstream = await fetch(url.toString(), { headers, cache: "no-store" });
-  const body = await upstream.text();
-
-  return new Response(body, {
-    status: upstream.status,
-    headers: {
-      "content-type": "application/json",
-      "cache-control": "no-store",
-    },
+  ws.on('pong', () => {
+    const st: ClientState = (ws as any).__state;
+    st.isAlive = true;
   });
-}
+
+  ws.on('message', (raw) => {
+    let msg: any = null;
+    try {
+      msg = JSON.parse(String(raw));
+    } catch {
+      msg = String(raw);
+    }
+
+    // allow string "ping"
+    if (msg === 'ping' || msg?.type === 'ping') {
+      send(ws, { type: 'pong', ts: Date.now() });
+      return;
+    }
+
+    // subscribe
+    if (msg?.type === 'subscribe') {
+      const st: ClientState = (ws as any).__state;
+      const topics: string[] = Array.isArray(msg?.topics) ? msg.topics : [];
+      topics.forEach((t) => st.topics.add(String(t)));
+
+      send(ws, { type: 'subscribed', topics: Array.from(st.topics) });
+
+      // TODO: start streaming data per topic here
+      return;
+    }
+
+    // auth (optional)
+    if (msg?.type === 'auth') {
+      // TODO validate token if you want
+      send(ws, { type: 'authed', ok: true });
+      return;
+    }
+
+    send(ws, { type: 'error', message: 'unknown message' });
+  });
+
+  ws.on('close', () => {
+    // cleanup per-connection if needed
+  });
+});
+
+// ✅ heartbeat: keeps proxies + render happy, terminates dead sockets
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    const st: ClientState = (ws as any).__state;
+    if (!st) return;
+
+    if (!st.isAlive) {
+      try {
+        ws.terminate();
+      } catch {}
+      return;
+    }
+
+    st.isAlive = false;
+    try {
+      ws.ping();
+    } catch {}
+  });
+}, 30_000);
+
+server.on('close', () => clearInterval(interval));
+
+server.listen(PORT, () => {
+  console.log(`WS server listening on :${PORT}`);
+});
