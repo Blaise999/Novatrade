@@ -13,6 +13,8 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
+import KYCGate from '@/components/KYCGate';
+
 type Mode = 'active' | 'history';
 type TF = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
 
@@ -639,10 +641,23 @@ type GatewayMsg =
   | { type: 'subscribed'; stocks?: string[]; fx?: string[] }
   | Record<string, any>;
 
-// ===============================
-// Component
-// ===============================
+/**
+ * ✅ KYC GATED WRAPPER:
+ * - Keeps your FX logic fully unchanged
+ * - Prevents WS/polling/hooks from mounting until KYC passes
+ */
 export default function FXTradePage() {
+  return (
+    <KYCGate action="trade FX">
+      <FXTradeInner />
+    </KYCGate>
+  );
+}
+
+// ===============================
+// Component (INNER) — your original page
+// ===============================
+function FXTradeInner() {
   const { refreshUser } = useStore();
 
   const [mode, setMode] = useState<Mode>('active');
