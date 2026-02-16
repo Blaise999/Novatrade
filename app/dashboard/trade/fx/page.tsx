@@ -111,7 +111,6 @@ const FX_PAIRS = [
 
 const MULTIPLIERS = [10, 25, 50, 100, 200, 500, 1000] as const;
 
-// poll baselines (safe on budgets)
 const TIMEFRAMES: { label: string; value: TF; pollMs: number }[] = [
   { label: '1m', value: '1m', pollMs: 12000 },
   { label: '5m', value: '5m', pollMs: 15000 },
@@ -600,7 +599,6 @@ function displayToOandaInstrument(display: string): string {
   return clean.replace(/\s+/g, '').split('/').join('_').split('-').join('_');
 }
 
-// ✅ FULL FIX: use NEXT_PUBLIC_MARKET_WS_URL (and NEVER default to :8787 in prod)
 function normalizeWsUrl(raw: string) {
   const s = String(raw || '').trim();
   if (!s) return '';
@@ -662,11 +660,18 @@ export default function FXTradePage() {
 
   // chart
   const [tf, setTf] = useState<TF>('5m');
-  const [chartNote, setChartNote] = useState<string | null>(null); // console only
   const [lastClose, setLastClose] = useState<number | null>(null);
-  const [chartBootError, setChartBootError] = useState<string | null>(null);
 
-  // ---- HOT refs (avoid stale closures => smoother + correct)
+  // ✅ show chart status in UI (so “nothing, no error” can’t happen)
+  const [chartHint, setChartHint] = useState<string>('Initializing chart…');
+  const [chartEngineError, setChartEngineError] = useState<string | null>(null);
+  const [candlesCacheTag, setCandlesCacheTag] = useState<string | null>(null);
+
+  // WS status
+  const [wsConnected, setWsConnected] = useState(false);
+  const [lastTickAt, setLastTickAt] = useState<number | null>(null);
+
+  // ---- HOT refs
   const assetRef = useRef(asset);
   const tfRef = useRef(tf);
   const marketEditingRef = useRef(false);
@@ -686,6 +691,8 @@ export default function FXTradePage() {
   const chartAbortRef = useRef<AbortController | null>(null);
   const chartInFlightRef = useRef(false);
 
+  const lwcModRef = useRef<any>(null);
+
   // keep last candle for live updates from WS
   const lastCandleRef = useRef<Candle | null>(null);
 
@@ -703,13 +710,6 @@ export default function FXTradePage() {
 
   const canUseSupabase =
     (typeof isSupabaseConfigured === 'function' ? isSupabaseConfigured() : !!isSupabaseConfigured) && !!supabase;
-
-  // debug chart note (console only)
-  useEffect(() => {
-    if (!chartNote) return;
-    // eslint-disable-next-line no-console
-    console.debug('[fx-chart]', chartNote);
-  }, [chartNote]);
 
   const headerAuthToken = async (): Promise<string | null> => {
     if (!canUseSupabase) return null;
@@ -827,124 +827,102 @@ export default function FXTradePage() {
   };
 
   // ===============================
-  // CHART FIX (v5-safe + never 0x0)
+  // Chart init (robust import + visible errors)
   // ===============================
-  const getChartSize = (el: HTMLDivElement) => {
-    const r = el.getBoundingClientRect();
-    const w = Math.max(320, Math.floor(r.width || el.clientWidth || 0));
-    const h = Math.max(260, Math.floor(r.height || el.clientHeight || 0));
-    return { w, h };
-  };
-
-  const forceResizeChart = () => {
-    const el = chartWrapRef.current;
-    const chart = chartApiRef.current;
-    if (!el || !chart) return;
-
-    const { w, h } = getChartSize(el);
+  const ensureLightweightCharts = async () => {
+    if (lwcModRef.current) return lwcModRef.current;
     try {
-      chart.applyOptions?.({ width: w, height: h });
-      chart.timeScale?.().fitContent?.();
-    } catch {}
+      const mod: any = await import('lightweight-charts');
+      lwcModRef.current = mod;
+      return mod;
+    } catch (e: any) {
+      throw new Error(
+        `Chart engine failed to load. Install lightweight-charts. (${e?.message || 'import failed'})`
+      );
+    }
   };
 
   const initChartIfNeeded = async () => {
     const el = chartWrapRef.current;
-    if (!el) return;
+    if (!el) throw new Error('Chart container not mounted yet.');
     if (chartApiRef.current && candleSeriesRef.current) return;
 
-    setChartBootError(null);
-
-    // hard cleanup (dev strict-mode / hot reload)
-    try {
-      resizeObsRef.current?.disconnect?.();
-    } catch {}
-    resizeObsRef.current = null;
-
-    try {
-      chartApiRef.current?.remove?.();
-    } catch {}
-    chartApiRef.current = null;
-    candleSeriesRef.current = null;
+    setChartEngineError(null);
 
     try {
       el.innerHTML = '';
     } catch {}
 
-    try {
-      const mod: any = await import('lightweight-charts');
-      const createChartFn = mod?.createChart ?? mod?.default?.createChart;
-      const CrosshairMode = mod?.CrosshairMode ?? mod?.default?.CrosshairMode;
-      const CandlestickSeries = mod?.CandlestickSeries ?? mod?.default?.CandlestickSeries;
+    const lwc: any = await ensureLightweightCharts();
 
-      if (typeof createChartFn !== 'function') throw new Error('lightweight-charts: createChart not found');
+    const createChartFn =
+      lwc?.createChart ??
+      lwc?.default?.createChart ??
+      (typeof lwc?.default === 'function' ? lwc.default : null);
 
-      const { w, h } = getChartSize(el);
+    if (typeof createChartFn !== 'function') {
+      throw new Error('lightweight-charts: createChart not found (bad module shape).');
+    }
 
-      const chart = createChartFn(el, {
-        width: w,
-        height: h,
-        layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.88)' },
-        grid: {
-          vertLines: { color: 'rgba(255,255,255,0.06)' },
-          horzLines: { color: 'rgba(255,255,255,0.06)' },
-        },
-        rightPriceScale: { borderColor: 'rgba(255,255,255,0.14)' },
-        timeScale: { borderColor: 'rgba(255,255,255,0.14)', timeVisible: true, secondsVisible: tfRef.current === '1m' },
-        crosshair: { mode: CrosshairMode?.Normal ?? 0 },
+    const chart = createChartFn(el, {
+      layout: { background: { color: 'transparent' }, textColor: 'rgba(255,255,255,0.88)' },
+      grid: {
+        vertLines: { color: 'rgba(255,255,255,0.06)' },
+        horzLines: { color: 'rgba(255,255,255,0.06)' },
+      },
+      rightPriceScale: { borderColor: 'rgba(255,255,255,0.14)' },
+      timeScale: { borderColor: 'rgba(255,255,255,0.14)', timeVisible: true, secondsVisible: false },
+      crosshair: { mode: lwc?.CrosshairMode?.Normal ?? 0 },
+    });
+
+    let candleSeries: any = null;
+    if (typeof chart.addCandlestickSeries === 'function') {
+      candleSeries = chart.addCandlestickSeries({
+        upColor: '#22c55e',
+        downColor: '#f43f5e',
+        borderUpColor: '#22c55e',
+        borderDownColor: '#f43f5e',
+        wickUpColor: '#22c55e',
+        wickDownColor: '#f43f5e',
       });
+    } else if (typeof chart.addSeries === 'function' && (lwc as any).CandlestickSeries) {
+      candleSeries = chart.addSeries((lwc as any).CandlestickSeries, {
+        upColor: '#22c55e',
+        downColor: '#f43f5e',
+        borderUpColor: '#22c55e',
+        borderDownColor: '#f43f5e',
+        wickUpColor: '#22c55e',
+        wickDownColor: '#f43f5e',
+      });
+    } else {
+      throw new Error('lightweight-charts: candlestick series API not found');
+    }
 
-      // series: v4-style OR v5-style
-      let series: any = null;
-      if (typeof chart.addCandlestickSeries === 'function') {
-        series = chart.addCandlestickSeries({
-          upColor: '#22c55e',
-          downColor: '#f43f5e',
-          borderUpColor: '#22c55e',
-          borderDownColor: '#f43f5e',
-          wickUpColor: '#22c55e',
-          wickDownColor: '#f43f5e',
-        });
-      } else if (typeof chart.addSeries === 'function' && CandlestickSeries) {
-        series = chart.addSeries(CandlestickSeries, {
-          upColor: '#22c55e',
-          downColor: '#f43f5e',
-          borderUpColor: '#22c55e',
-          borderDownColor: '#f43f5e',
-          wickUpColor: '#22c55e',
-          wickDownColor: '#f43f5e',
-        });
-      } else {
-        throw new Error('lightweight-charts: no candlestick series API found');
-      }
+    chartApiRef.current = chart;
+    candleSeriesRef.current = candleSeries;
 
-      chartApiRef.current = chart;
-      candleSeriesRef.current = series;
-
-      // ResizeObserver (clamped)
+    try {
       const ro = new ResizeObserver(() => {
-        if (!chartApiRef.current) return;
-        forceResizeChart();
+        const w = el.clientWidth;
+        const h = el.clientHeight;
+        try {
+          chart.applyOptions({ width: w, height: h });
+          chart.timeScale().fitContent();
+        } catch {}
       });
       ro.observe(el);
       resizeObsRef.current = ro;
 
-      // ✅ crucial: resize again next frame (Next layout settles here)
-      requestAnimationFrame(() => {
-        forceResizeChart();
-      });
-    } catch (e: any) {
-      setChartBootError(e?.message || 'Chart failed to initialize');
-    }
+      try {
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+        chart.timeScale().fitContent();
+      } catch {}
+    } catch {}
   };
 
   const setChartData = (candles: Candle[]) => {
-    const series = candleSeriesRef.current;
-    const chart = chartApiRef.current;
-    if (!series || !chart) return;
-
     const data = candles.map((c) => ({
-      time: c.time as any, // unix seconds (UTCTimestamp)
+      time: c.time as any,
       open: c.open,
       high: c.high,
       low: c.low,
@@ -952,14 +930,13 @@ export default function FXTradePage() {
     }));
 
     try {
-      series.setData?.(data);
-      chart.timeScale?.().fitContent?.();
+      candleSeriesRef.current?.setData?.(data);
+      chartApiRef.current?.timeScale?.()?.fitContent?.();
     } catch {}
 
     lastCandleRef.current = candles.length ? candles[candles.length - 1] : null;
   };
 
-  // live tick -> update chart last candle (no rerender)
   const applyLiveTickToChart = (price: number, nowMs: number) => {
     const series = candleSeriesRef.current;
     if (!series || !Number.isFinite(price) || price <= 0) return;
@@ -981,7 +958,13 @@ export default function FXTradePage() {
       };
       lastCandleRef.current = next;
       try {
-        series.update?.({ time: next.time as any, open: next.open, high: next.high, low: next.low, close: next.close });
+        series.update?.({
+          time: next.time as any,
+          open: next.open,
+          high: next.high,
+          low: next.low,
+          close: next.close,
+        });
       } catch {}
       return;
     }
@@ -996,7 +979,13 @@ export default function FXTradePage() {
       };
       lastCandleRef.current = next;
       try {
-        series.update?.({ time: next.time as any, open: next.open, high: next.high, low: next.low, close: next.close });
+        series.update?.({
+          time: next.time as any,
+          open: next.open,
+          high: next.high,
+          low: next.low,
+          close: next.close,
+        });
       } catch {}
     }
   };
@@ -1018,10 +1007,11 @@ export default function FXTradePage() {
   const loadChart = async (opts?: { fresh?: boolean }) => {
     if (unmountedRef.current) return;
 
-    setChartNote(null);
-
     const el = chartWrapRef.current;
-    if (!el) return;
+    if (!el) {
+      setChartHint('Chart container missing.');
+      return;
+    }
 
     if (chartInFlightRef.current) return;
     chartInFlightRef.current = true;
@@ -1041,18 +1031,17 @@ export default function FXTradePage() {
     const cacheKey = `${SS_PREFIX}:candles:${curAsset}:${curTf}`;
     const ticksKey = `${SS_PREFIX}:ticks:${curAsset}`;
 
-    // 0) ensure chart exists first (fix “nothing”)
-    await initChartIfNeeded();
-    forceResizeChart();
-
     // 1) instant fallback: cache / ticks / synth
     try {
+      await initChartIfNeeded();
+
       const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const now = Date.now();
 
       if (cached?.candles?.length) {
+        setCandlesCacheTag('CACHE');
+        setChartHint('Showing cached candles.');
         setChartData(cached.candles);
-        setChartNote('Using cached candles.');
 
         const lc = cached.candles[cached.candles.length - 1]?.close ?? null;
         if (lc && lc > 0) {
@@ -1064,8 +1053,9 @@ export default function FXTradePage() {
         const ticks = ssGet<Tick[]>(ticksKey) || [];
         const built = buildCandlesFromTicksFx(ticks, intervalMs, Math.min(220, count));
         if (built.length) {
+          setCandlesCacheTag('TICKS');
+          setChartHint('Built candles from local ticks.');
           setChartData(built);
-          setChartNote('Using locally built candles.');
 
           const lc = built[built.length - 1]?.close ?? null;
           if (lc && lc > 0) {
@@ -1075,15 +1065,16 @@ export default function FXTradePage() {
         } else {
           const seed = clampNum(lastClose ?? marketPrice, 1.0);
           const synth = generateSyntheticCandlesFx(seed, intervalMs, Math.min(220, count), `${curAsset}:${curTf}`);
+          setCandlesCacheTag('SIM');
+          setChartHint('Market data unavailable — simulated chart.');
           setChartData(synth);
-          setChartNote('Market data unavailable — showing simulated chart.');
 
           const lc = synth[synth.length - 1]?.close ?? null;
           if (lc && lc > 0 && !marketEditingRef.current) setMarketPrice(lc.toFixed(5));
         }
       }
 
-      // 2) skip network if cache is still “fresh”
+      // 2) skip network if cache still fresh
       const cached2 = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
       const baseMs = TIMEFRAMES.find((x) => x.value === curTf)?.pollMs ?? 15000;
       const freshMs = Math.max(20_000, Math.min(5 * 60_000, baseMs * 2));
@@ -1093,7 +1084,12 @@ export default function FXTradePage() {
         chartInFlightRef.current = false;
         return;
       }
-    } catch {}
+    } catch (e: any) {
+      const msg = e?.message || 'Chart init failed';
+      setChartEngineError(msg);
+      setChartHint(msg);
+      // don't return — still try fetching (maybe chart engine is fine but cache build failed)
+    }
 
     // 3) best-effort fetch (never clear chart on fail)
     try {
@@ -1102,14 +1098,31 @@ export default function FXTradePage() {
 
       retryAfterMsRef.current = 0;
 
+      setCandlesCacheTag(result.cache || 'NET');
       const candles = result.candles;
       if (!candles.length) {
-        setChartNote('No candles returned.');
+        setChartHint('No candles returned from server.');
         return;
       }
 
       ssSet(cacheKey, { ts: Date.now(), candles });
+
+      // if chart engine failed earlier, try again now
+      if (!chartApiRef.current || !candleSeriesRef.current) {
+        try {
+          await initChartIfNeeded();
+          setChartEngineError(null);
+        } catch (e2: any) {
+          setChartEngineError(e2?.message || 'Chart engine failed');
+          setChartHint(e2?.message || 'Chart engine failed');
+          return;
+        }
+      }
+
       setChartData(candles);
+      setChartHint(
+        `Live candles loaded${result.cache ? ` (${result.cache})` : ''}${result.stale ? ' • STALE' : ''}.`
+      );
 
       const lc = candles[candles.length - 1]?.close ?? null;
       if (lc != null && lc > 0) {
@@ -1120,9 +1133,9 @@ export default function FXTradePage() {
     } catch (e: any) {
       if (e?.name === 'CandlesError' && typeof e?.retryAfterMs === 'number' && e.retryAfterMs > 0) {
         retryAfterMsRef.current = e.retryAfterMs;
-        setChartNote(`Rate limited. Retrying in ${Math.ceil(e.retryAfterMs / 1000)}s…`);
+        setChartHint(`Rate limited. Retrying in ${Math.ceil(e.retryAfterMs / 1000)}s…`);
       } else {
-        setChartNote(e?.message || 'Failed to load chart');
+        setChartHint(e?.message || 'Failed to load candles');
       }
     } finally {
       chartInFlightRef.current = false;
@@ -1156,6 +1169,7 @@ export default function FXTradePage() {
     } catch {}
     wsRef.current = null;
     wsConnectedRef.current = false;
+    setWsConnected(false);
   };
 
   const wsSend = (obj: any) => {
@@ -1192,7 +1206,10 @@ export default function FXTradePage() {
     if (unmountedRef.current) return;
 
     const url = getGatewayUrl();
-    if (!url) return;
+    if (!url) {
+      setWsConnected(false);
+      return;
+    }
 
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
@@ -1203,6 +1220,7 @@ export default function FXTradePage() {
 
       ws.onopen = () => {
         wsConnectedRef.current = true;
+        setWsConnected(true);
         wsBackoffRef.current = 350;
 
         const inst = wsWantedInstrumentRef.current;
@@ -1230,8 +1248,9 @@ export default function FXTradePage() {
           const pair = assetRef.current;
           const nowMs = Date.now();
 
-          pushFxTick(pair, px);
+          setLastTickAt(nowMs);
 
+          pushFxTick(pair, px);
           applyLiveTickToChart(px, nowMs);
 
           liveLastPxRef.current = px;
@@ -1260,10 +1279,13 @@ export default function FXTradePage() {
       ws.onclose = () => {
         wsConnectedRef.current = false;
         wsRef.current = null;
+        setWsConnected(false);
         scheduleWsReconnect();
       };
 
-      ws.onerror = () => {};
+      ws.onerror = () => {
+        // onclose retries
+      };
     } catch {
       scheduleWsReconnect();
     }
@@ -1271,7 +1293,6 @@ export default function FXTradePage() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-
     const gw = getGatewayUrl();
     if (!gw) return;
 
@@ -1287,13 +1308,19 @@ export default function FXTradePage() {
 
     void loadTrades('active');
     void refreshUser().catch(() => {});
-    void initChartIfNeeded();
-    void connectWs();
 
-    // Ensure chart sizes once page paints
-    requestAnimationFrame(() => {
-      forceResizeChart();
-    });
+    // chart
+    (async () => {
+      try {
+        await initChartIfNeeded();
+        setChartHint('Chart ready.');
+      } catch (e: any) {
+        setChartEngineError(e?.message || 'Chart init failed');
+        setChartHint(e?.message || 'Chart init failed');
+      }
+    })();
+
+    void connectWs();
 
     return () => {
       unmountedRef.current = true;
@@ -1532,8 +1559,10 @@ export default function FXTradePage() {
 
   const invNum = clampNum(investment, 0);
   const notionalPreview = invNum > 0 && multiplier > 0 ? invNum * multiplier : 0;
-
   const tfLabel = TIMEFRAMES.find((x) => x.value === tf)?.label ?? tf;
+
+  const wsPill =
+    wsConnected ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-100' : 'bg-white/10 border-white/15 text-white/70';
 
   return (
     <div className="min-h-screen bg-[#07070b] text-white">
@@ -1551,7 +1580,6 @@ export default function FXTradePage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            {/* Live pulse pill */}
             <div className="rounded-full border border-white/10 bg-white/5 px-4 py-2 flex items-center gap-3">
               <span className="relative flex h-2.5 w-2.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/70" />
@@ -1605,12 +1633,22 @@ export default function FXTradePage() {
               <div className="flex items-center gap-2">
                 <div className="font-semibold">{asset}</div>
                 <div className="text-xs text-white/60">
-                  {TIMEFRAMES.find((x) => x.value === tf)?.label}
+                  {tfLabel}
                   {lastClose != null ? ` · ${lastClose.toFixed(5)}` : ''}
                 </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <span className={`inline-flex px-2 py-1 rounded-lg border text-xs ${wsPill}`}>
+                  WS: {wsConnected ? 'connected' : 'off'}
+                </span>
+                <span className="inline-flex px-2 py-1 rounded-lg border text-xs bg-black/30 border-white/10 text-white/70">
+                  Candles: {candlesCacheTag ?? '—'}
+                </span>
+                <span className="inline-flex px-2 py-1 rounded-lg border text-xs bg-black/30 border-white/10 text-white/70">
+                  Tick: {lastTickAt ? new Date(lastTickAt).toLocaleTimeString() : '—'}
+                </span>
+
                 <select
                   value={asset}
                   onChange={(e) => setAsset(e.target.value)}
@@ -1646,18 +1684,21 @@ export default function FXTradePage() {
               <div className="rounded-2xl border border-white/10 bg-black/20 overflow-hidden relative">
                 <div ref={chartWrapRef} className="w-full h-[420px] sm:h-[520px] lg:h-[640px]" />
 
-                {chartBootError ? (
-                  <div className="absolute inset-0 flex items-center justify-center p-4">
-                    <div className="max-w-[520px] w-full rounded-2xl border border-rose-500/30 bg-black/60 p-4">
-                      <div className="flex items-start gap-2">
-                        <AlertTriangle className="h-5 w-5 text-rose-300 mt-0.5" />
-                        <div>
-                          <div className="font-semibold text-rose-200">Chart failed to boot</div>
-                          <div className="text-xs text-white/70 mt-1">{chartBootError}</div>
-                          <div className="text-xs text-white/50 mt-2">
-                            Fix: this is almost always width/height=0 or series API mismatch — this file clamps size + supports v5/v4.
-                          </div>
-                        </div>
+                {/* ✅ Visible hint (so it never looks “dead”) */}
+                <div className="absolute left-3 bottom-3 pointer-events-none">
+                  <div className="text-[11px] text-white/70 bg-black/40 border border-white/10 rounded-xl px-3 py-2">
+                    {chartHint}
+                  </div>
+                </div>
+
+                {/* ✅ Visible chart engine failure overlay */}
+                {chartEngineError ? (
+                  <div className="absolute inset-0 flex items-center justify-center p-6">
+                    <div className="max-w-md rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                      <div className="font-semibold mb-1">Chart error</div>
+                      <div className="text-rose-100/90">{chartEngineError}</div>
+                      <div className="mt-2 text-xs text-rose-100/70">
+                        Fix: run <span className="font-mono">npm i lightweight-charts</span> (then redeploy).
                       </div>
                     </div>
                   </div>
@@ -1674,6 +1715,12 @@ export default function FXTradePage() {
             </div>
 
             <div className="p-4 space-y-4">
+              {!canUseSupabase ? (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100">
+                  Supabase isn’t configured on this environment. Check your NEXT_PUBLIC_SUPABASE_URL / ANON_KEY.
+                </div>
+              ) : null}
+
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
@@ -1878,11 +1925,7 @@ export default function FXTradePage() {
                                 : 'bg-rose-500/15 border-rose-500/30 text-rose-100'
                             }`}
                           >
-                            {t.direction === 'buy' ? (
-                              <TrendingUp className="h-3 w-3" />
-                            ) : (
-                              <TrendingDown className="h-3 w-3" />
-                            )}
+                            {t.direction === 'buy' ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
                             {t.direction.toUpperCase()}
                           </span>
                         </td>
