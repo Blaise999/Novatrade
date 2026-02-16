@@ -19,6 +19,15 @@ function chunk<T>(arr: T[], size: number) {
   return out;
 }
 
+function normalizeQuotesPayload(j: any) {
+  // New Alpaca route: { AAPL: {symbol, price, bid, ask, ...}, TSLA: {...} }
+  // Old Twelve route style: { data: { AAPL: {...}, ... } }
+  const data = (j && typeof j === 'object' && (j.data ?? j)) || {};
+  if (!data || typeof data !== 'object') return {};
+  if (Array.isArray(data)) return {};
+  return data as Record<string, any>;
+}
+
 export default function StockPriceSync() {
   const inFlight = useRef(false);
   const started = useRef(false);
@@ -40,32 +49,39 @@ export default function StockPriceSync() {
       try {
         for (const group of chunk(SYMBOLS, CHUNK_SIZE)) {
           const qs = group.join(',');
-          const r = await fetch(`/api/market/twelve/quote?symbol=${encodeURIComponent(qs)}`, {
-            cache: 'no-store',
-          });
-          const j = await r.json();
 
-          // j.data is a map keyed by symbol
-          if (j?.data && typeof j.data === 'object') {
+          // ✅ ALPACA endpoint (server-proxied)
+          const r = await fetch(
+            `/api/market/stocks/quotes?symbols=${encodeURIComponent(qs)}`,
+            { cache: 'no-store' }
+          );
+
+          // If route 404s or errors, just skip quietly
+          if (!r.ok) continue;
+
+          const text = await r.text();
+          const j = text ? JSON.parse(text) : {};
+          const quotes = normalizeQuotesPayload(j);
+
+          if (quotes && typeof quotes === 'object') {
             // update store if you have a setter
             if (typeof setQuotes === 'function') {
               try {
-                setQuotes(j.data);
+                setQuotes(quotes);
               } catch {}
             }
 
             // also expose globally (debug)
-            (window as any).__NT_QUOTES__ = { ...(window as any).__NT_QUOTES__, ...j.data };
+            (window as any).__NT_QUOTES__ = { ...(window as any).__NT_QUOTES__, ...quotes };
           }
         }
       } catch {
-        // silence - your API route already returns safe JSON
+        // keep silent (non-blocking)
       } finally {
         inFlight.current = false;
       }
     };
 
-    // run immediately then interval
     run();
     timer.current = setInterval(run, INTERVAL_MS);
 
