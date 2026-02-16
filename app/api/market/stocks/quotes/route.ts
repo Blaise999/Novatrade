@@ -2,6 +2,8 @@
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 type CacheEntry = { ts: number; data: any };
 const g = globalThis as any;
@@ -11,7 +13,7 @@ const CACHE: Map<string, CacheEntry> = g.__ALPACA_QUOTES_CACHE;
 const TTL_MS = 6_500;
 
 function clampSymbols(raw: string) {
-  return String(raw || '')
+  return raw
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean)
@@ -36,7 +38,8 @@ async function fetchJson(url: string, timeoutMs = 8000) {
     const res = await fetch(url, { headers: headers(), signal: ac.signal, cache: 'no-store' });
     const text = await res.text();
     if (!res.ok) {
-      const err: any = new Error(text || `HTTP ${res.status}`);
+      const msg = text || `HTTP ${res.status}`;
+      const err: any = new Error(msg);
       err.status = res.status;
       throw err;
     }
@@ -49,40 +52,38 @@ async function fetchJson(url: string, timeoutMs = 8000) {
 function pickNumber(...vals: any[]) {
   for (const v of vals) {
     const n = Number(v);
-    if (Number.isFinite(n) && n !== 0) return n;
+    if (Number.isFinite(n)) return n;
   }
   return 0;
 }
 
-function buildUpstream(symbols: string[], feed?: string) {
-  const qs = new URLSearchParams({ symbols: symbols.join(',') });
-  const f = (feed || '').trim();
-  if (f) qs.set('feed', f);
-  return {
-    upstream: `https://data.alpaca.markets/v2/stocks/snapshots?${qs.toString()}`,
-    cacheKey: `snapshots:${qs.toString()}`,
-  };
-}
-
 export async function GET(req: Request) {
   const url = new URL(req.url);
+  const symbolsParam = url.searchParams.get('symbols') || '';
+  const symbols = clampSymbols(symbolsParam);
 
-  const symbols = clampSymbols(url.searchParams.get('symbols') || '');
   if (!symbols.length) return NextResponse.json({}, { status: 200 });
 
-  const reqFeed = (url.searchParams.get('feed') || '').trim();
-  const envFeed = (process.env.ALPACA_DATA_FEED || '').trim();
-  const feed = (reqFeed || envFeed || 'iex').trim();
+  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || '').trim();
+  const qs = new URLSearchParams({ symbols: symbols.join(',') });
+  if (feed) qs.set('feed', feed);
 
-  const { upstream, cacheKey } = buildUpstream(symbols, feed);
+  const upstream = `https://data.alpaca.markets/v2/stocks/snapshots?${qs.toString()}`;
+  const cacheKey = `snapshots:${qs.toString()}`;
 
   const cached = CACHE.get(cacheKey);
   const now = Date.now();
-  if (cached && now - cached.ts < TTL_MS) return NextResponse.json(cached.data, { status: 200 });
+  if (cached && now - cached.ts < TTL_MS) {
+    return NextResponse.json(cached.data, { status: 200 });
+  }
 
-  const parse = (json: any) => {
-    const out: Record<string, { symbol: string; price: number; bid: number; ask: number; prevClose?: number; ts: number; changePercent24h?: number }> =
-      {};
+  try {
+    const json = await fetchJson(upstream);
+
+    const out: Record<
+      string,
+      { symbol: string; price: number; bid: number; ask: number; prevClose?: number; ts: number; changePercent24h?: number }
+    > = {};
 
     for (const sym of symbols) {
       const s = (json?.[sym] ?? json?.snapshots?.[sym] ?? null) as any;
@@ -94,41 +95,33 @@ export async function GET(req: Request) {
       const prevClose = pickNumber(s?.prevDailyBar?.c, s?.prev_daily_bar?.c);
 
       const price = latestTradePrice || minuteClose || dailyClose || 0;
-      if (!price) continue;
 
-      const bid = pickNumber(s?.latestQuote?.bp, s?.latest_quote?.bp) || price * 0.9999;
-      const ask = pickNumber(s?.latestQuote?.ap, s?.latest_quote?.ap) || price * 1.0001;
+      const bid = pickNumber(s?.latestQuote?.bp, s?.latest_quote?.bp, price ? price * 0.9999 : 0);
+      const ask = pickNumber(s?.latestQuote?.ap, s?.latest_quote?.ap, price ? price * 1.0001 : 0);
 
       let pct = 0;
       if (prevClose > 0 && price > 0) pct = ((price - prevClose) / prevClose) * 100;
 
-      out[sym] = { symbol: sym, price, bid, ask, prevClose: prevClose || undefined, changePercent24h: pct, ts: now };
+      if (price > 0) {
+        out[sym] = {
+          symbol: sym,
+          price,
+          bid: bid || price * 0.9999,
+          ask: ask || price * 1.0001,
+          prevClose: prevClose || undefined,
+          changePercent24h: pct,
+          ts: now,
+        };
+      }
     }
 
-    return out;
-  };
-
-  try {
-    const json1 = await fetchJson(upstream);
-    const out1 = parse(json1);
-    CACHE.set(cacheKey, { ts: now, data: out1 });
-    return NextResponse.json(out1, { status: 200 });
+    CACHE.set(cacheKey, { ts: now, data: out });
+    return NextResponse.json(out, { status: 200 });
   } catch (e: any) {
-    const status = Number(e?.status) || 500;
-    const msg = String(e?.message || '');
-
-    const sipWanted = feed.toLowerCase() === 'sip';
-    if (sipWanted && (status === 401 || status === 403)) {
-      try {
-        const { upstream: u2, cacheKey: ck2 } = buildUpstream(symbols, 'iex');
-        const json2 = await fetchJson(u2);
-        const out2 = parse(json2);
-        CACHE.set(ck2, { ts: now, data: out2 });
-        return NextResponse.json(out2, { status: 200, headers: { 'x-feed-fallback': 'iex' } });
-      } catch {}
+    if (cached?.data) {
+      return NextResponse.json(cached.data, { status: 200, headers: { 'x-stale': '1' } });
     }
-
-    if (cached?.data) return NextResponse.json(cached.data, { status: 200, headers: { 'x-stale': '1' } });
-    return NextResponse.json({ error: msg || 'Market data error' }, { status });
+    const status = Number(e?.status) || 500;
+    return NextResponse.json({ error: String(e?.message || 'Market data error') }, { status });
   }
 }

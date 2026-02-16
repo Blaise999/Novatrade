@@ -1,8 +1,9 @@
-// app/dashboard/stocks/page.tsx
+// app/dashboard/trade/stocks/page.tsx
 'use client';
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import Link from 'next/link';
 import {
   ChevronDown,
   Plus,
@@ -22,11 +23,11 @@ import {
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useTradingAccountStore } from '@/lib/trading-store';
 import { marketAssets } from '@/lib/data';
-import type { StockPosition } from '@/lib/trading-types';
+import { StockPosition } from '@/lib/trading-types';
 import KYCGate from '@/components/KYCGate';
 import { saveTradeToHistory, closeTradeInHistory } from '@/lib/services/trade-history';
 
-// ✅ Alpaca (server-proxied)
+// ✅ Alpaca helpers (server-proxied)
 import { fetchCandles, fetchQuotesBatch } from '@/lib/market/alpaca';
 
 type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '1D';
@@ -54,7 +55,6 @@ type LiveQuote = {
 
 type Candle = { t: number; o: number; h: number; l: number; c: number; v?: number };
 
-// small catalog helpers
 const stockInfo: Record<string, { emoji: string; sector: string }> = {
   AAPL: { emoji: '🍎', sector: 'Technology' },
   NVDA: { emoji: '🟢', sector: 'Technology' },
@@ -77,19 +77,13 @@ function n(v: any, fallback = 0) {
   return Number.isFinite(x) ? x : fallback;
 }
 
-function clampInt(x: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, Math.floor(x)));
-}
-
 function fmtMoney(x: number) {
   if (!Number.isFinite(x)) return '$0';
   return `$${x.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
-function fmtPct(x: number) {
-  const v = Number.isFinite(x) ? x : 0;
-  const s = v >= 0 ? '+' : '';
-  return `${s}${v.toFixed(2)}%`;
+function clampInt(x: number, a: number, b: number) {
+  return Math.max(a, Math.min(b, Math.floor(x)));
 }
 
 function normalizeStockAsset(a: any): StockAsset {
@@ -107,8 +101,8 @@ function deriveChangePercent(price: number, prevClose?: number) {
   return ((price - prevClose) / prevClose) * 100;
 }
 
-function tfToAlpacaTf(tf: Timeframe) {
-  // your API route maps these
+function tfToInterval(tf: Timeframe) {
+  // we use Twelve-like strings because your API route accepts them and converts to Alpaca timeframe
   switch (tf) {
     case '1m':
       return '1min';
@@ -147,7 +141,7 @@ function tfToMs(tf: Timeframe) {
 }
 
 function tfPollMs(tf: Timeframe) {
-  // smart-ish polling: slower for higher TF
+  // poll slightly slower than bucket duration
   switch (tf) {
     case '1m':
       return 65_000;
@@ -170,15 +164,18 @@ function parseMarketTimeToMs(dt: string) {
   const s = String(dt || '').trim();
   if (!s) return Date.now();
 
-  const hasTZ = s.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(s) || /[+-]\d{4}$/.test(s);
-  const isoLike = s.includes(' ') ? s.replace(' ', 'T') : s;
+  const hasTZ =
+    s.endsWith('Z') ||
+    /[+-]\d{2}:\d{2}$/.test(s) ||
+    /[+-]\d{4}$/.test(s);
 
-  const t1 = Date.parse(isoLike);
-  if (Number.isFinite(t1)) return t1;
+  const isoLike = s.includes(' ') ? s.replace(' ', 'T') : s;
+  const try1 = Date.parse(isoLike);
+  if (Number.isFinite(try1)) return try1;
 
   if (!hasTZ) {
-    const t2 = Date.parse(`${isoLike}Z`);
-    if (Number.isFinite(t2)) return t2;
+    const try2 = Date.parse(`${isoLike}Z`);
+    if (Number.isFinite(try2)) return try2;
   }
 
   return Date.now();
@@ -188,6 +185,7 @@ function parseMarketTimeToMs(dt: string) {
 // ✅ Session cache helpers
 // ===============================
 const SS_PREFIX = 'novatrade:stocks';
+
 function ssGet<T>(key: string): T | null {
   try {
     if (typeof window === 'undefined') return null;
@@ -201,13 +199,11 @@ function ssSet(key: string, value: any) {
   try {
     if (typeof window === 'undefined') return;
     window.sessionStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 // ===============================
-// ✅ Always-chart fallback
+// ✅ Always-chart fallback helpers
 // ===============================
 type Tick = { t: number; p: number };
 
@@ -219,7 +215,6 @@ function hashStr(s: string) {
   }
   return h >>> 0;
 }
-
 function mulberry32(seed: number) {
   return function () {
     let t = (seed += 0x6d2b79f5);
@@ -312,6 +307,9 @@ function generateSyntheticCandles(seedPrice: number, intervalMs: number, count: 
   return out;
 }
 
+// ===============================
+// ✅ Seed + Tail strategy
+// ===============================
 const SEED_CANDLE_LIMIT = 220;
 const TAIL_CANDLE_LIMIT = 3;
 const RESEED_EVERY_MS = 10 * 60 * 1000;
@@ -331,14 +329,29 @@ function jitter(ms = 1200) {
   return Math.floor(Math.random() * ms);
 }
 
+// ===============================
+// ✅ Quota/rate-limit handling
+// ===============================
+function looksLikeQuota(msg: string) {
+  const m = (msg || '').toLowerCase();
+  return m.includes('rate') || m.includes('limit') || m.includes('429') || m.includes('too many');
+}
+function userFacingMarketMessage(_msg: string) {
+  return 'Network error.';
+}
+
 export default function StockTradingPage() {
+  // ✅ HYDRATION FIX
+  const [hasMounted, setHasMounted] = useState(false);
+  useEffect(() => setHasMounted(true), []);
+
   const { user, refreshUser } = useStore();
 
-  const spotAccount = useTradingAccountStore((s) => (s as any).spotAccount);
-  const stockPositions = useTradingAccountStore((s) => (s as any).stockPositions as StockPosition[]);
-  const executeStockBuy = useTradingAccountStore((s) => (s as any).executeStockBuy);
-  const executeStockSell = useTradingAccountStore((s) => (s as any).executeStockSell);
-  const updateStockPositionPrice = useTradingAccountStore((s) => (s as any).updateStockPositionPrice);
+  const spotAccount = useTradingAccountStore((s) => s.spotAccount);
+  const stockPositions = useTradingAccountStore((s) => s.stockPositions);
+  const executeStockBuy = useTradingAccountStore((s) => s.executeStockBuy);
+  const executeStockSell = useTradingAccountStore((s) => s.executeStockSell);
+  const updateStockPositionPrice = useTradingAccountStore((s) => s.updateStockPositionPrice);
 
   const stockAssets = useMemo(() => {
     const list = (marketAssets as any[])
@@ -370,31 +383,31 @@ export default function StockTradingPage() {
 
   const [notification, setNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const notifTimerRef = useRef<number | null>(null);
+
   const pushNotif = (nfy: { type: 'success' | 'error'; message: string }, ms = 3000) => {
     setNotification(nfy);
     if (notifTimerRef.current) window.clearTimeout(notifTimerRef.current);
     notifTimerRef.current = window.setTimeout(() => setNotification(null), ms);
   };
+
   useEffect(() => {
     return () => {
       if (notifTimerRef.current) window.clearTimeout(notifTimerRef.current);
     };
   }, []);
 
-  // sell modal
   const [showSellModal, setShowSellModal] = useState(false);
   const [positionToSell, setPositionToSell] = useState<StockPosition | null>(null);
   const [sellQty, setSellQty] = useState(0);
 
-  // ---- Live quotes (SSE primary + polling fallback)
+  // ---- Live quotes (SSE relay from Alpaca WS)
   const [sseState, setSseState] = useState<'connecting' | 'live' | 'down'>('connecting');
   const [quotes, setQuotes] = useState<Record<string, LiveQuote>>({});
   const prevCloseRef = useRef<Record<string, number>>({});
   const pauseUntilRef = useRef<number>(0);
 
   const toggleFavorite = (symbol: string) => {
-    const s = String(symbol || '').toUpperCase();
-    setFavorites((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+    setFavorites((prev) => (prev.includes(symbol) ? prev.filter((s) => s !== symbol) : [...prev, symbol]));
   };
 
   const filteredAssets = useMemo(() => {
@@ -405,20 +418,24 @@ export default function StockTradingPage() {
 
   const quoteSymbols = useMemo(() => {
     const set = new Set<string>();
+
     set.add(String(selectedSymbol || '').toUpperCase());
     for (const s of favorites) set.add(String(s || '').toUpperCase());
-    for (const p of stockPositions || []) set.add(String((p as any)?.symbol || '').toUpperCase());
+    for (const p of stockPositions) set.add(String(p.symbol || '').toUpperCase());
+
     return Array.from(set).filter(Boolean).slice(0, 12);
   }, [selectedSymbol, favorites, stockPositions]);
 
   const pollingKey = useMemo(() => quoteSymbols.join(','), [quoteSymbols]);
 
-  // ✅ SSE stream
+  // ---- Live quotes via Alpaca WS (server SSE relay)
   const esRef = useRef<EventSource | null>(null);
+  const lastSseMsgAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (!quoteSymbols.length) return;
 
+    // close any existing stream
     try {
       esRef.current?.close();
     } catch {}
@@ -427,10 +444,17 @@ export default function StockTradingPage() {
     let alive = true;
     setSseState('connecting');
 
+    // watchdog: if no message for 12s -> down
+    const watchdog = window.setInterval(() => {
+      if (!alive) return;
+      const last = lastSseMsgAtRef.current || 0;
+      if (last && Date.now() - last > 12_000) setSseState('down');
+    }, 3000);
+
     const es = new EventSource(`/api/market/stocks/stream?symbols=${encodeURIComponent(quoteSymbols.join(','))}`);
     esRef.current = es;
 
-    // seed once via snapshots
+    // seed once via snapshots (gives prevClose reliably)
     (async () => {
       try {
         const resp: any = await fetchQuotesBatch(quoteSymbols);
@@ -452,7 +476,7 @@ export default function StockTradingPage() {
             const prevClose =
               n(q?.previous_close, 0) ||
               n(q?.prev_close, 0) ||
-              n((q as any)?.prevClose, 0) ||
+              n(q?.prevClose, 0) ||
               prevCloseRef.current[key] ||
               next[key]?.prevClose ||
               undefined;
@@ -460,12 +484,7 @@ export default function StockTradingPage() {
             if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
 
             const pctRaw =
-              q?.percent_change ??
-              q?.change_percent ??
-              q?.percentChange ??
-              q?.changePercent24h ??
-              q?.changePercent24h ??
-              undefined;
+              q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? q?.changePercent24h ?? undefined;
             const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
 
             next[key] = {
@@ -479,7 +498,7 @@ export default function StockTradingPage() {
             };
 
             try {
-              updateStockPositionPrice?.(key, price);
+              updateStockPositionPrice(key, price);
             } catch {}
 
             // ticks cache for candle fallback
@@ -492,22 +511,28 @@ export default function StockTradingPage() {
           return next;
         });
       } catch {
-        // ignore seed failure
+        // ignore
       }
     })();
 
+    es.onopen = () => {
+      if (!alive) return;
+      setSseState('connecting');
+    };
+
     es.onmessage = (ev) => {
       if (!alive) return;
+      lastSseMsgAtRef.current = Date.now();
 
-      let m: any = null;
-      try {
-        m = JSON.parse(ev.data || '{}');
-      } catch {
-        return;
-      }
+      const m = JSON.parse(ev.data || '{}');
 
       if (m?.type === 'status') {
         setSseState(m?.state === 'live' ? 'live' : m?.state === 'connecting' ? 'connecting' : 'down');
+        return;
+      }
+
+      if (m?.type === 'ping') {
+        // keepalive
         return;
       }
 
@@ -545,9 +570,10 @@ export default function StockTradingPage() {
         };
 
         try {
-          updateStockPositionPrice?.(sym, next.price);
+          updateStockPositionPrice(sym, next.price);
         } catch {}
 
+        // ticks cache for candle fallback
         try {
           if (next.price > 0) {
             const tickKey = `${SS_PREFIX}:ticks:${sym}`;
@@ -570,111 +596,14 @@ export default function StockTradingPage() {
 
     return () => {
       alive = false;
+      window.clearInterval(watchdog);
       try {
         es.close();
       } catch {}
     };
   }, [pollingKey, quoteSymbols, updateStockPositionPrice]);
 
-  // ✅ Polling fallback (only when SSE not live)
-  useEffect(() => {
-    if (!quoteSymbols.length) return;
-    if (sseState === 'live') return;
-
-    let alive = true;
-    let timer: number | null = null;
-
-    const pollMs = 22_000;
-
-    const tick = async () => {
-      try {
-        if (!alive) return;
-        if (Date.now() < pauseUntilRef.current) return;
-        if (typeof document !== 'undefined' && document.hidden) return;
-
-        const resp: any = await fetchQuotesBatch(quoteSymbols);
-        const dataMap: Record<string, any> =
-          resp?.data && typeof resp.data === 'object' ? (resp.data as Record<string, any>) : (resp as Record<string, any>);
-
-        setQuotes((prev) => {
-          const next: Record<string, LiveQuote> = { ...prev };
-
-          for (const sym of quoteSymbols) {
-            const key = String(sym || '').toUpperCase();
-            const q: any = dataMap?.[key] || dataMap?.[sym] || null;
-            if (!q) continue;
-
-            const price = n(q?.price ?? q?.close ?? q?.last ?? q?.c, 0);
-            if (!price || !Number.isFinite(price)) continue;
-
-            const prevClose =
-              n(q?.previous_close, 0) ||
-              n(q?.prev_close, 0) ||
-              prevCloseRef.current[key] ||
-              next[key]?.prevClose ||
-              undefined;
-
-            if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
-
-            const pctRaw =
-              q?.percent_change ??
-              q?.change_percent ??
-              q?.percentChange ??
-              q?.changePercent24h ??
-              q?.changePercent24h ??
-              undefined;
-            const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
-
-            next[key] = {
-              symbol: key,
-              price,
-              bid: n(q?.bid, 0) || price * 0.9999,
-              ask: n(q?.ask, 0) || price * 1.0001,
-              changePercent24h: pct,
-              prevClose,
-              ts: Date.now(),
-            };
-
-            try {
-              updateStockPositionPrice?.(key, price);
-            } catch {}
-          }
-
-          return next;
-        });
-      } catch {
-        // ignore
-      }
-    };
-
-    const loop = async () => {
-      if (!alive) return;
-      await tick();
-      if (!alive) return;
-      timer = window.setTimeout(loop, pollMs + jitter());
-    };
-
-    void loop();
-
-    const onVis = () => {
-      if (!alive) return;
-      if (!document.hidden) void tick();
-    };
-
-    try {
-      document.addEventListener('visibilitychange', onVis);
-    } catch {}
-
-    return () => {
-      alive = false;
-      if (timer) window.clearTimeout(timer);
-      try {
-        document.removeEventListener('visibilitychange', onVis);
-      } catch {}
-    };
-  }, [pollingKey, quoteSymbols, updateStockPositionPrice, sseState]);
-
-  // ---- Candles: seed + tail + always-chart fallback
+  // ---- Candles with seed + tail + ALWAYS-CHART fallback
   const [candles, setCandles] = useState<Candle[]>([]);
   const [loadingChart, setLoadingChart] = useState(false);
   const [candlesUpdatedAt, setCandlesUpdatedAt] = useState<number>(0);
@@ -691,7 +620,7 @@ export default function StockTradingPage() {
   useEffect(() => {
     let alive = true;
 
-    const intervalStr = tfToAlpacaTf(chartTimeframe);
+    const intervalStr = tfToInterval(chartTimeframe);
     const intervalMs = tfToMs(chartTimeframe);
     const pollMs = tfPollMs(chartTimeframe);
 
@@ -705,7 +634,7 @@ export default function StockTradingPage() {
       candleTimerRef.current = null;
     };
 
-    // instant chart: cache -> ticks -> synthetic
+    // 1) instant render: cached OR ticks OR synthetic
     const cached = ssGet<{ ts: number; candles: Candle[] }>(cacheKey);
     if (cached?.candles?.length) {
       setCandles(cached.candles);
@@ -745,6 +674,7 @@ export default function StockTradingPage() {
           now - candleLastSeedAtRef.current > RESEED_EVERY_MS;
 
         const limit = needsSeed ? SEED_CANDLE_LIMIT : TAIL_CANDLE_LIMIT;
+
         setLoadingChart(needsSeed);
 
         const raw: any = await fetchCandles(selectedSymbol, intervalStr, limit);
@@ -755,8 +685,8 @@ export default function StockTradingPage() {
         const arr: any[] = Array.isArray(raw) ? raw : Array.isArray(raw?.candles) ? raw.candles : [];
 
         const out: Candle[] = arr
-          .map((c: any) => ({
-            t: parseMarketTimeToMs(String(c?.time || c?.datetime || c?.date || c?.t || '')),
+          .map((c: any, i: number) => ({
+            t: parseMarketTimeToMs(String(c?.time || c?.datetime || c?.date || '')) || Date.now() + i,
             o: n(c?.open ?? c?.o, 0),
             h: n(c?.high ?? c?.h, 0),
             l: n(c?.low ?? c?.l, 0),
@@ -770,12 +700,11 @@ export default function StockTradingPage() {
           return;
         }
 
-        setCandles((prev) => (needsSeed ? out : mergeCandles(prev, out, SEED_CANDLE_LIMIT)));
+        const merged = needsSeed ? out : mergeCandles(candles, out, SEED_CANDLE_LIMIT);
+        setCandles(merged);
 
         const ts = Date.now();
-        const prevCache = ssGet<{ ts: number; candles: Candle[] }>(cacheKey)?.candles || [];
-        const mergedForCache = needsSeed ? out : mergeCandles(prevCache, out, SEED_CANDLE_LIMIT);
-        ssSet(cacheKey, { ts, candles: mergedForCache });
+        ssSet(cacheKey, { ts, candles: merged });
 
         setCandlesUpdatedAt(ts);
         setCandlesStale(false);
@@ -784,8 +713,16 @@ export default function StockTradingPage() {
           candleSeedKeyRef.current = seedKey;
           candleLastSeedAtRef.current = now;
         }
-      } catch {
+      } catch (e: any) {
+        const msg = String(e?.message || e || '');
+        console.error('[Stocks] Candles error:', msg);
+
         setCandlesStale(true);
+
+        if (looksLikeQuota(msg)) {
+          pauseUntilRef.current = Date.now() + 90_000;
+          pushNotif({ type: 'error', message: userFacingMarketMessage(msg) }, 4500);
+        }
       } finally {
         candleInFlightRef.current = false;
         if (alive) setLoadingChart(false);
@@ -820,50 +757,50 @@ export default function StockTradingPage() {
         document.removeEventListener('visibilitychange', onVis);
       } catch {}
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, chartTimeframe, live?.price, selectedAsset?.price]);
 
-  // ---- Chart sizing (FIXED: rAF + no-loop + layout-safe)
+  // ---- Chart sizing
   const chartRef = useRef<HTMLDivElement>(null);
-  const [chartDimensions, setChartDimensions] = useState({ width: 320, height: 280 });
+  const [chartDimensions, setChartDimensions] = useState({ width: 320, height: 260 });
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const el = chartRef.current;
     if (!el) return;
 
-    let raf = 0;
-    let ro: ResizeObserver | null = null;
-
-    const measure = () => {
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        const w = Math.max(280, Math.floor(el.clientWidth || 320));
-        const h = Math.max(240, Math.floor(el.clientHeight || 280));
-        setChartDimensions((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setChartDimensions({
+        width: Math.max(280, Math.floor(r.width || 320)),
+        height: Math.max(220, Math.floor(r.height || 260)),
       });
     };
 
-    measure();
+    update();
+    const t1 = window.setTimeout(update, 50);
+    const t2 = window.setTimeout(update, 200);
 
+    let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(measure);
+      ro = new ResizeObserver(() => update());
       ro.observe(el);
     }
 
-    window.addEventListener('resize', measure);
-    window.addEventListener('orientationchange', measure);
+    window.addEventListener('resize', update);
+    window.addEventListener('orientationchange', update);
 
     return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener('resize', measure);
-      window.removeEventListener('orientationchange', measure);
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.removeEventListener('resize', update);
+      window.removeEventListener('orientationchange', update);
       ro?.disconnect();
     };
   }, [mobileTab]);
 
-  // ---- Derived quote
   const price = live?.price ?? selectedAsset?.price ?? 0;
-  const bidPrice = live?.bid ?? (price ? price * 0.9999 : 0);
-  const askPrice = live?.ask ?? (price ? price * 1.0001 : 0);
+  const bidPrice = live?.bid ?? price * 0.9999;
+  const askPrice = live?.ask ?? price * 1.0001;
   const changePercent24h = live?.changePercent24h ?? selectedAsset?.changePercent24h ?? 0;
   const up = changePercent24h >= 0;
 
@@ -882,15 +819,139 @@ export default function StockTradingPage() {
 
   const userBalance = Number((user as any)?.balance ?? 0);
   const cashBalance =
-    Number((spotAccount as any)?.availableToTrade ?? (spotAccount as any)?.cash ?? (spotAccount as any)?.balance ?? userBalance) || 0;
+    (spotAccount as any)?.availableToTrade ?? (spotAccount as any)?.cash ?? (spotAccount as any)?.balance ?? userBalance;
 
-  const portfolioValue = (stockPositions || []).reduce((sum, pos: any) => sum + Number(pos?.marketValue ?? 0), 0);
+  const portfolioValue = stockPositions.reduce((sum, pos) => sum + Number((pos as any)?.marketValue ?? 0), 0);
   const totalEquity = cashBalance + portfolioValue;
-  const unrealizedPnL = (stockPositions || []).reduce((sum, pos: any) => sum + Number(pos?.unrealizedPnL ?? 0), 0);
+  const unrealizedPnL = stockPositions.reduce((sum, pos) => sum + Number((pos as any)?.unrealizedPnL ?? 0), 0);
 
   const canBuy = effectiveShares >= 1 && safeAsk > 0 && totalCost <= cashBalance;
 
-  const info = stockInfo[selectedSymbol] || { emoji: '📈', sector: 'Other' };
+  const handleBuy = async () => {
+    if (safeAsk <= 0) {
+      pushNotif({ type: 'error', message: 'No live price yet. Try again in a second.' }, 2500);
+      return;
+    }
+
+    if (effectiveShares < 1) {
+      pushNotif({ type: 'error', message: 'Amount too small — shares becomes 0.' }, 2500);
+      return;
+    }
+
+    if (totalCost > cashBalance) {
+      pushNotif({ type: 'error', message: 'Insufficient funds' }, 2500);
+      return;
+    }
+
+    const result = executeStockBuy(
+      selectedSymbol,
+      selectedAsset?.name ?? selectedSymbol,
+      effectiveShares,
+      safeAsk,
+      commission
+    );
+
+    if ((result as any)?.success) {
+      await refreshUser?.();
+
+      // ✅ trade history save (cast to any to avoid TS key mismatch)
+      try {
+        if ((user as any)?.id) {
+          const state = useTradingAccountStore.getState();
+          const pos = state.stockPositions.find((p: any) => String(p.symbol).toUpperCase() === selectedSymbol);
+          if (pos) {
+            saveTradeToHistory(
+              {
+                id: pos.id,
+                userId: (user as any).id,
+                marketType: 'stocks',
+                assetType: 'stock',
+                pair: selectedSymbol,
+                symbol: selectedSymbol,
+                type: 'buy',
+                side: 'buy',
+                quantity: pos.qty,
+                amount: pos.qty * safeAsk,
+                entryPrice: pos.avgEntry ?? safeAsk,
+                leverage: 1,
+                openedAt: new Date().toISOString(),
+                notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
+              } as any
+            ).catch(() => {});
+          }
+        }
+      } catch {}
+
+      pushNotif({ type: 'success', message: `Bought ${effectiveShares} ${selectedSymbol} @ $${safeAsk.toFixed(2)}` });
+    } else {
+      pushNotif({ type: 'error', message: (result as any)?.error || 'Trade failed' });
+    }
+  };
+
+  const handleSell = async () => {
+    if (!positionToSell || sellQty <= 0) return;
+
+    const safeBid = Number.isFinite(bidPrice) && bidPrice > 0 ? bidPrice : 0;
+    if (!safeBid) {
+      pushNotif({ type: 'error', message: 'No live bid yet. Try again in a second.' }, 2500);
+      return;
+    }
+
+    const sellCommission = Math.max(0.99, sellQty * safeBid * 0.001);
+    const result = executeStockSell((positionToSell as any).id, sellQty, safeBid, sellCommission);
+
+    if ((result as any)?.success) {
+      const pnl = Number((result as any)?.realizedPnL ?? 0);
+      await refreshUser?.();
+
+      // ✅ trade history upsert/close (cast to any)
+      try {
+        if ((user as any)?.id) {
+          const after = useTradingAccountStore.getState().stockPositions as any[];
+          const still = after.find((p) => p.id === (positionToSell as any).id);
+
+          if (still) {
+            saveTradeToHistory(
+              {
+                id: still.id,
+                userId: (user as any).id,
+                marketType: 'stocks',
+                assetType: 'stock',
+                pair: still.symbol,
+                symbol: still.symbol,
+                type: 'buy',
+                side: 'buy',
+                quantity: still.qty,
+                entryPrice: still.avgEntry ?? 0,
+                notes: JSON.stringify({ model: 'spot_hold', partial: true }),
+              } as any
+            ).catch(() => {});
+          } else {
+            closeTradeInHistory(
+              {
+                tradeId: (positionToSell as any).id,
+                userId: (user as any).id,
+                exitPrice: safeBid,
+                pnl,
+                closedAt: new Date().toISOString(),
+              } as any
+            ).catch(() => {});
+          }
+        }
+      } catch {}
+
+      pushNotif({
+        type: 'success',
+        message: `Sold ${sellQty} ${(positionToSell as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
+      });
+    } else {
+      pushNotif({ type: 'error', message: (result as any)?.error || 'Sell failed' });
+    }
+
+    setShowSellModal(false);
+    setPositionToSell(null);
+    setSellQty(0);
+  };
 
   // ---- Chart geometry
   const chart = useMemo(() => {
@@ -938,801 +999,757 @@ export default function StockTradingPage() {
     return { w, h, pad, items, min, max, linePath };
   }, [candles, chartDimensions]);
 
-  const handleBuy = async () => {
-    if (safeAsk <= 0) {
-      pushNotif({ type: 'error', message: 'No live price yet. Try again.' }, 2500);
-      return;
-    }
-    if (effectiveShares < 1) {
-      pushNotif({ type: 'error', message: 'Amount too small — shares becomes 0.' }, 2500);
-      return;
-    }
-    if (totalCost > cashBalance) {
-      pushNotif({ type: 'error', message: 'Insufficient funds' }, 2500);
-      return;
-    }
+  const info = stockInfo[selectedSymbol] || { emoji: '📈', sector: 'Other' };
 
-    const result = executeStockBuy?.(
-      selectedSymbol,
-      selectedAsset?.name ?? selectedSymbol,
-      effectiveShares,
-      safeAsk,
-      commission
-    );
-
-    if (result?.success) {
-      await refreshUser?.();
-
-      // history sync (best-effort)
-      try {
-        const uid = (user as any)?.id;
-        if (uid) {
-          const state = (useTradingAccountStore as any).getState?.() || {};
-          const pos = (state.stockPositions || []).find((p: any) => p.symbol === selectedSymbol);
-          if (pos) {
-            saveTradeToHistory({
-              id: pos.id,
-              userId: uid,
-              marketType: 'stocks',
-              assetType: 'stock',
-              pair: selectedSymbol,
-              symbol: selectedSymbol,
-              type: 'buy',
-              side: 'buy',
-              quantity: pos.qty,
-              amount: pos.qty * safeAsk,
-              entryPrice: pos.avgEntry ?? safeAsk,
-              leverage: 1,
-              openedAt: new Date().toISOString(),
-              notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
-            }).catch(() => {});
-          }
-        }
-      } catch {}
-
-      pushNotif({ type: 'success', message: `Bought ${effectiveShares} ${selectedSymbol} @ $${safeAsk.toFixed(2)}` });
-    } else {
-      pushNotif({ type: 'error', message: result?.error || 'Trade failed' });
-    }
-  };
-
-  const openSell = (pos: StockPosition) => {
-    const qty = clampInt(n((pos as any)?.qty, 0), 0, 1_000_000);
-    setPositionToSell(pos);
-    setSellQty(Math.max(1, Math.min(qty, qty)));
-    setShowSellModal(true);
-  };
-
-  const handleSell = async () => {
-    if (!positionToSell || sellQty <= 0) return;
-
-    const safeBid = Number.isFinite(bidPrice) && bidPrice > 0 ? bidPrice : 0;
-    if (!safeBid) {
-      pushNotif({ type: 'error', message: 'No live bid yet. Try again.' }, 2500);
-      return;
-    }
-
-    const sellCommission = Math.max(0.99, sellQty * safeBid * 0.001);
-    const result = executeStockSell?.((positionToSell as any).id, sellQty, safeBid, sellCommission);
-
-    if (result?.success) {
-      const pnl = Number(result?.realizedPnL ?? 0);
-      await refreshUser?.();
-
-      // history sync (best-effort)
-      try {
-        const uid = (user as any)?.id;
-        if (uid) {
-          const after = ((useTradingAccountStore as any).getState?.() || {}).stockPositions || [];
-          const still = after.find((p: any) => p.id === (positionToSell as any).id);
-
-          if (still) {
-            saveTradeToHistory({
-              id: still.id,
-              userId: uid,
-              marketType: 'stocks',
-              assetType: 'stock',
-              pair: still.symbol,
-              symbol: still.symbol,
-              type: 'buy',
-              side: 'buy',
-              quantity: still.qty,
-              entryPrice: still.avgEntry ?? 0,
-              notes: JSON.stringify({ model: 'spot_hold', partial: true }),
-            }).catch(() => {});
-          } else {
-            closeTradeInHistory({
-              tradeId: (positionToSell as any).id,
-              userId: uid,
-              exitPrice: safeBid,
-              pnl,
-              status: 'closed',
-              closedAt: new Date().toISOString(),
-            }).catch(() => {});
-          }
-        }
-      } catch {}
-
-      pushNotif({
-        type: 'success',
-        message: `Sold ${sellQty} ${(positionToSell as any).symbol} for ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`,
-      });
-    } else {
-      pushNotif({ type: 'error', message: result?.error || 'Sell failed' });
-    }
-
-    setShowSellModal(false);
-    setPositionToSell(null);
-    setSellQty(0);
-  };
-
-  // ===== UI helpers
-  const statusDot =
-    sseState === 'live' ? 'bg-emerald-400' : sseState === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-rose-400';
-  const statusText = sseState === 'live' ? 'Live' : sseState === 'connecting' ? 'Connecting' : 'Offline';
-
-  const mobileTabs = (
-    <div className="lg:hidden px-3 pb-2">
-      <div className="grid grid-cols-3 gap-2 rounded-xl bg-white/5 p-1 border border-white/10">
-        {(
-          [
-            { k: 'chart', label: 'Chart' },
-            { k: 'trade', label: 'Trade' },
-            { k: 'portfolio', label: 'Portfolio' },
-          ] as const
-        ).map((t) => (
-          <button
-            key={t.k}
-            onClick={() => setMobileTab(t.k)}
-            className={`rounded-lg px-3 py-2 text-sm transition ${
-              mobileTab === t.k ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+  if (!hasMounted) {
+    return (
+      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex items-center justify-center bg-void">
+        <div className="animate-pulse text-slate-500 text-sm">Loading stocks trading…</div>
       </div>
-    </div>
-  );
+    );
+  }
 
   return (
     <KYCGate action="trade stocks">
-      {/* FIX: dvh + min-h-0 chain stops the “endless void” */}
-      <div
-        className="
-          h-[calc(100vh-4rem)]
-          lg:h-[calc(100vh-5rem)]
-          supports-[height:100dvh]:h-[calc(100dvh-4rem)]
-          lg:supports-[height:100dvh]:h-[calc(100dvh-5rem)]
-          flex flex-col bg-void overflow-hidden min-h-0 overscroll-none
-        "
-      >
-        {/* top header */}
-        <div className="px-4 lg:px-6 pt-4 lg:pt-6 pb-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-lg">
-              {info.emoji}
-            </div>
-
-            <div>
-              <div className="flex items-center gap-2">
-                <div className="text-white font-semibold text-lg">{selectedSymbol}</div>
-                <div className="text-white/50 text-sm hidden sm:block">{selectedAsset?.name}</div>
-
-                <div className="ml-2 flex items-center gap-2">
-                  <span className={`h-2.5 w-2.5 rounded-full ${statusDot}`} />
-                  <span className="text-xs text-white/60">{statusText}</span>
-                  {candlesStale ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full border border-white/10 bg-white/5 text-white/60">
-                      cached
-                    </span>
-                  ) : null}
+      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
+        {/* Header */}
+        <div className="flex-shrink-0 px-3 py-2 sm:px-4 sm:py-3 border-b border-white/10 bg-obsidian">
+          <div className="flex items-center justify-between gap-2 sm:gap-4">
+            {/* Asset Selector */}
+            <button
+              onClick={() => setShowAssetSelector(true)}
+              className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-1.5 sm:py-2 bg-white/5 hover:bg-white/10 rounded-xl transition-colors min-w-0"
+            >
+              <div className="flex items-center gap-1 sm:gap-2">
+                <span className="text-lg sm:text-xl">{info.emoji}</span>
+                <div className="text-left">
+                  <p className="text-sm sm:text-base font-semibold text-cream truncate">{selectedSymbol}</p>
+                  <p className="text-xs text-cream/50 hidden sm:block">{selectedAsset?.name}</p>
                 </div>
               </div>
+              <ChevronDown className="w-4 h-4 text-cream/50 flex-shrink-0" />
+            </button>
 
-              <div className="flex items-center gap-3 mt-0.5">
-                <div className="text-white text-xl font-semibold">{fmtMoney(price)}</div>
-                <div className={`text-sm ${up ? 'text-emerald-300' : 'text-rose-300'}`}>{fmtPct(changePercent24h)}</div>
-                <div className="text-xs text-white/50 hidden md:block">
-                  Bid {fmtMoney(bidPrice)} • Ask {fmtMoney(askPrice)}
-                </div>
+            {/* Price */}
+            <div className="flex items-center gap-3 sm:gap-6">
+              <div className="text-center">
+                <p className="text-lg sm:text-2xl font-mono font-bold text-cream">
+                  ${Number.isFinite(price) ? price.toFixed(2) : '0.00'}
+                </p>
+                <p className={`text-xs ${up ? 'text-profit' : 'text-loss'}`}>
+                  {up ? '+' : ''}
+                  {Number.isFinite(changePercent24h) ? changePercent24h.toFixed(2) : '0.00'}%
+                </p>
               </div>
             </div>
-          </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => toggleFavorite(selectedSymbol)}
-              className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-              title="Favorite"
+            {/* Live status */}
+            <div
+              className={`hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg ${
+                sseState === 'live' ? 'bg-profit/10' : 'bg-white/5'
+              }`}
+              title={candlesStale ? 'Showing cached chart' : 'Live chart'}
             >
-              {favorites.includes(selectedSymbol) ? (
-                <Star className="h-5 w-5 text-amber-300" />
-              ) : (
-                <StarOff className="h-5 w-5 text-white/70" />
-              )}
-            </button>
-
-            <button
-              onClick={() => setShowAssetSelector((v) => !v)}
-              className="h-10 px-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center gap-2"
-            >
-              <span className="text-sm text-white/90">Select</span>
-              <ChevronDown className="h-4 w-4 text-white/60" />
-            </button>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  sseState === 'live'
+                    ? 'bg-profit animate-pulse'
+                    : sseState === 'connecting'
+                      ? 'bg-gold animate-pulse'
+                      : 'bg-slate-500'
+                }`}
+              />
+              <span className={`text-sm font-medium ${sseState === 'live' ? 'text-profit' : 'text-cream/70'}`}>
+                {sseState === 'live' ? 'Live' : sseState === 'connecting' ? 'Connecting' : 'Offline'}
+              </span>
+            </div>
           </div>
         </div>
 
-        {/* asset selector */}
-        <AnimatePresence>
-          {showAssetSelector ? (
-            <motion.div
-              initial={{ opacity: 0, y: -8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              className="px-4 lg:px-6 pb-4"
+        {/* Mobile Tabs */}
+        <div className="lg:hidden flex-shrink-0 flex border-b border-white/10 bg-obsidian">
+          {(['chart', 'trade', 'portfolio'] as MobileTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                mobileTab === tab ? 'text-gold border-b-2 border-gold bg-gold/5' : 'text-cream/50'
+              }`}
             >
-              <div className="rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
-                <div className="p-3 border-b border-white/10 flex items-center gap-2">
-                  <div className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
-                    <Search className="h-4 w-4 text-white/70" />
-                  </div>
-                  <input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Search symbol or name…"
-                    className="flex-1 bg-transparent outline-none text-white placeholder:text-white/40 text-sm"
-                  />
+              {tab === 'chart' && 'Chart'}
+              {tab === 'trade' && 'Trade'}
+              {tab === 'portfolio' && `Portfolio (${stockPositions.length})`}
+            </button>
+          ))}
+        </div>
+
+        {/* Main */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
+          {/* Chart */}
+          <div className={`${mobileTab === 'chart' ? 'flex' : 'hidden'} lg:flex flex-col flex-1 min-h-0 h-full`}>
+            {/* Controls */}
+            <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 border-b border-white/10 bg-charcoal/50">
+              <div className="flex items-center gap-1 overflow-x-auto">
+                {timeframes.map((tf) => (
                   <button
-                    onClick={() => setShowAssetSelector(false)}
-                    className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
+                    key={tf}
+                    onClick={() => setChartTimeframe(tf)}
+                    className={`px-2 sm:px-3 py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                      chartTimeframe === tf ? 'bg-gold text-void' : 'text-cream/50 hover:text-cream hover:bg-white/5'
+                    }`}
                   >
-                    <X className="h-4 w-4 text-white/70" />
+                    {tf}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="hidden sm:block text-xs text-cream/40">
+                  {candlesStale ? 'Cached' : 'Live'} {candlesUpdatedAt ? `· ${new Date(candlesUpdatedAt).toLocaleTimeString()}` : ''}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setChartType('candle')}
+                    className={`p-1.5 rounded-lg ${chartType === 'candle' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
+                  >
+                    <CandlestickChart className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setChartType('line')}
+                    className={`p-1.5 rounded-lg ${chartType === 'line' ? 'bg-white/10 text-cream' : 'text-cream/40'}`}
+                  >
+                    <LineChartIcon className="w-4 h-4" />
                   </button>
                 </div>
+              </div>
+            </div>
 
-                <div className="max-h-[360px] overflow-auto">
-                  {filteredAssets.map((a) => {
-                    const q = quotes[a.symbol];
-                    const p = q?.price ?? a.price ?? 0;
-                    const pct = q?.changePercent24h ?? a.changePercent24h ?? 0;
-                    const isSel = a.symbol === selectedSymbol;
-                    const fav = favorites.includes(a.symbol);
-                    const up2 = pct >= 0;
+            {/* Chart area */}
+            <div
+              ref={chartRef}
+              className="flex-1 relative bg-charcoal/30 w-full overflow-hidden"
+              style={{ minHeight: '250px', height: 'calc(100% - 48px)' }}
+            >
+              {loadingChart && (
+                <div className="absolute top-2 right-2 z-10 px-2 py-1 rounded-lg bg-white/5 border border-white/10">
+                  <span className="text-xs text-cream/60">Syncing…</span>
+                </div>
+              )}
 
+              <svg className="w-full h-full block" viewBox={`0 0 ${chart.w} ${chart.h}`} preserveAspectRatio="xMidYMid meet">
+                {/* grid */}
+                {[...Array(8)].map((_, i) => (
+                  <line key={`h-${i}`} x1="0" y1={i * (chart.h / 8)} x2={chart.w} y2={i * (chart.h / 8)} stroke="rgba(255,255,255,0.05)" />
+                ))}
+                {[...Array(16)].map((_, i) => (
+                  <line key={`v-${i}`} x1={i * (chart.w / 16)} y1="0" x2={i * (chart.w / 16)} y2={chart.h} stroke="rgba(255,255,255,0.05)" />
+                ))}
+
+                {/* candles */}
+                {chartType === 'candle' &&
+                  chart.items.map((c, i) => (
+                    <g key={i}>
+                      <line x1={c.x} y1={c.hY} x2={c.x} y2={c.lY} stroke={c.isUp ? '#00d9a5' : '#ef4444'} strokeWidth="1" />
+                      <rect
+                        x={c.x - c.bodyW / 2}
+                        y={Math.min(c.oY, c.cY)}
+                        width={c.bodyW}
+                        height={Math.max(1, Math.abs(c.cY - c.oY))}
+                        fill={c.isUp ? '#00d9a5' : '#ef4444'}
+                        rx="1"
+                      />
+                    </g>
+                  ))}
+
+                {/* line */}
+                {chartType === 'line' && chart.linePath && (
+                  <>
+                    <path d={chart.linePath} fill="none" stroke={up ? '#00d9a5' : '#ef4444'} strokeWidth="2" />
+                    <path
+                      d={`${chart.linePath} L ${chart.w - chart.pad.r} ${chart.h - chart.pad.b} L ${chart.pad.l} ${chart.h - chart.pad.b} Z`}
+                      fill={up ? 'rgba(0,217,165,0.15)' : 'rgba(239,68,68,0.15)'}
+                    />
+                  </>
+                )}
+
+                {/* current price marker */}
+                {chart.max > 0 &&
+                  Number.isFinite(price) &&
+                  (() => {
+                    const range = chart.max - chart.min || 1;
+                    const priceY = chart.pad.t + ((chart.max - price) / range) * (chart.h - chart.pad.t - chart.pad.b);
                     return (
-                      <button
-                        key={a.symbol}
-                        onClick={() => {
-                          setSelectedSymbol(a.symbol);
-                          setShowAssetSelector(false);
-                          setSearchQuery('');
-                        }}
-                        className={`w-full flex items-center justify-between px-4 py-3 border-b border-white/5 hover:bg-white/5 transition text-left ${
-                          isSel ? 'bg-white/5' : ''
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <div className="text-white font-semibold">{a.symbol}</div>
-                          <div className="text-xs text-white/50">{a.name}</div>
-                          {fav ? <Star className="h-4 w-4 text-amber-300" /> : null}
-                        </div>
-
-                        <div className="text-right">
-                          <div className="text-sm text-white">{fmtMoney(p)}</div>
-                          <div className={`text-xs ${up2 ? 'text-emerald-300' : 'text-rose-300'}`}>{fmtPct(pct)}</div>
-                        </div>
-                      </button>
+                      <>
+                        <line x1="0" y1={priceY} x2={chart.w} y2={priceY} stroke="#d4af37" strokeDasharray="4" />
+                        <rect x={chart.w - 65} y={priceY - 10} width="60" height="20" fill="#d4af37" rx="3" />
+                        <text x={chart.w - 35} y={priceY + 4} textAnchor="middle" fill="#0a0a0f" fontSize="10" fontFamily="monospace">
+                          ${price.toFixed(2)}
+                        </text>
+                      </>
                     );
-                  })}
+                  })()}
 
-                  {!filteredAssets.length ? <div className="p-4 text-sm text-white/60">No results.</div> : null}
+                {chart.max > 0 && (
+                  <>
+                    <text x={chart.w - 6} y={16} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
+                      ${chart.max.toFixed(2)}
+                    </text>
+                    <text x={chart.w - 6} y={chart.h - 8} textAnchor="end" fill="#666" fontSize="10" fontFamily="monospace">
+                      ${chart.min.toFixed(2)}
+                    </text>
+                  </>
+                )}
+              </svg>
+            </div>
+          </div>
+
+          {/* Trade panel */}
+          <div
+            className={`${mobileTab === 'trade' ? 'flex' : 'hidden'} lg:flex flex-col w-full lg:w-80 xl:w-96 border-l border-white/10 bg-obsidian overflow-y-auto`}
+          >
+            {/* Summary */}
+            <div className="p-3 border-b border-white/10">
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Cash</p>
+                  <p className="text-sm font-semibold text-cream">{fmtMoney(cashBalance)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Portfolio</p>
+                  <p className="text-sm font-semibold text-profit">{fmtMoney(portfolioValue)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">Total</p>
+                  <p className="text-sm font-semibold text-cream">{fmtMoney(totalEquity)}</p>
+                </div>
+                <div className="p-2 bg-white/5 rounded-lg">
+                  <p className="text-xs text-cream/50">P&amp;L</p>
+                  <p className={`text-sm font-semibold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                    {unrealizedPnL >= 0 ? '+' : ''}${Math.abs(unrealizedPnL).toFixed(2)}
+                  </p>
                 </div>
               </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
+            </div>
 
-        {mobileTabs}
+            {/* Mode */}
+            <div className="p-3 border-b border-white/10">
+              <div className="flex gap-2 mb-4">
+                <button
+                  onClick={() => setOrderMode('shares')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    orderMode === 'shares' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
+                  }`}
+                >
+                  Shares
+                </button>
+                <button
+                  onClick={() => setOrderMode('dollars')}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    orderMode === 'dollars' ? 'bg-gold text-void' : 'bg-white/5 text-cream/50 hover:bg-white/10'
+                  }`}
+                >
+                  Dollars
+                </button>
+              </div>
 
-        {/* content */}
-        <div className="flex-1 px-4 lg:px-6 pb-5 overflow-hidden min-h-0">
-          <div className="h-full grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 overflow-hidden min-h-0">
-            {/* CHART */}
-            <div className={`lg:col-span-8 ${mobileTab !== 'chart' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
-              <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
-                <div className="p-3 border-b border-white/10 flex items-center justify-between gap-2">
+              {orderMode === 'shares' ? (
+                <div>
+                  <label className="text-xs text-cream/50 mb-2 block">Number of Shares</label>
                   <div className="flex items-center gap-2">
-                    <div className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
-                      <Activity className="h-4 w-4 text-white/70" />
-                    </div>
-                    <div>
-                      <div className="text-white text-sm font-semibold">Price chart</div>
-                      <div className="text-xs text-white/50">
-                        {info.sector} • Updated {candlesUpdatedAt ? new Date(candlesUpdatedAt).toLocaleTimeString() : '—'}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <div className="hidden sm:flex items-center gap-1 rounded-xl bg-white/5 border border-white/10 p-1">
-                      {timeframes.map((tf) => (
-                        <button
-                          key={tf}
-                          onClick={() => setChartTimeframe(tf)}
-                          className={`px-2.5 py-1.5 rounded-lg text-xs transition ${
-                            chartTimeframe === tf ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white'
-                          }`}
-                        >
-                          {tf}
-                        </button>
-                      ))}
-                    </div>
-
                     <button
-                      onClick={() => setChartType((x) => (x === 'candle' ? 'line' : 'candle'))}
-                      className="h-9 px-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center gap-2"
-                      title="Toggle chart"
+                      onClick={() => setShareQty(Math.max(1, shareQty - 1))}
+                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
                     >
-                      {chartType === 'candle' ? (
-                        <CandlestickChart className="h-4 w-4 text-white/70" />
-                      ) : (
-                        <LineChartIcon className="h-4 w-4 text-white/70" />
-                      )}
-                      <span className="text-xs text-white/70 hidden sm:block">
-                        {chartType === 'candle' ? 'Candles' : 'Line'}
-                      </span>
+                      <Minus className="w-4 h-4 text-cream" />
+                    </button>
+                    <input
+                      type="number"
+                      value={shareQty}
+                      onChange={(e) => setShareQty(Math.max(1, parseInt(e.target.value) || 1))}
+                      min={1}
+                      className="flex-1 h-10 px-3 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
+                    />
+                    <button
+                      onClick={() => setShareQty(shareQty + 1)}
+                      className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg hover:bg-white/10"
+                    >
+                      <Plus className="w-4 h-4 text-cream" />
                     </button>
                   </div>
-                </div>
-
-                {/* mobile TF row */}
-                <div className="sm:hidden px-3 pt-3">
-                  <div className="flex items-center gap-1 rounded-xl bg-white/5 border border-white/10 p-1 overflow-auto">
-                    {timeframes.map((tf) => (
+                  <div className="flex gap-1 mt-2">
+                    {[1, 5, 10, 25, 50].map((qty) => (
                       <button
-                        key={tf}
-                        onClick={() => setChartTimeframe(tf)}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs transition whitespace-nowrap ${
-                          chartTimeframe === tf ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white'
+                        key={qty}
+                        onClick={() => setShareQty(qty)}
+                        className={`flex-1 py-1 text-xs rounded-lg ${
+                          shareQty === qty ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
                         }`}
                       >
-                        {tf}
+                        {qty}
                       </button>
                     ))}
                   </div>
                 </div>
-
-                {/* IMPORTANT: min-h-0 keeps SVG from “growing forever” */}
-                <div ref={chartRef} className="flex-1 p-3 min-h-0">
-                  <div className="h-full rounded-2xl bg-black/20 border border-white/5 overflow-hidden relative">
-                    {loadingChart ? (
-                      <div className="absolute inset-0 flex items-center justify-center text-white/60 text-sm">
-                        Loading…
-                      </div>
-                    ) : null}
-
-                    <svg width={chart.w} height={chart.h} className="block">
-                      {/* grid */}
-                      <g opacity="0.12">
-                        {Array.from({ length: 5 }).map((_, i) => {
-                          const y = 16 + ((chart.h - 34) / 4) * i;
-                          return <line key={i} x1={8} y1={y} x2={chart.w - 8} y2={y} stroke="white" strokeWidth="1" />;
-                        })}
-                      </g>
-
-                      {/* y labels */}
-                      <g opacity="0.6">
-                        {Array.from({ length: 5 }).map((_, i) => {
-                          const y = 16 + ((chart.h - 34) / 4) * i;
-                          const v = chart.max - ((chart.max - chart.min) / 4) * i;
-                          return (
-                            <text
-                              key={i}
-                              x={chart.w - 8}
-                              y={y + 4}
-                              textAnchor="end"
-                              fontSize="10"
-                              fill="white"
-                              opacity="0.55"
-                            >
-                              {v ? `$${v.toFixed(2)}` : ''}
-                            </text>
-                          );
-                        })}
-                      </g>
-
-                      {/* line */}
-                      {chartType === 'line' && chart.linePath ? (
-                        <path d={chart.linePath} fill="none" stroke="white" strokeWidth="2" opacity="0.85" />
-                      ) : null}
-
-                      {/* candles */}
-                      {chartType === 'candle'
-                        ? chart.items.map((it: any, i: number) => {
-                            const top = Math.min(it.oY, it.cY);
-                            const bot = Math.max(it.oY, it.cY);
-                            const bodyH = Math.max(2, bot - top);
-
-                            return (
-                              <g key={i} opacity="0.9">
-                                <line x1={it.x} y1={it.hY} x2={it.x} y2={it.lY} stroke="white" strokeWidth="1" opacity="0.55" />
-                                <rect
-                                  x={it.x - it.bodyW / 2}
-                                  y={top}
-                                  width={it.bodyW}
-                                  height={bodyH}
-                                  rx="2"
-                                  fill="white"
-                                  opacity={it.isUp ? 0.85 : 0.45}
-                                />
-                              </g>
-                            );
-                          })
-                        : null}
-                    </svg>
-
-                    <div className="absolute bottom-3 left-3 flex items-center gap-2">
-                      <div className="text-xs text-white/60 px-2 py-1 rounded-lg border border-white/10 bg-white/5">
-                        {selectedSymbol}
-                      </div>
-                      <div className="text-xs text-white/60 px-2 py-1 rounded-lg border border-white/10 bg-white/5">
-                        {chartTimeframe}
-                      </div>
-                    </div>
+              ) : (
+                <div>
+                  <label className="text-xs text-cream/50 mb-2 block">Dollar Amount</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cream/50">$</span>
+                    <input
+                      type="number"
+                      value={dollarAmount}
+                      onChange={(e) => setDollarAmount(Math.max(1, parseFloat(e.target.value) || 1))}
+                      min={1}
+                      className="w-full h-10 pl-7 pr-3 bg-white/5 border border-white/10 rounded-lg text-cream font-mono focus:outline-none focus:border-gold"
+                    />
                   </div>
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT COLUMN */}
-            <div className={`lg:col-span-4 ${mobileTab === 'chart' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
-              <div className="h-full grid grid-rows-2 gap-4 lg:gap-6 overflow-hidden min-h-0">
-                {/* TRADE */}
-                <div className={`${mobileTab !== 'trade' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
-                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
-                    <div className="p-3 border-b border-white/10 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
-                          <Wallet className="h-4 w-4 text-white/70" />
-                        </div>
-                        <div>
-                          <div className="text-white text-sm font-semibold">Place order</div>
-                          <div className="text-xs text-white/50">Spot stocks • Commission ~0.10%</div>
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <div className="text-xs text-white/50">Cash</div>
-                        <div className="text-sm text-white font-semibold">{fmtMoney(cashBalance)}</div>
-                      </div>
-                    </div>
-
-                    <div className="p-3 space-y-3 overflow-auto min-h-0">
-                      <div className="grid grid-cols-2 gap-2 rounded-xl bg-white/5 border border-white/10 p-1">
-                        <button
-                          onClick={() => setOrderMode('shares')}
-                          className={`rounded-lg px-3 py-2 text-sm transition ${
-                            orderMode === 'shares' ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white'
-                          }`}
-                        >
-                          Shares
-                        </button>
-                        <button
-                          onClick={() => setOrderMode('dollars')}
-                          className={`rounded-lg px-3 py-2 text-sm transition ${
-                            orderMode === 'dollars' ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white'
-                          }`}
-                        >
-                          Dollars
-                        </button>
-                      </div>
-
-                      {orderMode === 'shares' ? (
-                        <div className="rounded-2xl bg-white/5 border border-white/10 p-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="text-xs text-white/60">Quantity (shares)</div>
-                            <div className="text-xs text-white/60">Max {Math.max(0, Math.floor(cashBalance / (safeAsk || 1)))}</div>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => setShareQty((v) => Math.max(1, v - 1))}
-                              className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-                            >
-                              <Minus className="h-4 w-4 text-white/70" />
-                            </button>
-
-                            <input
-                              value={shareQty}
-                              onChange={(e) => setShareQty(clampInt(n(e.target.value, 1), 1, 1_000_000))}
-                              className="flex-1 h-10 rounded-xl bg-black/20 border border-white/10 px-3 outline-none text-white"
-                              inputMode="numeric"
-                            />
-
-                            <button
-                              onClick={() => setShareQty((v) => Math.min(1_000_000, v + 1))}
-                              className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-                            >
-                              <Plus className="h-4 w-4 text-white/70" />
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="rounded-2xl bg-white/5 border border-white/10 p-3">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="text-xs text-white/60">Amount (USD)</div>
-                            <div className="text-xs text-white/60">Min $10</div>
-                          </div>
-
-                          <input
-                            value={dollarAmount}
-                            onChange={(e) => setDollarAmount(clampInt(n(e.target.value, 10), 10, 1_000_000_000))}
-                            className="w-full h-10 rounded-xl bg-black/20 border border-white/10 px-3 outline-none text-white"
-                            inputMode="numeric"
-                          />
-
-                          <div className="mt-2 grid grid-cols-4 gap-2">
-                            {[50, 100, 250, 500].map((x) => (
-                              <button
-                                key={x}
-                                onClick={() => setDollarAmount(x)}
-                                className="rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition py-2 text-xs text-white/80"
-                              >
-                                ${x}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="rounded-2xl bg-white/5 border border-white/10 p-3 space-y-2">
-                        <div className="flex items-center justify-between text-xs text-white/60">
-                          <span>Est. shares</span>
-                          <span className="text-white/80 font-medium">{effectiveShares}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-xs text-white/60">
-                          <span>Order value</span>
-                          <span className="text-white/80 font-medium">{fmtMoney(orderValue)}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-xs text-white/60">
-                          <span>Commission</span>
-                          <span className="text-white/80 font-medium">{fmtMoney(commission)}</span>
-                        </div>
-                        <div className="flex items-center justify-between text-xs text-white/60">
-                          <span>Total</span>
-                          <span className="text-white font-semibold">{fmtMoney(totalCost)}</span>
-                        </div>
-                      </div>
-
+                  <div className="flex gap-1 mt-2">
+                    {[50, 100, 250, 500, 1000].map((amt) => (
                       <button
-                        onClick={handleBuy}
-                        disabled={!canBuy}
-                        className={`w-full h-11 rounded-xl font-semibold transition ${
-                          canBuy ? 'bg-white text-black hover:opacity-90 active:scale-[0.99]' : 'bg-white/10 text-white/40 cursor-not-allowed'
+                        key={amt}
+                        onClick={() => setDollarAmount(amt)}
+                        className={`flex-1 py-1 text-xs rounded-lg ${
+                          dollarAmount === amt ? 'bg-gold text-void' : 'bg-white/5 text-cream/50'
                         }`}
                       >
-                        Buy {selectedSymbol}
+                        ${amt}
                       </button>
-
-                      <div className="text-xs text-white/50">
-                        Uses Alpaca data. If live stream is down, it falls back to cached/polling so the chart never goes blank.
-                      </div>
-                    </div>
+                    ))}
                   </div>
+                  <p className="text-xs text-cream/40 mt-2">
+                    ≈ {effectiveShares} shares {safeAsk > 0 ? `@ $${safeAsk.toFixed(2)}` : ''}
+                  </p>
                 </div>
+              )}
+            </div>
 
-                {/* PORTFOLIO */}
-                <div className={`${mobileTab !== 'portfolio' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
-                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
-                    <div className="p-3 border-b border-white/10 flex items-center justify-between">
-                      <div>
-                        <div className="text-white text-sm font-semibold">Portfolio</div>
-                        <div className="text-xs text-white/50">
-                          Equity {fmtMoney(totalEquity)} • PnL{' '}
-                          <span className={unrealizedPnL >= 0 ? 'text-emerald-300' : 'text-rose-300'}>
-                            {unrealizedPnL >= 0 ? '+' : ''}
-                            {fmtMoney(unrealizedPnL)}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="text-right">
-                        <div className="text-xs text-white/50">Holdings</div>
-                        <div className="text-sm text-white font-semibold">{(stockPositions || []).length}</div>
-                      </div>
-                    </div>
-
-                    {/* CRITICAL: min-h-0 so this becomes a REAL scroll area */}
-                    <div className="flex-1 overflow-auto min-h-0">
-                      {(stockPositions || []).length ? (
-                        (stockPositions || []).map((p: any) => {
-                          const sym = String(p?.symbol || '').toUpperCase();
-                          const q = quotes[sym];
-                          const cur = n(q?.price ?? p?.currentPrice ?? p?.price, 0);
-                          const qty = n(p?.qty, 0);
-                          const avg = n(p?.avgEntry ?? p?.avgPrice, 0);
-                          const mv = n(p?.marketValue, cur * qty);
-                          const upl = n(p?.unrealizedPnL, (cur - avg) * qty);
-                          const uplPct = avg > 0 ? ((cur - avg) / avg) * 100 : 0;
-
-                          return (
-                            <div key={p?.id || sym} className="px-4 py-3 border-b border-white/5 flex items-center justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <div className="text-white font-semibold">{sym}</div>
-                                  <div className="text-xs text-white/50 truncate">{p?.name || ''}</div>
-                                </div>
-                                <div className="text-xs text-white/50 mt-0.5">
-                                  {qty} shares • Avg {fmtMoney(avg)} • Now {fmtMoney(cur)}
-                                </div>
-                              </div>
-
-                              <div className="text-right flex items-center gap-3">
-                                <div>
-                                  <div className="text-sm text-white font-semibold">{fmtMoney(mv)}</div>
-                                  <div className={`text-xs ${upl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                                    {upl >= 0 ? '+' : ''}
-                                    {fmtMoney(upl)} ({fmtPct(uplPct)})
-                                  </div>
-                                </div>
-
-                                <button
-                                  onClick={() => openSell(p)}
-                                  className="h-9 px-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition text-sm text-white/85"
-                                >
-                                  Sell
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })
-                      ) : (
-                        <div className="p-6 text-sm text-white/60">No stock positions yet. Buy a stock to see it here.</div>
-                      )}
-                    </div>
-
-                    <div className="p-3 border-t border-white/10 text-xs text-white/50">Tip: add favorites so your quotes list stays hot.</div>
-                  </div>
+            {/* Summary + Buy */}
+            <div className="p-3 space-y-4">
+              <div className="p-3 bg-white/5 rounded-xl space-y-2">
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Shares</span>
+                  <span className="text-cream">{effectiveShares}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Ask</span>
+                  <span className="text-cream font-mono">${safeAsk > 0 ? safeAsk.toFixed(2) : '—'}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Order Value</span>
+                  <span className="text-cream">${orderValue.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-cream/50">Commission</span>
+                  <span className="text-cream">${commission.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-sm pt-2 border-t border-white/10">
+                  <span className="text-cream font-medium">Total</span>
+                  <span className="text-gold font-bold">${totalCost.toFixed(2)}</span>
                 </div>
               </div>
+
+              <button
+                onClick={handleBuy}
+                disabled={!canBuy}
+                className="w-full py-4 rounded-xl font-bold text-lg bg-profit text-void hover:bg-profit/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Buy {effectiveShares} {effectiveShares === 1 ? 'Share' : 'Shares'}
+              </button>
+
+              {!canBuy && (
+                <div className="p-2 bg-loss/10 rounded-lg border border-loss/20">
+                  {safeAsk <= 0 ? (
+                    <p className="text-xs text-loss text-center">Waiting for live price…</p>
+                  ) : effectiveShares < 1 ? (
+                    <p className="text-xs text-loss text-center">Amount too small — shares becomes 0.</p>
+                  ) : (
+                    <>
+                      <p className="text-xs text-loss text-center mb-1">
+                        Insufficient funds. Need ${(totalCost - cashBalance).toFixed(2)} more.
+                      </p>
+                      <Link
+                        href="/dashboard/wallet"
+                        className="flex items-center justify-center gap-1 text-xs text-gold hover:text-gold/80 font-medium"
+                      >
+                        <Wallet className="w-3 h-3" />
+                        Deposit Funds
+                      </Link>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Portfolio panel (Mobile) */}
+          <div className={`${mobileTab === 'portfolio' ? 'flex' : 'hidden'} lg:hidden flex-col flex-1 overflow-y-auto bg-obsidian`}>
+            <div className="p-3">
+              <h3 className="text-sm font-semibold text-cream mb-3">Your Holdings ({stockPositions.length})</h3>
+
+              {stockPositions.length === 0 ? (
+                <div className="text-center py-8 text-cream/50">
+                  <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p className="text-sm">No holdings yet</p>
+                  <p className="text-xs mt-1">Buy stocks to start building your portfolio</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {stockPositions.map((pos: any) => {
+                    const pi = stockInfo[pos.symbol] || { emoji: '📈', sector: 'Other' };
+                    return (
+                      <div key={pos.id} className="p-3 bg-white/5 rounded-xl">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-lg">{pi.emoji}</span>
+                            <span className="font-semibold text-cream">{pos.symbol}</span>
+                          </div>
+                          <span className={`font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+                          <div>
+                            <p className="text-cream/50">Shares</p>
+                            <p className="text-cream">{pos.qty}</p>
+                          </div>
+                          <div>
+                            <p className="text-cream/50">Avg Entry</p>
+                            <p className="text-cream font-mono">${Number(pos.avgEntry ?? 0).toFixed(2)}</p>
+                          </div>
+                          <div>
+                            <p className="text-cream/50">Value</p>
+                            <p className="text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</p>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setPositionToSell(pos);
+                            setSellQty(pos.qty);
+                            setShowSellModal(true);
+                          }}
+                          className="w-full py-2 bg-loss/20 text-loss text-sm font-medium rounded-lg hover:bg-loss/30 transition-colors"
+                        >
+                          Sell
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* TOAST */}
-        <AnimatePresence>
-          {notification ? (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4"
-            >
-              <div
-                className={`max-w-[92vw] rounded-2xl px-4 py-3 border shadow-lg backdrop-blur-md ${
-                  notification.type === 'success' ? 'bg-emerald-500/10 border-emerald-400/20' : 'bg-rose-500/10 border-rose-400/20'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  {notification.type === 'success' ? (
-                    <CheckCircle className="h-5 w-5 text-emerald-300" />
-                  ) : (
-                    <AlertCircle className="h-5 w-5 text-rose-300" />
-                  )}
-                  <div className="text-sm text-white/90">{notification.message}</div>
-                </div>
+        {/* Desktop Portfolio */}
+        <div className="hidden lg:block flex-shrink-0 h-48 border-t border-white/10 bg-obsidian overflow-y-auto">
+          <div className="p-3">
+            <h3 className="text-sm font-semibold text-cream mb-3">Holdings ({stockPositions.length})</h3>
+
+            {stockPositions.length === 0 ? (
+              <div className="text-center py-4 text-cream/50">
+                <p className="text-sm">No holdings yet</p>
               </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-cream/50 text-xs">
+                      <th className="text-left pb-2">Symbol</th>
+                      <th className="text-right pb-2">Shares</th>
+                      <th className="text-right pb-2">Avg Entry</th>
+                      <th className="text-right pb-2">Current</th>
+                      <th className="text-right pb-2">Value</th>
+                      <th className="text-right pb-2">P&amp;L</th>
+                      <th className="text-right pb-2">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stockPositions.map((pos: any) => {
+                      const cur = quotes[String(pos.symbol || '').toUpperCase()]?.price ?? pos.currentPrice ?? 0;
+                      return (
+                        <tr key={pos.id} className="border-t border-white/5">
+                          <td className="py-2 text-cream font-medium">{pos.symbol}</td>
+                          <td className="py-2 text-right text-cream">{pos.qty}</td>
+                          <td className="py-2 text-right font-mono text-cream">${Number(pos.avgEntry ?? 0).toFixed(2)}</td>
+                          <td className="py-2 text-right font-mono text-cream">${Number(cur).toFixed(2)}</td>
+                          <td className="py-2 text-right text-cream">${Number(pos.marketValue ?? 0).toFixed(2)}</td>
+                          <td className={`py-2 text-right font-semibold ${pos.unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
+                            {pos.unrealizedPnL >= 0 ? '+' : ''}${Number(pos.unrealizedPnL ?? 0).toFixed(2)}
+                          </td>
+                          <td className="py-2 text-right">
+                            <button
+                              onClick={() => {
+                                setPositionToSell(pos);
+                                setSellQty(pos.qty);
+                                setShowSellModal(true);
+                              }}
+                              className="px-3 py-1 bg-loss/20 text-loss text-xs font-medium rounded hover:bg-loss/30"
+                            >
+                              Sell
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
 
-        {/* SELL MODAL */}
+        {/* Asset Selector */}
         <AnimatePresence>
-          {showSellModal && positionToSell ? (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
-              onMouseDown={(e) => {
-                if (e.target === e.currentTarget) {
-                  setShowSellModal(false);
-                  setPositionToSell(null);
-                  setSellQty(0);
-                }
-              }}
-            >
+          {showAssetSelector && (
+            <>
               <motion.div
-                initial={{ opacity: 0, scale: 0.98, y: 8 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.98, y: 8 }}
-                className="w-full max-w-md rounded-2xl bg-[#0b0f14]/95 border border-white/10 overflow-hidden"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowAssetSelector(false)}
+                className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-md bg-obsidian rounded-2xl border border-white/10 z-50 flex flex-col max-h-[90vh]"
               >
-                <div className="p-4 border-b border-white/10 flex items-center justify-between">
-                  <div>
-                    <div className="text-white font-semibold">Sell {(positionToSell as any).symbol}</div>
-                    <div className="text-xs text-white/50">
-                      Bid {fmtMoney(bidPrice)} • You hold {n((positionToSell as any).qty, 0)} shares
-                    </div>
+                <div className="p-4 border-b border-white/10 flex-shrink-0">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-lg font-semibold text-cream">Select Stock</h3>
+                    <button onClick={() => setShowAssetSelector(false)}>
+                      <X className="w-5 h-5 text-cream/50" />
+                    </button>
                   </div>
-                  <button
-                    onClick={() => {
-                      setShowSellModal(false);
-                      setPositionToSell(null);
-                      setSellQty(0);
-                    }}
-                    className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-                  >
-                    <X className="h-4 w-4 text-white/70" />
-                  </button>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-cream/30" />
+                    <input
+                      type="text"
+                      placeholder="Search stocks..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-cream/30 focus:outline-none focus:border-gold"
+                    />
+                  </div>
                 </div>
 
-                <div className="p-4 space-y-3">
-                  <div className="rounded-2xl bg-white/5 border border-white/10 p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="text-xs text-white/60">Quantity</div>
-                      <button
-                        onClick={() => setSellQty(clampInt(n((positionToSell as any).qty, 0), 1, 1_000_000))}
-                        className="text-xs text-white/70 hover:text-white"
-                      >
-                        Sell max
-                      </button>
+                <div className="flex-1 overflow-y-auto p-2">
+                  {favorites.length > 0 && (
+                    <div className="mb-4">
+                      <p className="px-2 py-1 text-xs text-gold font-medium">⭐ Watchlist</p>
+                      {filteredAssets
+                        .filter((a) => favorites.includes(a.symbol))
+                        .map((asset) => {
+                          const q = quotes[asset.symbol];
+                          const p = q?.price ?? asset.price;
+                          const dp = q?.changePercent24h ?? asset.changePercent24h;
+                          const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
+                          return (
+                            <button
+                              key={asset.symbol}
+                              onClick={() => {
+                                setSelectedSymbol(asset.symbol);
+                                setShowAssetSelector(false);
+                              }}
+                              className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
+                            >
+                              <div className="flex items-center gap-3">
+                                <span className="text-xl">{ai.emoji}</span>
+                                <div className="text-left">
+                                  <p className="font-medium text-cream">{asset.symbol}</p>
+                                  <p className="text-xs text-cream/50">{asset.name}</p>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <div className="text-right">
+                                  <p className="font-mono text-cream">${Number.isFinite(p) ? p.toFixed(2) : '0.00'}</p>
+                                  <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                    {dp >= 0 ? '+' : ''}
+                                    {Number.isFinite(dp) ? dp.toFixed(2) : '0.00'}%
+                                  </p>
+                                </div>
+
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleFavorite(asset.symbol);
+                                  }}
+                                  className="p-1"
+                                >
+                                  <Star className="w-4 h-4 text-gold fill-gold" />
+                                </button>
+                              </div>
+                            </button>
+                          );
+                        })}
                     </div>
+                  )}
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setSellQty((v) => Math.max(1, v - 1))}
-                        className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-                      >
-                        <Minus className="h-4 w-4 text-white/70" />
-                      </button>
+                  <p className="px-2 py-1 text-xs text-cream/50 font-medium">All Stocks</p>
+                  {filteredAssets
+                    .filter((a) => !favorites.includes(a.symbol))
+                    .map((asset) => {
+                      const q = quotes[asset.symbol];
+                      const p = q?.price ?? asset.price;
+                      const dp = q?.changePercent24h ?? asset.changePercent24h;
+                      const ai = stockInfo[asset.symbol] || { emoji: '📈', sector: 'Other' };
+                      return (
+                        <button
+                          key={asset.symbol}
+                          onClick={() => {
+                            setSelectedSymbol(asset.symbol);
+                            setShowAssetSelector(false);
+                          }}
+                          className="w-full flex items-center justify-between p-3 hover:bg-white/5 rounded-xl transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-xl">{ai.emoji}</span>
+                            <div className="text-left">
+                              <p className="font-medium text-cream">{asset.symbol}</p>
+                              <p className="text-xs text-cream/50">{asset.name}</p>
+                            </div>
+                          </div>
 
-                      <input
-                        value={sellQty}
-                        onChange={(e) =>
-                          setSellQty(
-                            clampInt(
-                              n(e.target.value, 1),
-                              1,
-                              clampInt(n((positionToSell as any).qty, 1), 1, 1_000_000)
-                            )
-                          )
-                        }
-                        className="flex-1 h-10 rounded-xl bg-black/20 border border-white/10 px-3 outline-none text-white"
-                        inputMode="numeric"
-                      />
+                          <div className="flex items-center gap-2">
+                            <div className="text-right">
+                              <p className="font-mono text-cream">${Number.isFinite(p) ? p.toFixed(2) : '0.00'}</p>
+                              <p className={`text-xs ${dp >= 0 ? 'text-profit' : 'text-loss'}`}>
+                                {dp >= 0 ? '+' : ''}
+                                {Number.isFinite(dp) ? dp.toFixed(2) : '0.00'}%
+                              </p>
+                            </div>
 
-                      <button
-                        onClick={() =>
-                          setSellQty((v) =>
-                            Math.min(clampInt(n((positionToSell as any).qty, 1), 1, 1_000_000), v + 1)
-                          )
-                        }
-                        className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
-                      >
-                        <Plus className="h-4 w-4 text-white/70" />
-                      </button>
-                    </div>
-
-                    <div className="mt-3 text-xs text-white/60 flex items-center justify-between">
-                      <span>Est. proceeds</span>
-                      <span className="text-white/85 font-medium">{fmtMoney(sellQty * (bidPrice || 0))}</span>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleSell}
-                    className="w-full h-11 rounded-xl font-semibold bg-white text-black hover:opacity-90 active:scale-[0.99] transition"
-                  >
-                    Confirm sell
-                  </button>
-
-                  <div className="text-xs text-white/50">This will reduce (or close) your position and sync trade history.</div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFavorite(asset.symbol);
+                              }}
+                              className="p-1"
+                            >
+                              <StarOff className="w-4 h-4 text-cream/30 hover:text-gold" />
+                            </button>
+                          </div>
+                        </button>
+                      );
+                    })}
                 </div>
               </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Sell Modal */}
+        <AnimatePresence>
+          {showSellModal && positionToSell && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setShowSellModal(false)}
+                className="fixed inset-0 bg-void/80 backdrop-blur-sm z-50"
+              />
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="fixed inset-4 sm:inset-auto sm:top-1/2 sm:left-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:w-full sm:max-w-sm bg-obsidian rounded-2xl p-4 sm:p-6 border border-gold/20 z-50"
+              >
+                <h3 className="text-xl font-semibold text-cream mb-4">Sell {(positionToSell as any).symbol}</h3>
+
+                <div className="space-y-4 mb-6">
+                  <div>
+                    <label className="text-sm text-cream/50 mb-2 block">Shares to Sell</label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setSellQty(Math.max(1, sellQty - 1))}
+                        className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      >
+                        <Minus className="w-4 h-4 text-cream" />
+                      </button>
+                      <input
+                        type="number"
+                        value={sellQty}
+                        onChange={(e) =>
+                          setSellQty(Math.min((positionToSell as any).qty, Math.max(1, parseInt(e.target.value) || 1)))
+                        }
+                        className="flex-1 h-10 bg-white/5 border border-white/10 rounded-lg text-center text-cream font-mono focus:outline-none focus:border-gold"
+                      />
+                      <button
+                        onClick={() => setSellQty(Math.min((positionToSell as any).qty, sellQty + 1))}
+                        className="w-10 h-10 flex items-center justify-center bg-white/5 rounded-lg"
+                      >
+                        <Plus className="w-4 h-4 text-cream" />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setSellQty((positionToSell as any).qty)}
+                      className="w-full mt-2 py-1 text-xs text-gold bg-gold/10 rounded-lg"
+                    >
+                      Sell All ({(positionToSell as any).qty} shares)
+                    </button>
+                  </div>
+
+                  <div className="p-3 bg-white/5 rounded-xl space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-cream/50">Avg Entry</span>
+                      <span className="text-cream font-mono">${Number((positionToSell as any).avgEntry ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-cream/50">Bid</span>
+                      <span className="text-cream font-mono">${Number.isFinite(bidPrice) ? bidPrice.toFixed(2) : '—'}</span>
+                    </div>
+                    <div className="flex justify-between pt-2 border-t border-white/10">
+                      <span className="text-cream/50">Est. P&amp;L</span>
+                      <span
+                        className={`font-semibold ${
+                          (bidPrice - Number((positionToSell as any).avgEntry ?? 0)) * sellQty >= 0 ? 'text-profit' : 'text-loss'
+                        }`}
+                      >
+                        {(bidPrice - Number((positionToSell as any).avgEntry ?? 0)) * sellQty >= 0 ? '+' : ''}
+                        ${((bidPrice - Number((positionToSell as any).avgEntry ?? 0)) * sellQty).toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowSellModal(false)}
+                    className="flex-1 py-3 bg-white/5 text-cream rounded-xl hover:bg-white/10"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleSell}
+                    className="flex-1 py-3 bg-loss text-white font-semibold rounded-xl hover:bg-loss/90"
+                  >
+                    Sell {sellQty} Shares
+                  </button>
+                </div>
+              </motion.div>
+            </>
+          )}
+        </AnimatePresence>
+
+        {/* Notification */}
+        <AnimatePresence>
+          {notification && (
+            <motion.div
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className={`fixed bottom-4 left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:w-auto px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 z-50 ${
+                notification.type === 'success' ? 'bg-profit text-void' : 'bg-loss text-white'
+              }`}
+            >
+              {notification.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+              <span className="font-medium text-sm sm:text-base">{notification.message}</span>
             </motion.div>
-          ) : null}
+          )}
         </AnimatePresence>
       </div>
     </KYCGate>

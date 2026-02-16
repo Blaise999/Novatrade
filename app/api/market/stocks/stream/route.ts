@@ -2,6 +2,8 @@
 import WebSocket from 'ws';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 function clampSymbols(raw: string) {
   return String(raw || '')
@@ -33,14 +35,19 @@ export async function GET(req: Request) {
   let closed = false;
   let ws: WebSocket | null = null;
   let hb: any = null;
+  let lastMsgAt = Date.now();
 
-  const stream = new ReadableStream({
+  const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const enc = new TextEncoder();
 
       const send = (obj: any) => {
         if (closed) return;
-        controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+        } catch {
+          // ignore
+        }
       };
 
       const cleanup = () => {
@@ -57,20 +64,36 @@ export async function GET(req: Request) {
         } catch {}
       };
 
-      // heartbeat keeps proxies alive
-      hb = setInterval(() => {
-        try {
-          controller.enqueue(enc.encode(`event: ping\ndata: {}\n\n`));
-        } catch {}
-      }, 15000);
+      // send a first status immediately (client will leave "connecting" sooner)
+      send({ type: 'status', state: 'connecting', feed, symbols });
 
-      ws = new WebSocket(wsUrl(feed), { handshakeTimeout: 8000, perMessageDeflate: false });
+      // keepalive (also gives client onmessage activity, not only "event: ping")
+      hb = setInterval(() => {
+        if (closed) return;
+        const now = Date.now();
+
+        // if no WS msgs for too long, mark down (helps you debug "stuck connecting")
+        if (now - lastMsgAt > 35_000) {
+          send({ type: 'status', state: 'down', error: 'No upstream data' });
+        }
+
+        send({ type: 'ping', ts: now });
+      }, 15_000);
+
+      ws = new WebSocket(wsUrl(feed), {
+        handshakeTimeout: 10_000,
+        perMessageDeflate: false,
+      });
 
       ws.on('open', () => {
-        ws?.send(JSON.stringify({ action: 'auth', key, secret }));
+        try {
+          ws?.send(JSON.stringify({ action: 'auth', key, secret }));
+        } catch {}
       });
 
       ws.on('message', (buf) => {
+        lastMsgAt = Date.now();
+
         try {
           const txt = buf.toString();
           const arr = JSON.parse(txt);
@@ -82,6 +105,13 @@ export async function GET(req: Request) {
               ws?.send(JSON.stringify({ action: 'subscribe', trades: symbols, quotes: symbols }));
               send({ type: 'status', state: 'live', feed, symbols });
               continue;
+            }
+
+            // auth error / generic error
+            if (m?.T === 'error') {
+              send({ type: 'status', state: 'down', error: String(m?.msg || 'WS error') });
+              cleanup();
+              return;
             }
 
             // quote (bid/ask)
@@ -108,7 +138,7 @@ export async function GET(req: Request) {
             }
           }
         } catch {
-          // ignore
+          // ignore parse errors
         }
       });
 
@@ -122,13 +152,13 @@ export async function GET(req: Request) {
         cleanup();
       });
 
-      // store cleanup for cancel()
+      // proper cancel hook
       (controller as any).__cleanup = cleanup;
     },
 
-    cancel() {
+    cancel(controller) {
       try {
-        (this as any).__cleanup?.();
+        (controller as any).__cleanup?.();
       } catch {}
     },
   });
