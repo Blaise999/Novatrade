@@ -600,17 +600,31 @@ function displayToOandaInstrument(display: string): string {
   return clean.replace(/\s+/g, '').split('/').join('_').split('-').join('_');
 }
 
-function getGatewayUrl(): string {
-  const envUrl = process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL;
-  if (envUrl) return envUrl;
+// ✅ FULL FIX: use NEXT_PUBLIC_MARKET_WS_URL (and NEVER default to :8787 in prod)
+function normalizeWsUrl(raw: string) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.startsWith('https://')) return 'wss://' + s.slice('https://'.length);
+  if (s.startsWith('http://')) return 'ws://' + s.slice('http://'.length);
+  return s;
+}
 
-  if (typeof window !== 'undefined') {
-    const host = window.location.hostname || 'localhost';
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    return `${proto}://${host}:8787`;
+function getGatewayUrl(): string {
+  // ✅ preferred
+  const envWs = process.env.NEXT_PUBLIC_MARKET_WS_URL;
+  if (envWs) return normalizeWsUrl(envWs);
+
+  // ✅ backward compatible (your older key)
+  const envOld = process.env.NEXT_PUBLIC_MARKET_GATEWAY_URL;
+  if (envOld) return normalizeWsUrl(envOld);
+
+  // ✅ ONLY allow localhost fallback in dev
+  if (typeof window !== 'undefined' && process.env.NODE_ENV === 'development') {
+    return 'ws://localhost:8787';
   }
 
-  return 'ws://localhost:8787';
+  // ✅ production: if not configured, disable WS (no more wss://your-site:8787)
+  return '';
 }
 
 type GatewayMsg =
@@ -851,8 +865,8 @@ export default function FXTradePage() {
         wickUpColor: '#22c55e',
         wickDownColor: '#f43f5e',
       });
-    } else if (typeof chart.addSeries === 'function' && lwc.CandlestickSeries) {
-      candleSeries = chart.addSeries(lwc.CandlestickSeries, {
+    } else if (typeof chart.addSeries === 'function' && (lwc as any).CandlestickSeries) {
+      candleSeries = chart.addSeries((lwc as any).CandlestickSeries, {
         upColor: '#22c55e',
         downColor: '#f43f5e',
         borderUpColor: '#22c55e',
@@ -1135,10 +1149,12 @@ export default function FXTradePage() {
   const connectWs = async () => {
     if (unmountedRef.current) return;
 
+    const url = getGatewayUrl();
+    if (!url) return; // ✅ prevents wss://www.novaatrade.com:8787 in prod
+
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
 
-    const url = getGatewayUrl();
     try {
       const ws = new WebSocket(url);
       wsRef.current = ws;
@@ -1218,6 +1234,11 @@ export default function FXTradePage() {
   // keep WS subscribed to selected pair
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
+    // ✅ if gateway not configured in prod, don't attempt WS at all
+    const gw = getGatewayUrl();
+    if (!gw) return;
+
     const inst = displayToOandaInstrument(asset); // EUR/USD -> EUR_USD
     subscribeInstrument(inst);
     void connectWs();
