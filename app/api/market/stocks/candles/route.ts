@@ -39,29 +39,43 @@ async function fetchJson(url: string, timeoutMs = 10000) {
 }
 
 function toTf(interval: string) {
-  // your page currently passes Twelve-like strings
-  switch ((interval || '').toLowerCase()) {
-    case '1min':
-      return '1Min';
-    case '5min':
-      return '5Min';
-    case '15min':
-      return '15Min';
-    case '1h':
-      return '1Hour';
-    case '4h':
-      return '4Hour';
-    case '1day':
-      return '1Day';
-    default:
-      return '15Min';
-  }
+  const x = String(interval || '').trim();
+  const t = x.toLowerCase();
+
+  // accept your UI, Twelve-ish, and Alpaca-ish
+  if (t === '1m' || t === '1min' || t === '1min') return '1Min';
+  if (t === '5m' || t === '5min') return '5Min';
+  if (t === '15m' || t === '15min') return '15Min';
+  if (t === '1h' || t === '1hour') return '1Hour';
+  if (t === '4h' || t === '4hour') return '4Hour';
+  if (t === '1d' || t === '1day') return '1Day';
+
+  // already alpaca style?
+  if (x === '1Min' || x === '5Min' || x === '15Min' || x === '1Hour' || x === '4Hour' || x === '1Day') return x;
+
+  return '15Min';
 }
 
-/**
- * Uses Alpaca Bars:
- * GET https://data.alpaca.markets/v2/stocks/bars?... :contentReference[oaicite:3]{index=3}
- */
+function normalizeBarTime(raw: any) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+
+  // "YYYY-MM-DD HH:mm:ss" -> ISO-like
+  s = s.includes(' ') ? s.replace(' ', 'T') : s;
+
+  // Trim fractional seconds to 3 digits (JS safe): .123456Z -> .123Z
+  s = s.replace(/\.(\d{3})\d+(Z|[+-]\d\d:\d\d)?$/, '.$1$2');
+
+  // Ensure timezone
+  if (!s.endsWith('Z') && !/[+-]\d\d:\d\d$/.test(s)) s += 'Z';
+
+  const ms = Date.parse(s);
+  if (!Number.isFinite(ms)) return '';
+
+  // Return clean ISO always ending with Z
+  return new Date(ms).toISOString();
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
 
@@ -72,7 +86,11 @@ export async function GET(req: Request) {
 
   if (!symbol) return NextResponse.json({ candles: [] }, { status: 200 });
 
-  const feed = (url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || '').trim();
+  // ✅ IMPORTANT: default to IEX unless you explicitly set SIP
+  const feed =
+    (url.searchParams.get('feed') ||
+      process.env.ALPACA_DATA_FEED ||
+      'iex').trim();
 
   const qs = new URLSearchParams({
     symbols: symbol,
@@ -101,15 +119,18 @@ export async function GET(req: Request) {
       [];
 
     const candles = arr
-      .map((b: any) => ({
-        time: String(b?.t || b?.time || ''),
-        open: Number(b?.o ?? b?.open ?? 0),
-        high: Number(b?.h ?? b?.high ?? 0),
-        low: Number(b?.l ?? b?.low ?? 0),
-        close: Number(b?.c ?? b?.close ?? 0),
-        volume: b?.v ?? b?.volume,
-      }))
-      .filter((c: any) => c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0);
+      .map((b: any) => {
+        const time = normalizeBarTime(b?.t ?? b?.time);
+        return {
+          time,
+          open: Number(b?.o ?? b?.open ?? 0),
+          high: Number(b?.h ?? b?.high ?? 0),
+          low: Number(b?.l ?? b?.low ?? 0),
+          close: Number(b?.c ?? b?.close ?? 0),
+          volume: b?.v ?? b?.volume,
+        };
+      })
+      .filter((c: any) => !!c.time && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0);
 
     const payload = { candles };
     CACHE.set(cacheKey, { ts: now, data: payload });
