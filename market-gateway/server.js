@@ -4,10 +4,18 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8787);
 
-// ===== Alpaca
-const ALPACA_KEY = process.env.ALPACA_API_KEY || "";
-const ALPACA_SECRET = process.env.ALPACA_API_SECRET || "";
-const ALPACA_FEED = (process.env.ALPACA_DATA_FEED || "iex").toLowerCase(); // iex | sip
+// ===== Alpaca (support BOTH env styles)
+const ALPACA_KEY =
+  process.env.ALPACA_API_KEY_ID ||
+  process.env.ALPACA_API_KEY ||
+  "";
+const ALPACA_SECRET =
+  process.env.ALPACA_API_SECRET_KEY ||
+  process.env.ALPACA_API_SECRET ||
+  "";
+const ALPACA_FEED = String(process.env.ALPACA_DATA_FEED || "iex")
+  .trim()
+  .toLowerCase(); // iex | sip
 
 // ===== OANDA
 const OANDA_TOKEN = process.env.OANDA_API_TOKEN || "";
@@ -15,43 +23,66 @@ const OANDA_ACCOUNT_ID = process.env.OANDA_ACCOUNT_ID || "";
 const OANDA_ENV = (process.env.OANDA_ENV || "practice").toLowerCase(); // practice | live
 
 const OANDA_STREAM_HOST =
-  OANDA_ENV === "live" ? "https://stream-fxtrade.oanda.com" : "https://stream-fxpractice.oanda.com";
+  OANDA_ENV === "live"
+    ? "https://stream-fxtrade.oanda.com"
+    : "https://stream-fxpractice.oanda.com";
 
 // ===== clients + subs
-const clients = new Map(); // ws -> { stocks:Set<string>, fx:Set<string> }
+// clients: Map<ws, { stocks:Set<string>, fx:Set<string> }>
+const clients = new Map();
+
 let desiredStocks = new Set();
 let desiredFx = new Set();
 
-const last = { stocks: new Map(), fx: new Map() };
+// last-known snapshots
+const last = {
+  trade: new Map(), // sym -> payload
+  quote: new Map(), // sym -> payload
+  fx: new Map(), // inst -> payload
+};
 
 function safeSend(ws, obj) {
-  try { ws.send(JSON.stringify(obj)); } catch {}
+  try {
+    ws.send(JSON.stringify(obj));
+  } catch {}
+}
+
+function broadcastToClients(filterFn, payload) {
+  for (const [ws, st] of clients.entries()) {
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    if (filterFn(st)) safeSend(ws, payload);
+  }
+}
+
+function broadcastStockTrade(sym, payload) {
+  last.trade.set(sym, payload);
+  broadcastToClients((st) => st.stocks.has(sym), payload);
+}
+
+function broadcastStockQuote(sym, payload) {
+  last.quote.set(sym, payload);
+  broadcastToClients((st) => st.stocks.has(sym), payload);
+}
+
+function broadcastFx(inst, payload) {
+  last.fx.set(inst, payload);
+  broadcastToClients((st) => st.fx.has(inst), payload);
 }
 
 function recomputeDesired() {
   const s = new Set();
   const f = new Set();
+
   for (const { stocks, fx } of clients.values()) {
     for (const x of stocks) s.add(x);
     for (const x of fx) f.add(x);
   }
+
   desiredStocks = s;
   desiredFx = f;
+
   syncAlpacaSubs();
   scheduleOandaRestart();
-}
-
-function broadcastStock(sym, payload) {
-  last.stocks.set(sym, payload);
-  for (const [ws, st] of clients.entries()) {
-    if (st.stocks.has(sym)) safeSend(ws, payload);
-  }
-}
-function broadcastFx(inst, payload) {
-  last.fx.set(inst, payload);
-  for (const [ws, st] of clients.entries()) {
-    if (st.fx.has(inst)) safeSend(ws, payload);
-  }
 }
 
 // =========================
@@ -72,22 +103,39 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", (ws) => {
   clients.set(ws, { stocks: new Set(), fx: new Set() });
 
-  safeSend(ws, { type: "hello", msg: "market-gateway", alpacaFeed: ALPACA_FEED, oandaEnv: OANDA_ENV });
+  safeSend(ws, {
+    type: "hello",
+    msg: "market-gateway",
+    alpacaFeed: ALPACA_FEED,
+    oandaEnv: OANDA_ENV,
+    alpacaConfigured: Boolean(ALPACA_KEY && ALPACA_SECRET),
+    oandaConfigured: Boolean(OANDA_TOKEN && OANDA_ACCOUNT_ID),
+  });
 
   ws.on("message", (buf) => {
     let msg;
-    try { msg = JSON.parse(String(buf || "")); } catch { return; }
+    try {
+      msg = JSON.parse(String(buf || ""));
+    } catch {
+      return;
+    }
 
     const state = clients.get(ws);
     if (!state) return;
 
     if (msg?.action === "subscribe") {
-      if (Array.isArray(msg.stocks)) msg.stocks.forEach((x) => state.stocks.add(String(x).toUpperCase()));
-      if (Array.isArray(msg.fx)) msg.fx.forEach((x) => state.fx.add(String(x).toUpperCase()));
+      if (Array.isArray(msg.stocks)) {
+        msg.stocks.forEach((x) => state.stocks.add(String(x).toUpperCase()));
+      }
+      if (Array.isArray(msg.fx)) {
+        msg.fx.forEach((x) => state.fx.add(String(x).toUpperCase()));
+      }
 
-      // instant last-known
+      // ✅ instant last-known
       for (const sym of state.stocks) {
-        const t = last.stocks.get(sym);
+        const q = last.quote.get(sym);
+        const t = last.trade.get(sym);
+        if (q) safeSend(ws, q);
         if (t) safeSend(ws, t);
       }
       for (const inst of state.fx) {
@@ -96,14 +144,41 @@ wss.on("connection", (ws) => {
       }
 
       recomputeDesired();
-      safeSend(ws, { type: "subscribed", stocks: Array.from(state.stocks), fx: Array.from(state.fx) });
+
+      safeSend(ws, {
+        type: "subscribed",
+        stocks: Array.from(state.stocks),
+        fx: Array.from(state.fx),
+      });
+
+      // status hint
+      safeSend(ws, {
+        type: "status",
+        market: "stocks",
+        state: alpacaAuthed ? "live" : (ALPACA_KEY && ALPACA_SECRET ? "connecting" : "down"),
+        ts: Date.now(),
+      });
+
+      return;
     }
 
     if (msg?.action === "unsubscribe") {
-      if (Array.isArray(msg.stocks)) msg.stocks.forEach((x) => state.stocks.delete(String(x).toUpperCase()));
-      if (Array.isArray(msg.fx)) msg.fx.forEach((x) => state.fx.delete(String(x).toUpperCase()));
+      if (Array.isArray(msg.stocks)) {
+        msg.stocks.forEach((x) => state.stocks.delete(String(x).toUpperCase()));
+      }
+      if (Array.isArray(msg.fx)) {
+        msg.fx.forEach((x) => state.fx.delete(String(x).toUpperCase()));
+      }
+
       recomputeDesired();
-      safeSend(ws, { type: "subscribed", stocks: Array.from(state.stocks), fx: Array.from(state.fx) });
+
+      safeSend(ws, {
+        type: "subscribed",
+        stocks: Array.from(state.stocks),
+        fx: Array.from(state.fx),
+      });
+
+      return;
     }
   });
 
@@ -120,24 +195,30 @@ let alpacaWs = null;
 let alpacaAuthed = false;
 
 function alpacaUrl() {
-  // IEX: wss://stream.data.alpaca.markets/v2/iex  (SIP: /v2/sip) :contentReference[oaicite:0]{index=0}
-  return `wss://stream.data.alpaca.markets/v2/${ALPACA_FEED}`;
+  const feed = ALPACA_FEED === "sip" ? "sip" : "iex";
+  return `wss://stream.data.alpaca.markets/v2/${feed}`;
 }
 
 function connectAlpaca() {
-  if (!ALPACA_KEY || !ALPACA_SECRET) return;
+  if (!ALPACA_KEY || !ALPACA_SECRET) {
+    console.log("⚠️ Missing Alpaca keys; stocks live disabled");
+    return;
+  }
 
   alpacaWs = new WebSocket(alpacaUrl());
   alpacaAuthed = false;
 
   alpacaWs.on("open", () => {
-    // auth format :contentReference[oaicite:1]{index=1}
     alpacaWs.send(JSON.stringify({ action: "auth", key: ALPACA_KEY, secret: ALPACA_SECRET }));
   });
 
   alpacaWs.on("message", (buf) => {
     let arr;
-    try { arr = JSON.parse(String(buf || "[]")); } catch { return; }
+    try {
+      arr = JSON.parse(String(buf || "[]"));
+    } catch {
+      return;
+    }
     if (!Array.isArray(arr)) arr = [arr];
 
     for (const e of arr) {
@@ -147,6 +228,13 @@ function connectAlpaca() {
         if (m.includes("authenticated")) {
           alpacaAuthed = true;
           syncAlpacaSubs();
+
+          broadcastToClients(() => true, {
+            type: "status",
+            market: "stocks",
+            state: "live",
+            ts: Date.now(),
+          });
         }
         continue;
       }
@@ -156,9 +244,27 @@ function connectAlpaca() {
         const sym = String(e.S).toUpperCase();
         const price = Number(e.p);
         const ts = Date.parse(String(e.t || "")) || Date.now();
-        if (Number.isFinite(price)) {
-          broadcastStock(sym, { type: "stock_tick", symbol: sym, price, ts });
+        if (Number.isFinite(price) && price > 0) {
+          broadcastStockTrade(sym, { type: "trade", symbol: sym, price, ts });
         }
+        continue;
+      }
+
+      // Quote tick: T:"q", S:"AAPL", bp:..., ap:..., t:"ISO"
+      if (e?.T === "q" && e?.S) {
+        const sym = String(e.S).toUpperCase();
+        const bid = Number(e.bp);
+        const ask = Number(e.ap);
+        const ts = Date.parse(String(e.t || "")) || Date.now();
+
+        broadcastStockQuote(sym, {
+          type: "quote",
+          symbol: sym,
+          bid: Number.isFinite(bid) && bid > 0 ? bid : 0,
+          ask: Number.isFinite(ask) && ask > 0 ? ask : 0,
+          ts,
+        });
+        continue;
       }
     }
   });
@@ -166,6 +272,14 @@ function connectAlpaca() {
   alpacaWs.on("close", () => {
     alpacaWs = null;
     alpacaAuthed = false;
+
+    broadcastToClients(() => true, {
+      type: "status",
+      market: "stocks",
+      state: "down",
+      ts: Date.now(),
+    });
+
     setTimeout(connectAlpaca, 1500);
   });
 
@@ -173,9 +287,9 @@ function connectAlpaca() {
 }
 
 function syncAlpacaSubs() {
-  if (!alpacaWs || alpacaWs.readyState !== 1 || !alpacaAuthed) return;
+  if (!alpacaWs || alpacaWs.readyState !== WebSocket.OPEN || !alpacaAuthed) return;
   const syms = Array.from(desiredStocks);
-  alpacaWs.send(JSON.stringify({ action: "subscribe", trades: syms }));
+  alpacaWs.send(JSON.stringify({ action: "subscribe", trades: syms, quotes: syms }));
 }
 
 // =========================
@@ -217,7 +331,6 @@ async function restartOandaStream() {
     return;
   }
 
-  // OANDA stream returns JSON lines; max ~4 updates/sec per instrument :contentReference[oaicite:2]{index=2}
   const reader = res.body.getReader();
   let buf = "";
 
@@ -241,6 +354,7 @@ async function restartOandaStream() {
         const bid = Number(j?.bids?.[0]?.price);
         const ask = Number(j?.asks?.[0]?.price);
         const ts = Date.parse(String(j?.time || "")) || Date.now();
+
         const mid =
           Number.isFinite(bid) && Number.isFinite(ask) ? (bid + ask) / 2 :
           Number.isFinite(bid) ? bid :
