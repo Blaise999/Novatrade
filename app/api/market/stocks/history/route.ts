@@ -1,410 +1,172 @@
-/**
- * STOCK CANDLES API - FINNHUB TICKS TO OHLC
- * ==========================================
- * 
- * Fetches stock candle data from Finnhub API.
- * Supports standard candle endpoint with proper OHLC validation.
- * 
- * Query params:
- * - symbol: Stock ticker (e.g., AAPL, NVDA)
- * - tf/resolution: timeframe (1m, 5m, 15m, 1h, 4h, 1D)
- * - from/to: Unix timestamps (optional)
- * - limit: number of candles (default 300)
- */
+// app/api/market/stocks/history/route.ts
+import { NextRequest, NextResponse } from 'next/server';
 
-import { NextRequest, NextResponse } from "next/server";
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+type CacheEntry = { ts: number; data: any };
+const g = globalThis as any;
+g.__ALPACA_STOCK_HISTORY_CACHE ||= new Map<string, CacheEntry>();
+const CACHE: Map<string, CacheEntry> = g.__ALPACA_STOCK_HISTORY_CACHE;
 
-const FINNHUB_BASE = "https://finnhub.io/api/v1";
+const TTL_MS = 12_000;
 
-const DEBUG = process.env.DEBUG_MARKET === "1";
-
-function log(...args: any[]) {
-  if (DEBUG) console.log("[Stock/history]", ...args);
+function n(v: any, fallback = 0) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : fallback;
 }
 
-// ============================================
-// TIMEFRAME UTILITIES
-// ============================================
-
-function tfToResolution(tf: string): string {
-  const t = String(tf || "").trim().toLowerCase();
-  switch (t) {
-    case "1m": return "1";
-    case "5m": return "5";
-    case "15m": return "15";
-    case "30m": return "30";
-    case "1h": return "60";
-    case "4h": return "240";
-    case "1d": case "d": return "D";
-    case "1w": case "w": return "W";
-    case "1mo": case "m": return "M";
-    default: return t;
-  }
-}
-
-function secondsPerCandle(resolution: string): number {
-  switch (resolution) {
-    case "1": return 60;
-    case "5": return 300;
-    case "15": return 900;
-    case "30": return 1800;
-    case "60": return 3600;
-    case "240": return 14400;
-    case "D": return 86400;
-    case "W": return 604800;
-    case "M": return 2592000;
-    default: return 900;
-  }
-}
-
-function getDefaultRange(resolution: string): { from: number; to: number } {
-  const now = Math.floor(Date.now() / 1000);
-
-  // Intraday: last 7 days
-  if (["1", "5", "15", "30", "60", "240"].includes(resolution)) {
-    return { from: now - 60 * 60 * 24 * 7, to: now };
-  }
-
-  // Daily/Weekly/Monthly: last 365 days
-  return { from: now - 60 * 60 * 24 * 365, to: now };
-}
-
-// ============================================
-// CANDLE TYPE
-// ============================================
-
-type RawCandle = {
-  t: number;    // Unix timestamp (seconds)
-  o: number;    // Open
-  h: number;    // High
-  l: number;    // Low
-  c: number;    // Close
-  v: number;    // Volume
-};
-
-// ============================================
-// TICK TYPE & AGGREGATION
-// ============================================
-
-type Tick = {
-  p: number;    // Price
-  t: number;    // Timestamp (ms)
-  v: number;    // Volume
-  c?: string[]; // Conditions
-};
-
-function aggregateTicksToOHLC(
-  ticks: Tick[],
-  intervalSeconds: number,
-  limit: number = 300
-): RawCandle[] {
-  if (!ticks.length) return [];
-
-  // Sort ticks by time
-  const sorted = [...ticks].sort((a, b) => a.t - b.t);
-
-  const intervalMs = intervalSeconds * 1000;
-  const candles: Map<number, RawCandle> = new Map();
-
-  for (const tick of sorted) {
-    // Floor to interval boundary
-    const candleTimeMs = Math.floor(tick.t / intervalMs) * intervalMs;
-    const candleTimeSec = Math.floor(candleTimeMs / 1000);
-
-    const existing = candles.get(candleTimeSec);
-
-    if (existing) {
-      // Update existing candle
-      existing.h = Math.max(existing.h, tick.p);
-      existing.l = Math.min(existing.l, tick.p);
-      existing.c = tick.p;
-      existing.v += tick.v || 0;
-    } else {
-      // Create new candle
-      candles.set(candleTimeSec, {
-        t: candleTimeSec,
-        o: tick.p,
-        h: tick.p,
-        l: tick.p,
-        c: tick.p,
-        v: tick.v || 0,
-      });
-    }
-  }
-
-  // Convert to array, sort, and take last N
-  return Array.from(candles.values())
-    .sort((a, b) => a.t - b.t)
-    .slice(-limit);
-}
-
-// ============================================
-// FINNHUB CANDLE FETCHER
-// ============================================
-
-async function fetchFinnhubCandles(
-  symbol: string,
-  resolution: string,
-  from: number,
-  to: number,
-  apiKey: string
-): Promise<{ data: any; error: string | null; status: number }> {
-  const url = new URL(`${FINNHUB_BASE}/stock/candle`);
-  url.searchParams.set("symbol", symbol.toUpperCase());
-  url.searchParams.set("resolution", resolution);
-  url.searchParams.set("from", String(from));
-  url.searchParams.set("to", String(to));
-
-  const headers = new Headers({
-    accept: "application/json",
-    "X-Finnhub-Token": apiKey,
-  });
-
-  log("Fetching candles:", { symbol, resolution, from, to });
-
-  try {
-    const res = await fetch(url.toString(), { headers, cache: "no-store" });
-    const text = await res.text();
-
-    let json: any = null;
-    try { json = JSON.parse(text); } catch { json = null; }
-
-    if (!res.ok) {
-      log("Upstream error:", { status: res.status, body: text?.slice(0, 200) });
-      return { data: null, error: json?.error || `Error ${res.status}`, status: res.status };
-    }
-
-    // Finnhub returns { s: "ok"|"no_data", c, h, l, o, t, v }
-    if (json?.s === "no_data" || !json?.t?.length) {
-      log("No data returned");
-      return { data: { s: "no_data", t: [], o: [], h: [], l: [], c: [], v: [] }, error: null, status: 200 };
-    }
-
-    return { data: json, error: null, status: 200 };
-
-  } catch (err: any) {
-    log("Fetch error:", err?.message);
-    return { data: null, error: err?.message || "Network error", status: 500 };
-  }
-}
-
-// ============================================
-// FINNHUB TICK FETCHER (for building custom OHLC)
-// ============================================
-
-async function fetchFinnhubTicks(
-  symbol: string,
-  from: number,
-  to: number,
-  apiKey: string
-): Promise<{ ticks: Tick[] | null; error: string | null }> {
-  // Finnhub stock trades endpoint
-  const url = new URL(`${FINNHUB_BASE}/stock/tick`);
-  url.searchParams.set("symbol", symbol.toUpperCase());
-  url.searchParams.set("date", new Date(to * 1000).toISOString().split("T")[0]); // YYYY-MM-DD
-
-  const headers = new Headers({
-    accept: "application/json",
-    "X-Finnhub-Token": apiKey,
-  });
-
-  log("Fetching ticks:", { symbol, date: new Date(to * 1000).toISOString().split("T")[0] });
-
-  try {
-    const res = await fetch(url.toString(), { headers, cache: "no-store" });
-    const text = await res.text();
-
-    let json: any = null;
-    try { json = JSON.parse(text); } catch { json = null; }
-
-    if (!res.ok) {
-      return { ticks: null, error: json?.error || `Error ${res.status}` };
-    }
-
-    // Finnhub returns: { data: [ { p, t, v, c } ], ... }
-    const data = Array.isArray(json?.data) ? json.data : [];
-
-    const ticks: Tick[] = data
-      .map((t: any) => ({
-        p: Number(t.p ?? 0),
-        t: Number(t.t ?? 0),
-        v: Number(t.v ?? 0),
-        c: t.c,
-      }))
-      .filter((t: Tick) => t.p > 0 && t.t > 0);
-
-    log("Parsed ticks:", { count: ticks.length });
-    return { ticks, error: null };
-
-  } catch (err: any) {
-    return { ticks: null, error: err?.message || "Network error" };
-  }
-}
-
-// ============================================
-// VALIDATE & FIX OHLC
-// ============================================
-
-function validateOHLC(candle: RawCandle): RawCandle {
-  const prices = [candle.o, candle.h, candle.l, candle.c].filter(Number.isFinite);
-  if (prices.length === 0) {
-    return { ...candle, o: 0, h: 0, l: 0, c: 0 };
-  }
-
+function alpacaHeaders() {
+  const key = process.env.ALPACA_API_KEY_ID;
+  const secret = process.env.ALPACA_API_SECRET_KEY;
+  if (!key || !secret) throw new Error('Missing Alpaca env keys');
   return {
-    t: candle.t,
-    o: candle.o,
-    h: Math.max(...prices),
-    l: Math.min(...prices),
-    c: candle.c,
-    v: candle.v,
-  };
+    accept: 'application/json',
+    'APCA-API-KEY-ID': key,
+    'APCA-API-SECRET-KEY': secret,
+  } as Record<string, string>;
 }
 
-// ============================================
-// MAIN HANDLER
-// ============================================
+async function fetchJson(url: string, timeoutMs = 12_000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: alpacaHeaders(), signal: ac.signal, cache: 'no-store' });
+    const text = await res.text();
+    if (!res.ok) {
+      const err: any = new Error(text || `HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function toTf(interval: string) {
+  const tf = (interval || '').toLowerCase();
+
+  if (tf === '1m' || tf === '1min' || tf === '1minute') return '1Min';
+  if (tf === '5m' || tf === '5min' || tf === '5minute') return '5Min';
+  if (tf === '15m' || tf === '15min' || tf === '15minute') return '15Min';
+  if (tf === '1h' || tf === '1hour') return '1Hour';
+  if (tf === '4h' || tf === '4hour') return '4Hour';
+  if (tf === '1d' || tf === '1day' || tf === 'day' || tf === '1D') return '1Day';
+
+  // also accept Alpaca already-formatted values
+  if (['1Min', '5Min', '15Min', '1Hour', '4Hour', '1Day'].includes(interval)) return interval;
+
+  return '15Min';
+}
+
+function tfSeconds(tf: string) {
+  switch (tf) {
+    case '1Min':
+      return 60;
+    case '5Min':
+      return 300;
+    case '15Min':
+      return 900;
+    case '1Hour':
+      return 3600;
+    case '4Hour':
+      return 14400;
+    case '1Day':
+      return 86400;
+    default:
+      return 900;
+  }
+}
+
+function normalizeUnixSec(x: number) {
+  // if user accidentally sends ms, convert -> sec
+  if (!Number.isFinite(x) || x <= 0) return 0;
+  if (x > 1_000_000_000_000) return Math.floor(x / 1000);
+  return Math.floor(x);
+}
+
+function defaultRange(tf: string, limit: number) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sec = tfSeconds(tf);
+
+  // buffer 2x so we still get enough bars even if market closed for some of the period
+  const span = sec * limit * 2;
+
+  // cap to ~2 years just to avoid insane ranges
+  const maxSpan = 86400 * 730;
+  const fromSec = Math.max(nowSec - Math.min(span, maxSpan), 1);
+
+  return { fromSec, toSec: nowSec };
+}
 
 export async function GET(req: NextRequest) {
-  const started = Date.now();
+  const url = new URL(req.url);
+
+  const symbol = String(url.searchParams.get('symbol') || '').trim().toUpperCase();
+  if (!symbol) return NextResponse.json({ candles: [] }, { status: 200 });
+
+  const tfParam = String(url.searchParams.get('tf') || url.searchParams.get('resolution') || '15m');
+  const tf = toTf(tfParam);
+
+  const limitRaw = Number(url.searchParams.get('limit') || 300);
+  const limit = Number.isFinite(limitRaw) ? Math.max(10, Math.min(500, Math.floor(limitRaw))) : 300;
+
+  const fromQ = normalizeUnixSec(Number(url.searchParams.get('from')));
+  const toQ = normalizeUnixSec(Number(url.searchParams.get('to')));
+
+  const { fromSec, toSec } =
+    fromQ > 0 && toQ > fromQ ? { fromSec: fromQ, toSec: toQ } : defaultRange(tf, limit);
+
+  // ✅ default feed to iex so it works on free plans
+  const feed = String(url.searchParams.get('feed') || process.env.ALPACA_DATA_FEED || 'iex').trim();
+
+  const qs = new URLSearchParams({
+    symbols: symbol,
+    timeframe: tf,
+    limit: String(limit),
+    feed,
+    start: new Date(fromSec * 1000).toISOString(),
+    end: new Date(toSec * 1000).toISOString(),
+  });
+
+  const upstream = `https://data.alpaca.markets/v2/stocks/bars?${qs.toString()}`;
+  const cacheKey = `history:${qs.toString()}`;
+
+  const cached = CACHE.get(cacheKey);
+  const now = Date.now();
+  if (cached && now - cached.ts < TTL_MS) {
+    return NextResponse.json(cached.data, { status: 200 });
+  }
 
   try {
-    const apiKey = process.env.FINNHUB_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "Missing FINNHUB_API_KEY", s: "error" },
-        { status: 500, headers: { "content-type": "application/json" } }
-      );
+    const json = await fetchJson(upstream);
+
+    // Alpaca bars: { bars: { AAPL: [ {t,o,h,l,c,v}, ... ] } }
+    const arr: any[] =
+      (json?.bars && json?.bars?.[symbol] && Array.isArray(json.bars[symbol]) && json.bars[symbol]) || [];
+
+    const candles = arr
+      .map((b: any) => ({
+        time: String(b?.t || b?.time || ''),
+        open: n(b?.o ?? b?.open, 0),
+        high: n(b?.h ?? b?.high, 0),
+        low: n(b?.l ?? b?.low, 0),
+        close: n(b?.c ?? b?.close, 0),
+        volume: b?.v ?? b?.volume,
+      }))
+      .filter((c: any) => c.time && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0);
+
+    const payload = { candles };
+    CACHE.set(cacheKey, { ts: now, data: payload });
+    return NextResponse.json(payload, { status: 200 });
+  } catch (e: any) {
+    // serve stale cache if we have it
+    if (cached?.data) {
+      return NextResponse.json(cached.data, { status: 200, headers: { 'x-stale': '1' } });
     }
-
-    const { searchParams } = new URL(req.url);
-
-    const symbol = (searchParams.get("symbol") || "AAPL").toUpperCase();
-    const tfParam = searchParams.get("tf") || searchParams.get("resolution") || "15m";
-    const resolution = tfToResolution(tfParam);
-
-    // Whether to use tick aggregation
-    const useTicks = searchParams.get("ticks") === "1";
-    const limit = Math.min(500, Math.max(10, Number(searchParams.get("limit") || 300)));
-
-    // Time range
-    const fromQ = Number(searchParams.get("from"));
-    const toQ = Number(searchParams.get("to"));
-
-    const { from, to } =
-      Number.isFinite(fromQ) && Number.isFinite(toQ) && fromQ > 0 && toQ > fromQ
-        ? { from: Math.floor(fromQ), to: Math.floor(toQ) }
-        : getDefaultRange(resolution);
-
-    log("Request:", { symbol, resolution, from, to, useTicks, limit });
-
-    let responseData: any;
-
-    if (useTicks && ["1", "5"].includes(resolution)) {
-      // Try tick aggregation for small timeframes
-      const { ticks, error: tickError } = await fetchFinnhubTicks(symbol, from, to, apiKey);
-
-      if (tickError || !ticks || ticks.length === 0) {
-        log("Tick fetch failed, falling back to candles");
-        const { data, error, status } = await fetchFinnhubCandles(symbol, resolution, from, to, apiKey);
-        
-        if (error) {
-          return new Response(JSON.stringify({ error, s: "error" }), {
-            status,
-            headers: { "content-type": "application/json", "cache-control": "no-store" },
-          });
-        }
-        
-        responseData = data;
-      } else {
-        // Aggregate ticks to OHLC
-        const candles = aggregateTicksToOHLC(ticks, secondsPerCandle(resolution), limit);
-        
-        // Convert to Finnhub format
-        responseData = {
-          s: candles.length > 0 ? "ok" : "no_data",
-          t: candles.map(c => c.t),
-          o: candles.map(c => c.o),
-          h: candles.map(c => c.h),
-          l: candles.map(c => c.l),
-          c: candles.map(c => c.c),
-          v: candles.map(c => c.v),
-        };
-        
-        log("Aggregated ticks:", { tickCount: ticks.length, candleCount: candles.length });
-      }
-    } else {
-      // Standard candle fetch
-      const { data, error, status } = await fetchFinnhubCandles(symbol, resolution, from, to, apiKey);
-      
-      if (error) {
-        return new Response(JSON.stringify({ error, s: "error" }), {
-          status,
-          headers: { "content-type": "application/json", "cache-control": "no-store" },
-        });
-      }
-      
-      responseData = data;
-    }
-
-    // Validate OHLC data
-    if (responseData?.s === "ok" && Array.isArray(responseData.t)) {
-      const tArr = responseData.t;
-      const oArr = responseData.o || [];
-      const hArr = responseData.h || [];
-      const lArr = responseData.l || [];
-      const cArr = responseData.c || [];
-      const vArr = responseData.v || [];
-
-      const validatedCandles: RawCandle[] = [];
-
-      for (let i = 0; i < tArr.length; i++) {
-        const candle = validateOHLC({
-          t: Number(tArr[i]),
-          o: Number(oArr[i]),
-          h: Number(hArr[i]),
-          l: Number(lArr[i]),
-          c: Number(cArr[i]),
-          v: Number(vArr[i] || 0),
-        });
-
-        if (candle.t > 0) {
-          validatedCandles.push(candle);
-        }
-      }
-
-      // Take only the last `limit` candles
-      const finalCandles = validatedCandles.slice(-limit);
-
-      responseData = {
-        s: finalCandles.length > 0 ? "ok" : "no_data",
-        t: finalCandles.map(c => c.t),
-        o: finalCandles.map(c => c.o),
-        h: finalCandles.map(c => c.h),
-        l: finalCandles.map(c => c.l),
-        c: finalCandles.map(c => c.c),
-        v: finalCandles.map(c => c.v),
-      };
-    }
-
-    log("Response:", { status: responseData?.s, count: responseData?.t?.length, tookMs: Date.now() - started });
-
-    return new Response(JSON.stringify(responseData), {
-      status: 200,
-      headers: {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-      },
-    });
-
-  } catch (err: any) {
-    log("Exception:", err?.message);
-    return new Response(JSON.stringify({ error: err?.message || "Server error", s: "error" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    const status = Number(e?.status) || 500;
+    return NextResponse.json({ error: String(e?.message || 'Market data error'), candles: [] }, { status });
   }
 }
