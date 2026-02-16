@@ -1,7 +1,7 @@
 // app/dashboard/stocks/page.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ChevronDown,
@@ -459,7 +459,13 @@ export default function StockTradingPage() {
 
             if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
 
-            const pctRaw = q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? q?.changePercent24h ?? q?.changePercent24h ?? undefined;
+            const pctRaw =
+              q?.percent_change ??
+              q?.change_percent ??
+              q?.percentChange ??
+              q?.changePercent24h ??
+              q?.changePercent24h ??
+              undefined;
             const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
 
             next[key] = {
@@ -611,7 +617,12 @@ export default function StockTradingPage() {
             if (prevClose && !prevCloseRef.current[key]) prevCloseRef.current[key] = prevClose;
 
             const pctRaw =
-              q?.percent_change ?? q?.change_percent ?? q?.percentChange ?? q?.changePercent24h ?? q?.changePercent24h ?? undefined;
+              q?.percent_change ??
+              q?.change_percent ??
+              q?.percentChange ??
+              q?.changePercent24h ??
+              q?.changePercent24h ??
+              undefined;
             const pct = Number.isFinite(n(pctRaw, NaN)) ? n(pctRaw, 0) : deriveChangePercent(price, prevClose);
 
             next[key] = {
@@ -811,40 +822,40 @@ export default function StockTradingPage() {
     };
   }, [selectedSymbol, chartTimeframe, live?.price, selectedAsset?.price]);
 
-  // ---- Chart sizing
+  // ---- Chart sizing (FIXED: rAF + no-loop + layout-safe)
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartDimensions, setChartDimensions] = useState({ width: 320, height: 280 });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = chartRef.current;
     if (!el) return;
 
-    const update = () => {
-      const r = el.getBoundingClientRect();
-      setChartDimensions({
-        width: Math.max(280, Math.floor(r.width || 320)),
-        height: Math.max(240, Math.floor(r.height || 280)),
+    let raf = 0;
+    let ro: ResizeObserver | null = null;
+
+    const measure = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const w = Math.max(280, Math.floor(el.clientWidth || 320));
+        const h = Math.max(240, Math.floor(el.clientHeight || 280));
+        setChartDimensions((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
       });
     };
 
-    update();
-    const t1 = window.setTimeout(update, 50);
-    const t2 = window.setTimeout(update, 200);
+    measure();
 
-    let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(() => update());
+      ro = new ResizeObserver(measure);
       ro.observe(el);
     }
 
-    window.addEventListener('resize', update);
-    window.addEventListener('orientationchange', update);
+    window.addEventListener('resize', measure);
+    window.addEventListener('orientationchange', measure);
 
     return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('orientationchange', update);
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('orientationchange', measure);
       ro?.disconnect();
     };
   }, [mobileTab]);
@@ -972,7 +983,6 @@ export default function StockTradingPage() {
               amount: pos.qty * safeAsk,
               entryPrice: pos.avgEntry ?? safeAsk,
               leverage: 1,
-          
               openedAt: new Date().toISOString(),
               notes: JSON.stringify({ model: 'spot_hold', name: pos.name }),
             }).catch(() => {});
@@ -1028,7 +1038,6 @@ export default function StockTradingPage() {
               side: 'buy',
               quantity: still.qty,
               entryPrice: still.avgEntry ?? 0,
-      
               notes: JSON.stringify({ model: 'spot_hold', partial: true }),
             }).catch(() => {});
           } else {
@@ -1088,7 +1097,16 @@ export default function StockTradingPage() {
 
   return (
     <KYCGate action="trade stocks">
-      <div className="h-[calc(100vh-4rem)] lg:h-[calc(100vh-5rem)] flex flex-col bg-void overflow-hidden">
+      {/* FIX: dvh + min-h-0 chain stops the “endless void” */}
+      <div
+        className="
+          h-[calc(100vh-4rem)]
+          lg:h-[calc(100vh-5rem)]
+          supports-[height:100dvh]:h-[calc(100dvh-4rem)]
+          lg:supports-[height:100dvh]:h-[calc(100dvh-5rem)]
+          flex flex-col bg-void overflow-hidden min-h-0 overscroll-none
+        "
+      >
         {/* top header */}
         <div className="px-4 lg:px-6 pt-4 lg:pt-6 pb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -1128,7 +1146,11 @@ export default function StockTradingPage() {
               className="h-10 w-10 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 transition flex items-center justify-center"
               title="Favorite"
             >
-              {favorites.includes(selectedSymbol) ? <Star className="h-5 w-5 text-amber-300" /> : <StarOff className="h-5 w-5 text-white/70" />}
+              {favorites.includes(selectedSymbol) ? (
+                <Star className="h-5 w-5 text-amber-300" />
+              ) : (
+                <StarOff className="h-5 w-5 text-white/70" />
+              )}
             </button>
 
             <button
@@ -1204,9 +1226,7 @@ export default function StockTradingPage() {
                     );
                   })}
 
-                  {!filteredAssets.length ? (
-                    <div className="p-4 text-sm text-white/60">No results.</div>
-                  ) : null}
+                  {!filteredAssets.length ? <div className="p-4 text-sm text-white/60">No results.</div> : null}
                 </div>
               </div>
             </motion.div>
@@ -1216,11 +1236,11 @@ export default function StockTradingPage() {
         {mobileTabs}
 
         {/* content */}
-        <div className="flex-1 px-4 lg:px-6 pb-5 overflow-hidden">
-          <div className="h-full grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 overflow-hidden">
+        <div className="flex-1 px-4 lg:px-6 pb-5 overflow-hidden min-h-0">
+          <div className="h-full grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-6 overflow-hidden min-h-0">
             {/* CHART */}
-            <div className={`lg:col-span-8 ${mobileTab !== 'chart' ? 'hidden lg:block' : ''} overflow-hidden`}>
-              <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col">
+            <div className={`lg:col-span-8 ${mobileTab !== 'chart' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
+              <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
                 <div className="p-3 border-b border-white/10 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <div className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
@@ -1229,8 +1249,7 @@ export default function StockTradingPage() {
                     <div>
                       <div className="text-white text-sm font-semibold">Price chart</div>
                       <div className="text-xs text-white/50">
-                        {info.sector} • Updated{' '}
-                        {candlesUpdatedAt ? new Date(candlesUpdatedAt).toLocaleTimeString() : '—'}
+                        {info.sector} • Updated {candlesUpdatedAt ? new Date(candlesUpdatedAt).toLocaleTimeString() : '—'}
                       </div>
                     </div>
                   </div>
@@ -1284,7 +1303,8 @@ export default function StockTradingPage() {
                   </div>
                 </div>
 
-                <div ref={chartRef} className="flex-1 p-3">
+                {/* IMPORTANT: min-h-0 keeps SVG from “growing forever” */}
+                <div ref={chartRef} className="flex-1 p-3 min-h-0">
                   <div className="h-full rounded-2xl bg-black/20 border border-white/5 overflow-hidden relative">
                     {loadingChart ? (
                       <div className="absolute inset-0 flex items-center justify-center text-white/60 text-sm">
@@ -1336,15 +1356,7 @@ export default function StockTradingPage() {
 
                             return (
                               <g key={i} opacity="0.9">
-                                <line
-                                  x1={it.x}
-                                  y1={it.hY}
-                                  x2={it.x}
-                                  y2={it.lY}
-                                  stroke="white"
-                                  strokeWidth="1"
-                                  opacity="0.55"
-                                />
+                                <line x1={it.x} y1={it.hY} x2={it.x} y2={it.lY} stroke="white" strokeWidth="1" opacity="0.55" />
                                 <rect
                                   x={it.x - it.bodyW / 2}
                                   y={top}
@@ -1374,11 +1386,11 @@ export default function StockTradingPage() {
             </div>
 
             {/* RIGHT COLUMN */}
-            <div className={`lg:col-span-4 ${mobileTab === 'chart' ? 'hidden lg:block' : ''} overflow-hidden`}>
-              <div className="h-full grid grid-rows-2 gap-4 lg:gap-6 overflow-hidden">
+            <div className={`lg:col-span-4 ${mobileTab === 'chart' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
+              <div className="h-full grid grid-rows-2 gap-4 lg:gap-6 overflow-hidden min-h-0">
                 {/* TRADE */}
-                <div className={`${mobileTab !== 'trade' ? 'hidden lg:block' : ''} overflow-hidden`}>
-                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col">
+                <div className={`${mobileTab !== 'trade' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
+                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
                     <div className="p-3 border-b border-white/10 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <div className="h-9 w-9 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center">
@@ -1396,7 +1408,7 @@ export default function StockTradingPage() {
                       </div>
                     </div>
 
-                    <div className="p-3 space-y-3">
+                    <div className="p-3 space-y-3 overflow-auto min-h-0">
                       <div className="grid grid-cols-2 gap-2 rounded-xl bg-white/5 border border-white/10 p-1">
                         <button
                           onClick={() => setOrderMode('shares')}
@@ -1497,9 +1509,7 @@ export default function StockTradingPage() {
                         onClick={handleBuy}
                         disabled={!canBuy}
                         className={`w-full h-11 rounded-xl font-semibold transition ${
-                          canBuy
-                            ? 'bg-white text-black hover:opacity-90 active:scale-[0.99]'
-                            : 'bg-white/10 text-white/40 cursor-not-allowed'
+                          canBuy ? 'bg-white text-black hover:opacity-90 active:scale-[0.99]' : 'bg-white/10 text-white/40 cursor-not-allowed'
                         }`}
                       >
                         Buy {selectedSymbol}
@@ -1513,8 +1523,8 @@ export default function StockTradingPage() {
                 </div>
 
                 {/* PORTFOLIO */}
-                <div className={`${mobileTab !== 'portfolio' ? 'hidden lg:block' : ''} overflow-hidden`}>
-                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col">
+                <div className={`${mobileTab !== 'portfolio' ? 'hidden lg:block' : ''} overflow-hidden min-h-0`}>
+                  <div className="h-full rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col min-h-0">
                     <div className="p-3 border-b border-white/10 flex items-center justify-between">
                       <div>
                         <div className="text-white text-sm font-semibold">Portfolio</div>
@@ -1533,7 +1543,8 @@ export default function StockTradingPage() {
                       </div>
                     </div>
 
-                    <div className="flex-1 overflow-auto">
+                    {/* CRITICAL: min-h-0 so this becomes a REAL scroll area */}
+                    <div className="flex-1 overflow-auto min-h-0">
                       {(stockPositions || []).length ? (
                         (stockPositions || []).map((p: any) => {
                           const sym = String(p?.symbol || '').toUpperCase();
@@ -1546,10 +1557,7 @@ export default function StockTradingPage() {
                           const uplPct = avg > 0 ? ((cur - avg) / avg) * 100 : 0;
 
                           return (
-                            <div
-                              key={p?.id || sym}
-                              className="px-4 py-3 border-b border-white/5 flex items-center justify-between gap-3"
-                            >
+                            <div key={p?.id || sym} className="px-4 py-3 border-b border-white/5 flex items-center justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2">
                                   <div className="text-white font-semibold">{sym}</div>
@@ -1580,15 +1588,11 @@ export default function StockTradingPage() {
                           );
                         })
                       ) : (
-                        <div className="p-6 text-sm text-white/60">
-                          No stock positions yet. Buy a stock to see it here.
-                        </div>
+                        <div className="p-6 text-sm text-white/60">No stock positions yet. Buy a stock to see it here.</div>
                       )}
                     </div>
 
-                    <div className="p-3 border-t border-white/10 text-xs text-white/50">
-                      Tip: add favorites so your quotes list stays hot.
-                    </div>
+                    <div className="p-3 border-t border-white/10 text-xs text-white/50">Tip: add favorites so your quotes list stays hot.</div>
                   </div>
                 </div>
               </div>
@@ -1607,9 +1611,7 @@ export default function StockTradingPage() {
             >
               <div
                 className={`max-w-[92vw] rounded-2xl px-4 py-3 border shadow-lg backdrop-blur-md ${
-                  notification.type === 'success'
-                    ? 'bg-emerald-500/10 border-emerald-400/20'
-                    : 'bg-rose-500/10 border-rose-400/20'
+                  notification.type === 'success' ? 'bg-emerald-500/10 border-emerald-400/20' : 'bg-rose-500/10 border-rose-400/20'
                 }`}
               >
                 <div className="flex items-center gap-2">
@@ -1688,7 +1690,15 @@ export default function StockTradingPage() {
 
                       <input
                         value={sellQty}
-                        onChange={(e) => setSellQty(clampInt(n(e.target.value, 1), 1, clampInt(n((positionToSell as any).qty, 1), 1, 1_000_000)))}
+                        onChange={(e) =>
+                          setSellQty(
+                            clampInt(
+                              n(e.target.value, 1),
+                              1,
+                              clampInt(n((positionToSell as any).qty, 1), 1, 1_000_000)
+                            )
+                          )
+                        }
                         className="flex-1 h-10 rounded-xl bg-black/20 border border-white/10 px-3 outline-none text-white"
                         inputMode="numeric"
                       />
@@ -1718,9 +1728,7 @@ export default function StockTradingPage() {
                     Confirm sell
                   </button>
 
-                  <div className="text-xs text-white/50">
-                    This will reduce (or close) your position and sync trade history.
-                  </div>
+                  <div className="text-xs text-white/50">This will reduce (or close) your position and sync trade history.</div>
                 </div>
               </motion.div>
             </motion.div>
