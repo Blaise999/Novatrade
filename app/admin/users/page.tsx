@@ -53,6 +53,8 @@ interface UserData {
 
   created_at: string;
   last_login_at?: string;
+
+  deposit_address?: string;  // NEW: Added for per-user deposit address
 }
 
 const mockUsers: UserData[] = [
@@ -161,6 +163,11 @@ export default function AdminUsersPage() {
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [editingAddressValue, setEditingAddressValue] = useState('');
 
+  // NEW: States for editing per-user deposit address in detail modal
+  const [editingDepositAddress, setEditingDepositAddress] = useState(false);
+  const [newDepositAddress, setNewDepositAddress] = useState('');
+  const [depositNote, setDepositNote] = useState('');
+
   // ✅ keep token in sessionStorage so navigation/refresh doesn't drop it
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -256,6 +263,9 @@ export default function AdminUsersPage() {
 
   const openDetailModal = (u: UserData) => {
     setSelectedUser(u);
+    setEditingDepositAddress(false);  // NEW: Reset editing state
+    setNewDepositAddress(u.deposit_address || '');  // NEW: Set initial value
+    setDepositNote('');  // NEW: Reset note
     setShowUserDetailModal(true);
   };
 
@@ -556,6 +566,7 @@ export default function AdminUsersPage() {
                 <th className="text-right p-4">Deposited</th>
                 <th className="text-center p-4">Role</th>
                 <th className="text-center p-4">KYC</th>
+                <th className="text-center p-4">Deposit Address</th>  {/* NEW: Added column header */}
                 <th className="text-center p-4">Status</th>
                 <th className="text-center p-4">Actions</th>
               </tr>
@@ -564,14 +575,14 @@ export default function AdminUsersPage() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400">
+                  <td colSpan={9} className="p-8 text-center text-slate-400">  {/* NEW: Updated colSpan to 9 */}
                     <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
                     Loading users...
                   </td>
                 </tr>
               ) : filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400">
+                  <td colSpan={9} className="p-8 text-center text-slate-400">  {/* NEW: Updated colSpan to 9 */}
                     No users found
                   </td>
                 </tr>
@@ -641,6 +652,13 @@ export default function AdminUsersPage() {
                           }`}
                         >
                           {kyc.toUpperCase()}
+                        </span>
+                      </td>
+
+                      {/* NEW: Added column for deposit address */}
+                      <td className="p-4 text-center">
+                        <span className="text-sm font-mono text-cream">
+                          {user.deposit_address ? `${user.deposit_address.slice(0, 6)}...${user.deposit_address.slice(-4)}` : 'None'}
                         </span>
                       </td>
 
@@ -766,6 +784,85 @@ export default function AdminUsersPage() {
                   <p><span className="text-slate-400">Status:</span> {selectedUser.is_active ? 'active' : 'frozen'}</p>
                   <p><span className="text-slate-400">Created:</span> {selectedUser.created_at}</p>
                   <p><span className="text-slate-400">Last login:</span> {selectedUser.last_login_at ?? '—'}</p>
+                </div>
+
+                {/* NEW: Added section for deposit address in modal */}
+                <div className="p-3 bg-white/5 rounded-xl">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs text-slate-400">Deposit Address</p>
+                    {!editingDepositAddress ? (
+                      <button
+                        onClick={() => setEditingDepositAddress(true)}
+                        className="p-1.5 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
+                        title="Edit Deposit Address"
+                      >
+                        <Edit className="w-4 h-4" />
+                      </button>
+                    ) : (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={async () => {
+                            if (!newDepositAddress.trim()) {
+                              setNotification({ type: 'error', message: 'Invalid address' });
+                              return;
+                            }
+                            setProcessing(true);
+                            try {
+                              await apiFetch(`/api/admin/users/${selectedUser.id}/deposit-address`, {
+                                method: 'POST',
+                                body: JSON.stringify({ newAddress: newDepositAddress, note: depositNote }),
+                              });
+                              setNotification({ type: 'success', message: 'Deposit address updated successfully' });
+                              await loadUsers();
+                              setSelectedUser({ ...selectedUser, deposit_address: newDepositAddress });
+                              setEditingDepositAddress(false);
+                            } catch (e: any) {
+                              setNotification({ type: 'error', message: e.message || 'Failed to update address' });
+                            } finally {
+                              setProcessing(false);
+                            }
+                          }}
+                          className="p-1.5 bg-profit/20 text-profit rounded-lg hover:bg-profit/30"
+                          title="Save"
+                        >
+                          <Save className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setEditingDepositAddress(false);
+                            setNewDepositAddress(selectedUser.deposit_address || '');
+                            setDepositNote('');
+                          }}
+                          className="p-1.5 bg-loss/20 text-loss rounded-lg hover:bg-loss/30"
+                          title="Cancel"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  {!editingDepositAddress ? (
+                    <p className="text-sm text-cream font-mono">
+                      {selectedUser.deposit_address || 'Not set'}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      <input
+                        type="text"
+                        value={newDepositAddress}
+                        onChange={(e) => setNewDepositAddress(e.target.value)}
+                        placeholder="Enter new wallet address"
+                        className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                      />
+                      <input
+                        type="text"
+                        value={depositNote}
+                        onChange={(e) => setDepositNote(e.target.value)}
+                        placeholder="Reason for change (optional)"
+                        className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 {(kycLabel(selectedUser.kyc_status) === 'pending' ||

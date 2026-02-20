@@ -11,6 +11,9 @@ import {
   Search,
   RefreshCw,
   Eye,
+  Edit,
+  Save,
+  X,
 } from 'lucide-react';
 import { useAdminAuthStore } from '@/lib/admin-store';
 
@@ -38,6 +41,7 @@ interface Deposit {
     last_name: string;
     tier_level: number;
     balance_available: number;
+    deposit_address?: string;  // NEW: Added for per-user deposit address
   };
 }
 
@@ -145,6 +149,11 @@ export default function AdminDepositsPage() {
   const [rejectReason, setRejectReason] = useState('');
   const [showDetailModal, setShowDetailModal] = useState<Deposit | null>(null);
 
+  // NEW: States for editing per-user deposit address in detail modal
+  const [editingDepositAddress, setEditingDepositAddress] = useState(false);
+  const [newDepositAddress, setNewDepositAddress] = useState('');
+  const [depositNote, setDepositNote] = useState('');
+
   const loadDeposits = useCallback(async () => {
     if (!token) return; // avoid spam while token hydrates
 
@@ -219,6 +228,40 @@ export default function AdminDepositsPage() {
       }
     } catch (e: any) {
       setMessage(e?.message || 'Failed to reject');
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  // NEW: Function to update user's deposit address
+  async function handleUpdateDepositAddress(userId: string) {
+    if (!newDepositAddress.trim()) {
+      setMessage('Invalid address');
+      return;
+    }
+    setActionLoading(true);
+    setMessage('');
+
+    try {
+      await apiFetch(`/api/admin/users/${userId}/deposit-address`, {
+        method: 'POST',
+        body: JSON.stringify({ newAddress: newDepositAddress, note: depositNote }),
+      });
+      setMessage('Deposit address updated successfully');
+      setEditingDepositAddress(false);
+      // Update local state for the modal
+      if (showDetailModal) {
+        setShowDetailModal({
+          ...showDetailModal,
+          users: {
+            ...showDetailModal.users!,
+            deposit_address: newDepositAddress,
+          },
+        });
+      }
+      await loadDeposits();  // Refresh list if needed
+    } catch (e: any) {
+      setMessage(e.message || 'Failed to update address');
     } finally {
       setActionLoading(false);
     }
@@ -584,6 +627,71 @@ export default function AdminDepositsPage() {
                       alt="Proof"
                       className="max-w-full rounded-xl border border-white/10"
                     />
+                  </div>
+                )}
+                {/* NEW: Section for user's deposit address */}
+                {showDetailModal.users && (
+                  <div className="p-3 bg-white/5 rounded-xl">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-slate-400">User Deposit Address</p>
+                      {!editingDepositAddress ? (
+                        <button
+                          onClick={() => {
+                            setEditingDepositAddress(true);
+                            setNewDepositAddress(showDetailModal.users?.deposit_address || '');
+                            setDepositNote('');
+                          }}
+                          className="p-1.5 bg-gold/10 text-gold rounded-lg hover:bg-gold/20 transition-all"
+                          title="Edit Deposit Address"
+                        >
+                          <Edit className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleUpdateDepositAddress(showDetailModal.user_id)}
+                            disabled={actionLoading}
+                            className="p-1.5 bg-profit/20 text-profit rounded-lg hover:bg-profit/30"
+                            title="Save"
+                          >
+                            <Save className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              setEditingDepositAddress(false);
+                              setNewDepositAddress('');
+                              setDepositNote('');
+                            }}
+                            className="p-1.5 bg-loss/20 text-loss rounded-lg hover:bg-loss/30"
+                            title="Cancel"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {!editingDepositAddress ? (
+                      <p className="text-sm text-cream font-mono">
+                        {showDetailModal.users.deposit_address || 'Not set'}
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        <input
+                          type="text"
+                          value={newDepositAddress}
+                          onChange={(e) => setNewDepositAddress(e.target.value)}
+                          placeholder="Enter new wallet address"
+                          className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                        />
+                        <input
+                          type="text"
+                          value={depositNote}
+                          onChange={(e) => setDepositNote(e.target.value)}
+                          placeholder="Reason for change (optional)"
+                          className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
                 {(showDetailModal.rejection_reason || showDetailModal.note) && (
