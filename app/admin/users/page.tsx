@@ -159,6 +159,7 @@ export default function AdminUsersPage() {
     address: '',
     memo: '',
   });
+  const [selectedWalletType, setSelectedWalletType] = useState(''); // NEW: For preset wallet types in add form
 
   const [editingAddressId, setEditingAddressId] = useState<string | null>(null);
   const [editingAddressValue, setEditingAddressValue] = useState('');
@@ -395,6 +396,27 @@ export default function AdminUsersPage() {
     });
 
     setNewAddress({ currency: '', network: '', address: '', memo: '' });
+    setSelectedWalletType(''); // Reset preset
+  };
+
+  // NEW: Preset wallet types for easy addition/editing
+  const walletPresets = [
+    { label: 'BTC (Bitcoin)', currency: 'BTC', network: 'BTC' },
+    { label: 'USDT (TRC20)', currency: 'USDT', network: 'TRC20' },
+    { label: 'ETH (Ethereum)', currency: 'ETH', network: 'ERC20' },
+    // Add more presets as needed, e.g., { label: 'USDT (ERC20)', currency: 'USDT', network: 'ERC20' },
+  ];
+
+  const handlePresetChange = (value: string) => {
+    const preset = walletPresets.find(p => p.label === value);
+    if (preset) {
+      setNewAddress({
+        ...newAddress,
+        currency: preset.currency,
+        network: preset.network,
+      });
+    }
+    setSelectedWalletType(value);
   };
 
   const copyToClipboard = (text: string) => {
@@ -1183,27 +1205,42 @@ export default function AdminUsersPage() {
                 </div>
               </div>
 
-              <div className="mt-5 grid grid-cols-1 md:grid-cols-4 gap-3">
+              {/* Add New Address Form with Presets */}
+              <div className="mt-5 space-y-3">
+                <label className="block text-sm text-slate-400">Select Wallet Type (Preset)</label>
+                <select
+                  value={selectedWalletType}
+                  onChange={(e) => handlePresetChange(e.target.value)}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream focus:outline-none focus:border-gold"
+                >
+                  <option value="">Custom</option>
+                  {walletPresets.map((preset) => (
+                    <option key={preset.label} value={preset.label}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+
                 <input
                   className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold uppercase"
-                  placeholder="Currency (BTC)"
+                  placeholder="Currency (e.g., BTC)"
                   value={newAddress.currency}
-                  onChange={(e) => setNewAddress((p) => ({ ...p, currency: e.target.value }))}
+                  onChange={(e) => setNewAddress((p) => ({ ...p, currency: e.target.value.toUpperCase() }))}
                 />
                 <input
                   className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
-                  placeholder="Network (TRC20)"
+                  placeholder="Network (e.g., TRC20)"
                   value={newAddress.network}
                   onChange={(e) => setNewAddress((p) => ({ ...p, network: e.target.value }))}
                 />
                 <input
-                  className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold font-mono md:col-span-2"
+                  className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold font-mono"
                   placeholder="Wallet address"
                   value={newAddress.address}
                   onChange={(e) => setNewAddress((p) => ({ ...p, address: e.target.value }))}
                 />
                 <input
-                  className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold md:col-span-3"
+                  className="px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-cream placeholder:text-slate-500 focus:outline-none focus:border-gold"
                   placeholder="Memo (optional)"
                   value={newAddress.memo}
                   onChange={(e) => setNewAddress((p) => ({ ...p, memo: e.target.value }))}
@@ -1211,9 +1248,9 @@ export default function AdminUsersPage() {
                 <button
                   onClick={handleAddNewAddress}
                   disabled={!newAddress.currency || !newAddress.network || !newAddress.address}
-                  className="px-4 py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
+                  className="w-full py-3 bg-gold text-void font-semibold rounded-xl hover:bg-gold/90 transition-all disabled:opacity-50"
                 >
-                  Add
+                  Add New Wallet
                 </button>
               </div>
             </motion.div>
