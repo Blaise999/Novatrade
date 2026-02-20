@@ -13,8 +13,11 @@ import {
   Wallet,
   CreditCard,
   Crown,
+  Edit,
+  Save,
+  X,
 } from 'lucide-react';
-import { QRCodeSVG } from 'qrcode.react'; // Add for QR code
+import { QRCodeSVG } from 'qrcode.react'; // For QR code
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useDepositSettingsStore } from '@/lib/deposit-settings';
 
@@ -33,7 +36,11 @@ function DepositContent() {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [tierLevel, setTierLevel] = useState<number | null>(null);
-  const [depositAddress, setDepositAddress] = useState<string | null>(null); // NEW: For per-user deposit address
+  const [depositAddress, setDepositAddress] = useState<string | null>(null);
+  const [depositNetwork, setDepositNetwork] = useState<string | null>(null); // NEW: For network
+  const [editingPersonal, setEditingPersonal] = useState(false); // NEW: Edit mode for personal
+  const [newDepositNetwork, setNewDepositNetwork] = useState(''); // NEW: Temp for edit
+  const [newDepositAddress, setNewDepositAddress] = useState(''); // NEW: Temp for edit
   const [loading, setLoading] = useState(true);
 
   const enabledWallets = getEnabledCryptoWallets?.() || cryptoWallets?.filter((w: any) => w.enabled) || [];
@@ -41,23 +48,23 @@ function DepositContent() {
   // NEW: Compute all wallets, including personal if available
   const allWallets = useMemo(() => {
     const wallets = [...enabledWallets];
-    if (depositAddress) {
+    if (depositAddress && depositNetwork) {
       wallets.unshift({
         id: 'personal',
-        symbol: 'USDT',
+        symbol: 'USDT', // Assume USDT, adjust if needed
         name: 'Personal Deposit Wallet',
-        network: 'TRC20',
+        network: depositNetwork,
         address: depositAddress,
         enabled: true,
-        minDeposit: 0, // Defaults if CryptoWallet type requires
+        minDeposit: 0,
         confirmations: 0,
         icon: '',
       });
     }
     return wallets;
-  }, [enabledWallets, depositAddress]);
+  }, [enabledWallets, depositAddress, depositNetwork]);
 
-  // Check tier and fetch deposit_address
+  // Check tier and fetch deposit_address + deposit_network
   useEffect(() => {
     if (!user?.id) return;
     const checkTier = async () => {
@@ -66,12 +73,13 @@ function DepositContent() {
         if (!isSupabaseConfigured()) { setTierLevel(1); setLoading(false); return; }
         const { data } = await supabase
           .from('users')
-          .select('tier_level, tier_active, deposit_address')
+          .select('tier_level, tier_active, deposit_address, deposit_network')
           .eq('id', user.id)
           .maybeSingle();
         const tl = Number(data?.tier_level ?? 0);
         setTierLevel(tl);
-        setDepositAddress(data?.deposit_address ?? null); // NEW: Fetch personal address
+        setDepositAddress(data?.deposit_address ?? null);
+        setDepositNetwork(data?.deposit_network ?? null);
         if (tl === 0) router.replace('/dashboard/tier');
       } catch {
         setTierLevel(0);
@@ -89,6 +97,29 @@ function DepositContent() {
     } catch {}
   }
 
+  async function handleSavePersonalAddress() {
+    if (!user?.id || !newDepositAddress.trim() || !newDepositNetwork) {
+      setError('Invalid address or network');
+      return;
+    }
+    setIsSubmitting(true);
+    try {
+      const { supabase } = await import('@/lib/supabase/client');
+      const { error: dbError } = await supabase
+        .from('users')
+        .update({ deposit_address: newDepositAddress, deposit_network: newDepositNetwork })
+        .eq('id', user.id);
+      if (dbError) throw dbError;
+      setDepositAddress(newDepositAddress);
+      setDepositNetwork(newDepositNetwork);
+      setEditingPersonal(false);
+    } catch (err) {
+      setError('Failed to update address');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
   async function handleSubmit() {
     if (!user?.id) return;
     const amt = parseFloat(amount);
@@ -101,7 +132,7 @@ function DepositContent() {
     setError('');
 
     try {
-      const walletObj = allWallets.find((w: any) => w.id === selectedWallet || w.symbol === selectedWallet); // Use allWallets
+      const walletObj = allWallets.find((w: any) => w.id === selectedWallet || w.symbol === selectedWallet);
 
       const res = await fetch('/api/deposits', {
         method: 'POST',
@@ -143,6 +174,14 @@ function DepositContent() {
       </div>
     );
   }
+
+  // NEW: Wallet presets for user edit
+  const walletPresets = [
+    { label: 'BTC (Bitcoin)', network: 'BTC' },
+    { label: 'USDT (TRC20)', network: 'TRC20' },
+    { label: 'ETH (Ethereum)', network: 'ERC20' },
+    // Add more
+  ];
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -263,7 +302,7 @@ function DepositContent() {
                 <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
                   Select Payment Method
                 </h3>
-                {allWallets.length > 0 ? ( // Use allWallets
+                {allWallets.length > 0 ? (
                   <div className="space-y-2">
                     {allWallets.map((w: any) => (
                       <button
