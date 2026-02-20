@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense, useMemo } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
@@ -14,6 +14,7 @@ import {
   CreditCard,
   Crown,
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react'; // Add for QR code
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useDepositSettingsStore } from '@/lib/deposit-settings';
 
@@ -32,11 +33,31 @@ function DepositContent() {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [tierLevel, setTierLevel] = useState<number | null>(null);
+  const [depositAddress, setDepositAddress] = useState<string | null>(null); // NEW: For per-user deposit address
   const [loading, setLoading] = useState(true);
 
   const enabledWallets = getEnabledCryptoWallets?.() || cryptoWallets?.filter((w: any) => w.enabled) || [];
 
-  // Check tier
+  // NEW: Compute all wallets, including personal if available
+  const allWallets = useMemo(() => {
+    const wallets = [...enabledWallets];
+    if (depositAddress) {
+      wallets.unshift({
+        id: 'personal',
+        symbol: 'USDT',
+        name: 'Personal Deposit Wallet',
+        network: 'TRC20',
+        address: depositAddress,
+        enabled: true,
+        minDeposit: 0, // Defaults if CryptoWallet type requires
+        confirmations: 0,
+        icon: '',
+      });
+    }
+    return wallets;
+  }, [enabledWallets, depositAddress]);
+
+  // Check tier and fetch deposit_address
   useEffect(() => {
     if (!user?.id) return;
     const checkTier = async () => {
@@ -45,11 +66,12 @@ function DepositContent() {
         if (!isSupabaseConfigured()) { setTierLevel(1); setLoading(false); return; }
         const { data } = await supabase
           .from('users')
-          .select('tier_level, tier_active')
+          .select('tier_level, tier_active, deposit_address')
           .eq('id', user.id)
           .maybeSingle();
         const tl = Number(data?.tier_level ?? 0);
         setTierLevel(tl);
+        setDepositAddress(data?.deposit_address ?? null); // NEW: Fetch personal address
         if (tl === 0) router.replace('/dashboard/tier');
       } catch {
         setTierLevel(0);
@@ -79,7 +101,7 @@ function DepositContent() {
     setError('');
 
     try {
-      const walletObj = enabledWallets.find((w: any) => w.id === selectedWallet || w.symbol === selectedWallet);
+      const walletObj = allWallets.find((w: any) => w.id === selectedWallet || w.symbol === selectedWallet); // Use allWallets
 
       const res = await fetch('/api/deposits', {
         method: 'POST',
@@ -241,9 +263,9 @@ function DepositContent() {
                 <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">
                   Select Payment Method
                 </h3>
-                {enabledWallets.length > 0 ? (
+                {allWallets.length > 0 ? ( // Use allWallets
                   <div className="space-y-2">
-                    {enabledWallets.map((w: any) => (
+                    {allWallets.map((w: any) => (
                       <button
                         key={w.id || w.symbol}
                         onClick={() => {
@@ -305,7 +327,7 @@ function DepositContent() {
                 </h3>
 
                 {(() => {
-                  const wallet = enabledWallets.find(
+                  const wallet = allWallets.find(
                     (w: any) => (w.id || w.symbol) === selectedWallet
                   );
                   if (wallet?.address) {
@@ -323,20 +345,32 @@ function DepositContent() {
 
                         <div className="bg-white/5 rounded-xl p-4">
                           <p className="text-xs text-slate-500 mb-2">To this address:</p>
-                          <div className="flex items-center gap-2">
-                            <code className="flex-1 text-sm text-gold break-all font-mono bg-void/50 p-2 rounded-lg">
-                              {wallet.address}
-                            </code>
-                            <button
-                              onClick={() => handleCopyAddress(wallet.address)}
-                              className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
-                            >
-                              {copied ? (
-                                <CheckCircle className="w-4 h-4 text-profit" />
-                              ) : (
-                                <Copy className="w-4 h-4 text-slate-400" />
-                              )}
-                            </button>
+                          <div className="flex flex-col items-center gap-4">
+                            <div className="p-2 bg-white rounded-lg">
+                              <QRCodeSVG
+                                value={wallet.address}
+                                size={128}
+                                bgColor="transparent"
+                                fgColor="#F4F4F5"
+                                level="H"
+                                includeMargin={false}
+                              />
+                            </div>
+                            <div className="flex items-center gap-2 w-full">
+                              <code className="flex-1 text-sm text-gold break-all font-mono bg-void/50 p-2 rounded-lg">
+                                {wallet.address}
+                              </code>
+                              <button
+                                onClick={() => handleCopyAddress(wallet.address)}
+                                className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors"
+                              >
+                                {copied ? (
+                                  <CheckCircle className="w-4 h-4 text-profit" />
+                                ) : (
+                                  <Copy className="w-4 h-4 text-slate-400" />
+                                )}
+                              </button>
+                            </div>
                           </div>
                         </div>
 
