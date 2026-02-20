@@ -21,6 +21,7 @@
     "lucide-react": "^0.344.0",
     "merkletreejs": "^0.6.0",
     "next": "^14.1.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.4.0",

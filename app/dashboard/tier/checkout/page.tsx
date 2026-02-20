@@ -14,7 +14,7 @@ import {
   Wallet,
   CreditCard,
 } from 'lucide-react';
-import QRCode from 'qrcode.react'; // NEW: Import for QR code generation
+import { QRCodeSVG } from 'qrcode.react'; // FIXED: Changed to named import { QRCodeSVG }
 import { useStore } from '@/lib/supabase/store-supabase';
 import { useDepositSettingsStore } from '@/lib/deposit-settings';
 
@@ -95,6 +95,9 @@ function CheckoutContent() {
         network: 'TRC20',
         address: depositAddress,
         enabled: true,
+        minDeposit: 0, // FIX: Add missing properties with defaults
+        confirmations: 0, // FIX: Add missing properties with defaults
+        icon: '', // FIX: Add missing properties with defaults (e.g., empty string or a default icon path)
       });
     }
     return wallets;
@@ -350,7 +353,7 @@ function CheckoutContent() {
                         <div className="flex flex-col items-center gap-4">
                           {/* NEW: QR Code */}
                           <div className="p-2 bg-white rounded-lg">
-                            <QRCode
+                            <QRCodeSVG // FIXED: Changed component to QRCodeSVG
                               value={wallet.address}
                               size={128}
                               bgColor="transparent"
